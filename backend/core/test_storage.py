@@ -181,6 +181,28 @@ class NeonStorageContractTests(SimpleTestCase):
             ["text/plain", "text/plain"],
         )
 
+    def test_collision_retry_preserves_max_length_without_overwriting(self):
+        original_name = "documents/longreport.txt"
+        max_length = len(original_name)
+        self.client.objects[("test-bucket", original_name)] = b"existing"
+        with patch.object(self.storage, "exists", side_effect=[False, True, False]):
+            saved_name = self.storage.save(
+                original_name,
+                ContentFile(b"replacement"),
+                max_length=max_length,
+            )
+
+        self.assertEqual(self.client.put_calls[0]["Key"], original_name)
+        self.assertEqual(len(self.client.put_calls), 2)
+        self.assertNotEqual(saved_name, original_name)
+        self.assertLessEqual(len(saved_name), max_length)
+        self.assertEqual(
+            self.client.objects[("test-bucket", original_name)], b"existing"
+        )
+        self.assertEqual(
+            self.client.objects[("test-bucket", saved_name)], b"replacement"
+        )
+
     def test_default_save_contract_does_not_overwrite(self):
         first_name = self.storage.save("same.txt", ContentFile(b"first"))
         second_name = self.storage.save("same.txt", ContentFile(b"second"))

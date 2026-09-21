@@ -133,7 +133,22 @@ class NeonStorage(Storage):
         stored_file.size = response["ContentLength"]
         return stored_file
 
-    def _save(self, name, content):
+    def save(self, name, content, max_length=None):
+        if name is None:
+            name = content.name
+
+        if not hasattr(content, "chunks"):
+            content = File(content, name)
+
+        validate_file_name(name, allow_relative_path=True)
+        name = self.get_available_name(name, max_length=max_length)
+        validate_file_name(name, allow_relative_path=True)
+
+        name = self._save(name, content, max_length=max_length)
+        validate_file_name(name, allow_relative_path=True)
+        return name
+
+    def _save(self, name, content, max_length=None):
         name = self._validated_name(name)
         # Storage.save() checks for an available name before calling _save(), but
         # that check and the upload are not atomic. Buffer once so a conditional
@@ -160,7 +175,7 @@ class NeonStorage(Storage):
                 except ClientError as exc:
                     if not self._is_precondition_failure(exc):
                         raise
-                    name = self.get_available_name(name)
+                    name = self.get_available_name(name, max_length=max_length)
                     continue
                 return name
 

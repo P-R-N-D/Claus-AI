@@ -7,9 +7,8 @@ from config.database import database_config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY",
-    "dev-only-placeholder-secret-key-change-before-production",
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or (
+    "dev-only-placeholder-secret-key-change-before-production"
 )
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"

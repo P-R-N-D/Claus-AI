@@ -23,7 +23,7 @@ def _decode_url_component(value: str, label: str) -> str:
 
 def database_config(database_url: str | None, sqlite_name) -> dict[str, object]:
     """Build Django's default database configuration from the environment."""
-    if database_url is None:
+    if database_url is None or not database_url.strip():
         return {"ENGINE": "django.db.backends.sqlite3", "NAME": sqlite_name}
 
     try:

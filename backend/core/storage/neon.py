@@ -120,8 +120,8 @@ class NeonStorage(Storage):
         }
 
     def _open(self, name, mode="rb"):
-        if mode not in {"r", "rb"}:
-            raise ValueError("NeonStorage only supports reading objects.")
+        if mode != "rb":
+            raise ValueError("NeonStorage only supports binary reads with mode 'rb'.")
         name = self._validated_name(name)
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=name)
@@ -129,13 +129,20 @@ class NeonStorage(Storage):
             if self._is_missing(exc):
                 raise FileNotFoundError(name) from exc
             raise
-        return File(response["Body"], name=name)
+        stored_file = File(response["Body"], name=name)
+        stored_file.size = response["ContentLength"]
+        return stored_file
 
     def _save(self, name, content):
         name = self._validated_name(name)
         # Storage.save() checks for an available name before calling _save(), but
         # that check and the upload are not atomic. Buffer once so a conditional
         # request can safely be retried under a newly allocated name.
+        content_type = getattr(content, "content_type", None)
+        put_options = {}
+        if isinstance(content_type, str) and content_type:
+            put_options["ContentType"] = content_type
+
         with SpooledTemporaryFile(max_size=5 * 1024 * 1024) as buffered_content:
             for chunk in content.chunks():
                 buffered_content.write(chunk)
@@ -148,6 +155,7 @@ class NeonStorage(Storage):
                         Key=name,
                         Body=buffered_content,
                         IfNoneMatch="*",
+                        **put_options,
                     )
                 except ClientError as exc:
                     if not self._is_precondition_failure(exc):

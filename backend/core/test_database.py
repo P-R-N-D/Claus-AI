@@ -1,19 +1,47 @@
+import importlib
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase
 
 from config.database import database_config
+from config import settings as project_settings
+
+
+DEVELOPMENT_SECRET_KEY = "dev-only-placeholder-secret-key-change-before-production"
 
 
 class DatabaseConfigTests(SimpleTestCase):
     def test_missing_url_uses_sqlite(self):
         sqlite_name = Path("/tmp/claus.sqlite3")
 
-        config = database_config(None, sqlite_name)
+        for database_url in (None, "", " "):
+            with self.subTest(database_url=database_url):
+                config = database_config(database_url, sqlite_name)
 
-        self.assertEqual(config["ENGINE"], "django.db.backends.sqlite3")
-        self.assertEqual(config["NAME"], sqlite_name)
+                self.assertEqual(config["ENGINE"], "django.db.backends.sqlite3")
+                self.assertEqual(config["NAME"], sqlite_name)
+
+    def test_secret_key_uses_placeholder_for_missing_or_empty_environment(self):
+        try:
+            for environment in ({}, {"DJANGO_SECRET_KEY": ""}):
+                with self.subTest(environment=environment):
+                    with patch.dict(os.environ, environment, clear=True):
+                        settings_module = importlib.reload(project_settings)
+                        self.assertEqual(
+                            settings_module.SECRET_KEY,
+                            DEVELOPMENT_SECRET_KEY,
+                        )
+
+            with patch.dict(
+                os.environ, {"DJANGO_SECRET_KEY": "configured-secret"}, clear=True
+            ):
+                settings_module = importlib.reload(project_settings)
+                self.assertEqual(settings_module.SECRET_KEY, "configured-secret")
+        finally:
+            importlib.reload(project_settings)
 
     def test_postgresql_url_is_parsed_and_query_is_preserved(self):
         config = database_config(

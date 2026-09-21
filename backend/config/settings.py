@@ -3,6 +3,8 @@
 from pathlib import Path
 import os
 
+from config.database import database_config
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.environ.get(
@@ -60,10 +62,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
-    }
+    "default": database_config(os.environ.get("DATABASE_URL"), BASE_DIR / "db.sqlite3")
 }
 
 LANGUAGE_CODE = "en-us"
@@ -73,6 +72,13 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+STORAGES = {
+    "default": {"BACKEND": "core.storage.neon.NeonStorage"},
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
+    },
+}
 
 CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",

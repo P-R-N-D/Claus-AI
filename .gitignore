@@ -115,3 +115,6 @@ supabase/*.local.toml
 .claus-local/
 .evidence-local/
 local-artifacts/
+
+# Neon CLI local project and branch context
+/.neon

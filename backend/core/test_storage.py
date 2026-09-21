@@ -7,18 +7,19 @@ from unittest.mock import patch
 from botocore.exceptions import ClientError
 from django.core.exceptions import ImproperlyConfigured, SuspiciousFileOperation
 from django.core.files.base import ContentFile
+from django.core.files.storage import storages
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
 
-from core.storage.neon import NeonStorage, PRESIGNED_URL_EXPIRATION
+from core.storage.s3 import PRESIGNED_URL_EXPIRATION, S3CompatibleStorage
 
 
 STORAGE_ENV = {
     "AWS_ACCESS_KEY_ID": "test-access-key",
     "AWS_SECRET_ACCESS_KEY": "test-secret-key",
-    "AWS_ENDPOINT_URL_S3": "https://storage.example.test/",
-    "AWS_REGION": "test-region-1",
-    "NEON_STORAGE_BUCKET": "test-bucket",
+    "OBJECT_STORAGE_ENDPOINT": "https://storage.example.test/",
+    "OBJECT_STORAGE_REGION": "test-region-1",
+    "OBJECT_STORAGE_BUCKET": "test-bucket",
 }
 
 
@@ -102,15 +103,18 @@ class NonSeekableBody:
         self._body.close()
 
 
-class NeonStorageContractTests(SimpleTestCase):
+class S3CompatibleStorageContractTests(SimpleTestCase):
     def setUp(self):
         self.environment = patch.dict(os.environ, STORAGE_ENV, clear=True)
         self.environment.start()
         self.client = FakeS3Client()
-        self.storage = NeonStorage(client=self.client)
+        self.storage = S3CompatibleStorage(client=self.client)
 
     def tearDown(self):
         self.environment.stop()
+
+    def test_default_storage_backend_loads_from_django_settings(self):
+        self.assertIsInstance(storages["default"], S3CompatibleStorage)
 
     def test_save_open_exists_size_delete_and_url(self):
         name = self.storage.save("documents/report.txt", ContentFile(b"content"))
@@ -234,7 +238,7 @@ class NeonStorageContractTests(SimpleTestCase):
                     return super().put_object(**kwargs)
 
         client = ConcurrentFakeS3Client()
-        storage = NeonStorage(client=client)
+        storage = S3CompatibleStorage(client=client)
 
         def save(value):
             return storage.save("same.txt", ContentFile(value))
@@ -269,15 +273,15 @@ class NeonStorageContractTests(SimpleTestCase):
 
     def test_missing_configuration_is_lazy_and_clear(self):
         with patch.dict(os.environ, {}, clear=True):
-            storage = NeonStorage(client=FakeS3Client())
+            storage = S3CompatibleStorage(client=FakeS3Client())
             with self.assertRaisesMessage(
-                ImproperlyConfigured, "Missing Neon Object Storage settings"
+                ImproperlyConfigured, "Missing object storage settings"
             ):
                 storage.exists("object.txt")
 
     def test_client_is_lazy_and_uses_path_style_sigv4(self):
-        with patch("core.storage.neon.boto3.client") as client_factory:
-            storage = NeonStorage()
+        with patch("core.storage.s3.boto3.client") as client_factory:
+            storage = S3CompatibleStorage()
             self.assertFalse(client_factory.called)
 
             storage.exists("missing.txt")
@@ -290,9 +294,9 @@ class NeonStorageContractTests(SimpleTestCase):
             self.assertEqual(kwargs["config"].s3["addressing_style"], "path")
 
     def test_endpoint_path_is_rejected(self):
-        environment = {**STORAGE_ENV, "AWS_ENDPOINT_URL_S3": "https://example.test/bucket"}
+        environment = {**STORAGE_ENV, "OBJECT_STORAGE_ENDPOINT": "https://example.test/bucket"}
         with patch.dict(os.environ, environment, clear=True):
             with self.assertRaisesMessage(
                 ImproperlyConfigured, "must not contain a bucket or other path"
             ):
-                NeonStorage(client=FakeS3Client()).exists("object.txt")
+                S3CompatibleStorage(client=FakeS3Client()).exists("object.txt")

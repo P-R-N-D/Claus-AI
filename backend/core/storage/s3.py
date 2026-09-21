@@ -1,4 +1,4 @@
-"""Django storage backend for Neon's S3-compatible Object Storage."""
+"""Django storage backend for private S3-compatible object storage."""
 
 import os
 from tempfile import SpooledTemporaryFile
@@ -17,14 +17,14 @@ PRESIGNED_URL_EXPIRATION = 3600
 _REQUIRED_SETTINGS = (
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
-    "AWS_ENDPOINT_URL_S3",
-    "AWS_REGION",
-    "NEON_STORAGE_BUCKET",
+    "OBJECT_STORAGE_ENDPOINT",
+    "OBJECT_STORAGE_REGION",
+    "OBJECT_STORAGE_BUCKET",
 )
 
 
-class NeonStorage(Storage):
-    """Store private objects through Neon's S3-compatible API."""
+class S3CompatibleStorage(Storage):
+    """Store private objects through an S3-compatible API."""
 
     def __init__(self, client=None, **options):
         self._client = client
@@ -43,11 +43,11 @@ class NeonStorage(Storage):
                     missing = [name for name, value in values.items() if not value]
                     if missing:
                         raise ImproperlyConfigured(
-                            "Missing Neon Object Storage settings: "
+                            "Missing object storage settings: "
                             + ", ".join(missing)
                         )
-                    values["AWS_ENDPOINT_URL_S3"] = self._normalize_endpoint(
-                        values["AWS_ENDPOINT_URL_S3"]
+                    values["OBJECT_STORAGE_ENDPOINT"] = self._normalize_endpoint(
+                        values["OBJECT_STORAGE_ENDPOINT"]
                     )
                     self._configuration = values
         return self._configuration
@@ -57,15 +57,15 @@ class NeonStorage(Storage):
         parsed = urlsplit(endpoint)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ImproperlyConfigured(
-                "AWS_ENDPOINT_URL_S3 must be an HTTP(S) base URL with a hostname."
+                "OBJECT_STORAGE_ENDPOINT must be an HTTP(S) base URL with a hostname."
             )
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ImproperlyConfigured(
-                "AWS_ENDPOINT_URL_S3 must not contain credentials, query, or fragment."
+                "OBJECT_STORAGE_ENDPOINT must not contain credentials, query, or fragment."
             )
         if parsed.path not in {"", "/"}:
             raise ImproperlyConfigured(
-                "AWS_ENDPOINT_URL_S3 must not contain a bucket or other path."
+                "OBJECT_STORAGE_ENDPOINT must not contain a bucket or other path."
             )
         return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
 
@@ -77,8 +77,8 @@ class NeonStorage(Storage):
                 if self._client is None:
                     self._client = boto3.client(
                         "s3",
-                        endpoint_url=configuration["AWS_ENDPOINT_URL_S3"],
-                        region_name=configuration["AWS_REGION"],
+                        endpoint_url=configuration["OBJECT_STORAGE_ENDPOINT"],
+                        region_name=configuration["OBJECT_STORAGE_REGION"],
                         aws_access_key_id=configuration["AWS_ACCESS_KEY_ID"],
                         aws_secret_access_key=configuration[
                             "AWS_SECRET_ACCESS_KEY"
@@ -92,7 +92,7 @@ class NeonStorage(Storage):
 
     @property
     def bucket(self):
-        return self._get_configuration()["NEON_STORAGE_BUCKET"]
+        return self._get_configuration()["OBJECT_STORAGE_BUCKET"]
 
     @staticmethod
     def _validated_name(name):
@@ -121,7 +121,7 @@ class NeonStorage(Storage):
 
     def _open(self, name, mode="rb"):
         if mode != "rb":
-            raise ValueError("NeonStorage only supports binary reads with mode 'rb'.")
+            raise ValueError("S3CompatibleStorage only supports binary reads with mode 'rb'.")
         name = self._validated_name(name)
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=name)

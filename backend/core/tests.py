@@ -10,7 +10,7 @@ class HealthTests(TestCase):
             response.json(),
             {
                 "status": "ok",
-                "service": "sparkcrew-core",
+                "service": "claus-core",
                 "backend": "django",
                 "api": "drf",
             },

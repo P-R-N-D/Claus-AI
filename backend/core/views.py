@@ -9,7 +9,7 @@ def health(_request):
     serializer = HealthSerializer(
         {
             "status": "ok",
-            "service": "sparkcrew-core",
+            "service": "claus-core",
             "backend": "django",
             "api": "drf",
         }

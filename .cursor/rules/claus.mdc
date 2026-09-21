@@ -1,9 +1,9 @@
 ---
-description: SparkCrew shared AI-facing instructions
+description: Claus shared AI-facing instructions
 alwaysApply: true
 ---
 
-# SparkCrew Cursor Rule
+# Claus Cursor Rule
 
 Follow [docs/CONTEXT.md](../../docs/CONTEXT.md) first. It is the canonical source of truth for AI-facing context and instructions.
 

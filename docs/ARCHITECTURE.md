@@ -1,6 +1,6 @@
-# SparkCrew Architecture
+# Claus Architecture
 
-SparkCrew is an AI collaboration project centered on personal AI conversations and team Topic/Thread collaboration. Conversation provides context, while files, knowledge, background tasks, artifacts, and execution runtimes remain separate resources.
+Claus is an AI collaboration project centered on personal AI conversations and team Topic/Thread collaboration. Conversation provides context, while files, knowledge, background tasks, artifacts, and execution runtimes remain separate resources.
 
 This document distinguishes the current runnable scaffold from longer-term architecture contracts. Planned components are not implemented unless the repository contains working code and verification for them.
 
@@ -133,7 +133,7 @@ Retrieval must respect personal, Topic/Thread, team/project, organization, and e
 
 ## Python concurrency
 
-SparkCrew is designed so correctness does not depend on the GIL:
+Claus is designed so correctness does not depend on the GIL:
 
 - Avoid unprotected process-global mutable state.
 - Use explicit synchronization for unavoidable shared mutable state.

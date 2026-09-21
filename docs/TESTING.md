@@ -1,4 +1,4 @@
-# SparkCrew Testing Strategy
+# Claus Testing Strategy
 
 This document separates checks for the current runnable scaffold from future feature-level verification. Do not claim planned behavior or platform support is tested when the corresponding implementation or runtime is absent.
 

@@ -48,7 +48,7 @@ class AsgiRoutingTests(SimpleTestCase):
             json.loads(core_body),
             {
                 "status": "ok",
-                "service": "sparkcrew-core",
+                "service": "claus-core",
                 "backend": "django",
                 "api": "drf",
             },
@@ -58,7 +58,7 @@ class AsgiRoutingTests(SimpleTestCase):
             json.loads(agent_body),
             {
                 "status": "ok",
-                "service": "sparkcrew-agent",
+                "service": "claus-agent",
                 "backend": "fastapi",
             },
         )

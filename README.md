@@ -1,4 +1,4 @@
-<h1 align="center">SparkCrew</h1>
+<h1 align="center">Claus</h1>
 
 <p align="center">
   <strong>사람과 AI가 같은 맥락에서 대화하고, 작업하고, 결과를 만드는 AI 협업 프로젝트</strong><br>
@@ -20,7 +20,7 @@
 
 ## Project direction
 
-SparkCrew explores a collaboration model in which conversation is shared context rather than the only workspace.
+Claus explores a collaboration model in which conversation is shared context rather than the only workspace.
 
 - **Personal AI**: private AI conversations and personal topics.
 - **Team topics and threads**: SNS-style posts and threaded discussion for people and shared AI participants.

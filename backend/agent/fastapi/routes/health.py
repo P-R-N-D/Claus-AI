@@ -7,6 +7,6 @@ router = APIRouter()
 async def health() -> dict[str, str]:
     return {
         "status": "ok",
-        "service": "sparkcrew-agent",
+        "service": "claus-agent",
         "backend": "fastapi",
     }

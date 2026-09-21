@@ -1,6 +1,6 @@
-# SparkCrew Backend
+# Claus Backend
 
-SparkCrew uses Django 6 on Python 3.12–3.14 with one Django project, `config`, and exactly two product apps: `core` and `agent`.
+Claus uses Django 6 on Python 3.12–3.14 with one Django project, `config`, and exactly two product apps: `core` and `agent`.
 
 - `core` is the persistent product control plane and exposes Django REST Framework APIs under `/core/*`.
 - `agent` shares Django settings, ORM, migrations, auth, and Admin, while its FastAPI surface under `/agent/*` is reserved for AI/RAG/agent/runtime execution.

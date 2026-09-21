@@ -1,4 +1,4 @@
-# SparkCrew Codex Entry Point
+# Claus Codex Entry Point
 
 Read [`docs/CONTEXT.md`](docs/CONTEXT.md) first. It is the canonical source of truth for AI-facing context and instructions.
 

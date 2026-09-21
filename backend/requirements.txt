@@ -5,3 +5,5 @@ fastapi>=0.115,<0.116
 uvicorn>=0.34,<0.35
 daphne>=4.2.3,<4.3
 playwright>=1.49,<2
+psycopg[binary]>=3.3.6,<3.4
+boto3>=1.43.98,<1.44

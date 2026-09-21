@@ -10,6 +10,12 @@
   Claus connects personal AI conversations and team Topic/Thread collaboration with files, knowledge, background work, and Browser/Terminal/Workspace execution.
 </p>
 
+<p align="center">
+  <a href="docs/README.ko.md"><strong>한국어</strong></a>
+  &nbsp;·&nbsp;
+  <a href="docs/README.en.md"><strong>English</strong></a>
+</p>
+
 ## Language
 
 | Language | README |

@@ -73,7 +73,7 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 STORAGES = {
-    "default": {"BACKEND": "core.storage.neon.NeonStorage"},
+    "default": {"BACKEND": "core.storage.s3.S3CompatibleStorage"},
     "staticfiles": {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
     },

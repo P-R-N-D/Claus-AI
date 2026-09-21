@@ -2,7 +2,7 @@
 
 Claus는 사람과 AI가 개인 및 팀 컨텍스트에서 대화하고, 파일과 지식을 공유하며, 필요할 때 Browser·Terminal·Workspace를 사용해 함께 작업 결과를 만드는 AI 협업 프로젝트입니다.
 
-## 협업 모델
+## 프로젝트 방향
 
 Claus는 단체 채팅 하나에 모든 정보를 쌓는 구조보다 Topic과 Thread를 중심으로 맥락을 유지하는 방향을 지향합니다.
 
@@ -16,17 +16,23 @@ Claus는 단체 채팅 하나에 모든 정보를 쌓는 구조보다 Topic과 T
 
 현재 범위에서는 전체 OS 데스크톱 스트리밍과 제어를 다루지 않습니다. 상호작용이 필요한 Computer Use는 Browser를 우선 대상으로 합니다.
 
-## 현재 초기 실행 scaffold
+Next.js frontend는 개인 AI 대화, 팀 Topic/Thread, 파일과 Artifact, AI 작업 상태, 공유 결과 화면과 Browser 작업 화면을 위한 사용자 UI로 확장합니다. Django/DRF는 사용자·권한·협업 컨텍스트·파일·지식·작업 상태를 관리하는 기본 backend/control plane으로 유지하고, Django Admin은 내부 운영자/admin workflow에 사용합니다.
+
+장시간 AI 실행과 Browser/Terminal/Workspace 실행은 web request 처리와 분리하는 방향을 우선합니다.
+
+## 현재 실행 가능한 scaffold
 
 현재 저장소에 실제로 포함된 초기 scaffold는 다음과 같습니다.
 
-- Frontend: Next.js, React, TypeScript, Tailwind CSS, axios, SweetAlert2, Playwright.
-- Backend: 하나의 Django project(`config`)와 `core`(DRF), `agent`(Django app + FastAPI), Django Admin, Django ORM, django-cors-headers.
+- Frontend: `/`의 Next.js 사용자 UI와 `/console/*`의 별도 제품 Console, React, TypeScript, Tailwind CSS, axios, SweetAlert2, Node Playwright 테스트.
+- Backend: Python 3.12–3.14에서 실행되는 Django 6, 하나의 Django project(`config`)와 두 Django app(`core`, `agent`).
+- URL: `/core/*`의 Django REST Framework control-plane API, `/agent/*`의 Agent FastAPI, `/admin/*`의 Django Admin.
+- ASGI 구성: `config.asgi.application`이 FastAPI와 Django를 하나의 ASGI application으로 구성하며, Daphne 기반 `manage.py runserver`와 Uvicorn에서 동일하게 제공합니다.
 - Local 연동: Next.js 개발 서버가 `/core/*`와 `/agent/*` 요청을 `http://127.0.0.1:8000` backend로 rewrite합니다.
 - Health endpoint: `GET /core/health/`, `GET /agent/health/`.
-- Django Admin: `/admin/`.
+- Browser 기반: backend Python Playwright는 비동기 Agent Browser Computer Use package 경계를 제공하며 frontend Playwright 테스트와 분리되어 있습니다.
 
-위의 협업, RAG, AI 작업, Browser/Terminal/Workspace, 공유 결과 화면은 프로젝트 방향이며 현재 scaffold에 모두 구현되어 있다는 의미가 아닙니다.
+현재 scaffold에는 health endpoint와 package 경계만 구현되어 있습니다. Domain model, RAG, LLM orchestration, browser session, Terminal 또는 Workspace 동작은 아직 구현되어 있지 않습니다.
 
 이번 초기 scaffold에는 Docker, Nginx, K8s, Helm, production deployment manifest, custom domain model, custom migration, SQL schema 작업이 포함되지 않습니다.
 
@@ -37,20 +43,28 @@ Claus는 단체 채팅 하나에 모든 정보를 쌓는 구조보다 Topic과 T
 python -m pip install -r backend/requirements.txt
 playwright install chromium
 python backend/manage.py check
+python backend/manage.py test core agent
 python backend/manage.py runserver 127.0.0.1:8000
 
 # Frontend
 cd frontend
 npm install
+npm run lint
 npm run build
 npm run test:visual
 npm run dev -- --hostname 127.0.0.1 --port 3000
 ```
 
-브라우저에서 `http://127.0.0.1:3000`을 열면 현재 frontend scaffold와 `/core/health/`, `/agent/health/` 응답을 확인할 수 있습니다. Backend 연결 실패 또는 재시도 실패 시 SweetAlert2 alert가 표시됩니다.
+`http://127.0.0.1:3000`에서 사용자 화면을, `http://127.0.0.1:3000/console`에서 제품 Console을 열 수 있습니다. Django Admin은 `http://127.0.0.1:8000/admin/`에서 제공됩니다.
 
-## 방향성
+### 선택 사항: Django Admin 설정
 
-Next.js frontend는 개인 AI 대화, 팀 Topic/Thread, 파일과 Artifact, AI 작업 상태, 공유 결과 화면과 Browser 작업 화면을 위한 사용자 UI로 확장합니다. Django/DRF는 사용자·권한·협업 컨텍스트·파일·지식·작업 상태를 관리하는 기본 backend/control plane으로 유지하고, Django Admin은 내부 운영자/admin workflow에 사용합니다.
+`/console/*`의 제품 Console과 `/admin/*`의 Django ORM 기반 내부 Admin은 서로 다른 UI입니다. Django Admin에 로그인하려면 먼저 Django 기본 테이블을 초기화하고 로컬 관리자를 생성합니다.
 
-장시간 AI 실행과 Browser/Terminal/Workspace 실행은 web request 처리와 분리하는 방향을 우선합니다.
+```bash
+python backend/manage.py migrate
+python backend/manage.py createsuperuser
+python backend/manage.py runserver 127.0.0.1:8000
+```
+
+`backend/db.sqlite3`는 로컬 개발 산출물이므로 커밋하면 안 됩니다. 현재 scaffold에는 custom domain migration이 없습니다.

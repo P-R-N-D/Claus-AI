@@ -113,6 +113,5 @@ supabase/*.local.toml
 
 # Claus local-only unredacted runtime state
 .claus-local/
-.sparkcrew-local/
 .evidence-local/
 local-artifacts/

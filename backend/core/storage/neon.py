@@ -1,6 +1,7 @@
 """Django storage backend for Neon's S3-compatible Object Storage."""
 
 import os
+from tempfile import SpooledTemporaryFile
 from threading import Lock
 from urllib.parse import urlsplit, urlunsplit
 
@@ -109,6 +110,15 @@ class NeonStorage(Storage):
         status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
         return status == 404 or error.get("Code") in {"404", "NoSuchKey", "NotFound"}
 
+    @staticmethod
+    def _is_precondition_failure(exc):
+        error = exc.response.get("Error", {})
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        return status in {409, 412} or error.get("Code") in {
+            "ConditionalRequestConflict",
+            "PreconditionFailed",
+        }
+
     def _open(self, name, mode="rb"):
         if mode not in {"r", "rb"}:
             raise ValueError("NeonStorage only supports reading objects.")
@@ -123,8 +133,28 @@ class NeonStorage(Storage):
 
     def _save(self, name, content):
         name = self._validated_name(name)
-        self.client.upload_fileobj(content, self.bucket, name)
-        return name
+        # Storage.save() checks for an available name before calling _save(), but
+        # that check and the upload are not atomic. Buffer once so a conditional
+        # request can safely be retried under a newly allocated name.
+        with SpooledTemporaryFile(max_size=5 * 1024 * 1024) as buffered_content:
+            for chunk in content.chunks():
+                buffered_content.write(chunk)
+
+            while True:
+                buffered_content.seek(0)
+                try:
+                    self.client.put_object(
+                        Bucket=self.bucket,
+                        Key=name,
+                        Body=buffered_content,
+                        IfNoneMatch="*",
+                    )
+                except ClientError as exc:
+                    if not self._is_precondition_failure(exc):
+                        raise
+                    name = self.get_available_name(name)
+                    continue
+                return name
 
     def delete(self, name):
         name = self._validated_name(name)

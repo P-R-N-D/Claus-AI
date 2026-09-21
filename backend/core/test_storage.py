@@ -1,5 +1,7 @@
 import io
 import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Lock
 from unittest.mock import patch
 
 from botocore.exceptions import ClientError
@@ -29,13 +31,27 @@ def missing_error(operation):
     )
 
 
+def precondition_error():
+    return ClientError(
+        {
+            "Error": {"Code": "PreconditionFailed", "Message": "already exists"},
+            "ResponseMetadata": {"HTTPStatusCode": 412},
+        },
+        "PutObject",
+    )
+
+
 class FakeS3Client:
     def __init__(self):
         self.objects = {}
         self.presign_call = None
 
-    def upload_fileobj(self, content, bucket, key):
-        self.objects[(bucket, key)] = content.read()
+    def put_object(self, *, Bucket, Key, Body, IfNoneMatch):
+        assert IfNoneMatch == "*"
+        object_key = (Bucket, Key)
+        if object_key in self.objects:
+            raise precondition_error()
+        self.objects[object_key] = Body.read()
 
     def get_object(self, *, Bucket, Key):
         try:
@@ -101,6 +117,42 @@ class NeonStorageContractTests(SimpleTestCase):
         self.assertNotEqual(second_name, first_name)
         self.assertEqual(self.client.objects[("test-bucket", first_name)], b"first")
         self.assertEqual(self.client.objects[("test-bucket", second_name)], b"second")
+
+    def test_concurrent_saves_atomically_allocate_distinct_names(self):
+        initial_checks = Barrier(2)
+        mutation_lock = Lock()
+        check_lock = Lock()
+        initial_check_count = 0
+
+        class ConcurrentFakeS3Client(FakeS3Client):
+            def head_object(inner_self, *, Bucket, Key):
+                nonlocal initial_check_count
+                with check_lock:
+                    should_wait = Key == "same.txt" and initial_check_count < 2
+                    if should_wait:
+                        initial_check_count += 1
+                if should_wait:
+                    initial_checks.wait(timeout=5)
+                return super().head_object(Bucket=Bucket, Key=Key)
+
+            def put_object(inner_self, **kwargs):
+                with mutation_lock:
+                    return super().put_object(**kwargs)
+
+        client = ConcurrentFakeS3Client()
+        storage = NeonStorage(client=client)
+
+        def save(value):
+            return storage.save("same.txt", ContentFile(value))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            names = list(executor.map(save, (b"first", b"second")))
+
+        self.assertEqual(len(set(names)), 2)
+        self.assertEqual(
+            {client.objects[("test-bucket", name)] for name in names},
+            {b"first", b"second"},
+        )
 
     def test_missing_object_has_application_facing_errors(self):
         self.assertFalse(self.storage.exists("missing.txt"))

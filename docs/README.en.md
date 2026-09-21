@@ -1,10 +1,10 @@
-# SparkCrew
+# Claus
 
-SparkCrew is an AI collaboration project where people and AI work from personal and team context, share files and knowledge, and use browser, terminal, and workspace tools when a task needs execution.
+Claus is an AI collaboration project where people and AI work from personal and team context, share files and knowledge, and use browser, terminal, and workspace tools when a task needs execution.
 
 ## Collaboration model
 
-SparkCrew is designed around topics and threads rather than treating a single group-chat timeline as the entire workspace.
+Claus is designed around topics and threads rather than treating a single group-chat timeline as the entire workspace.
 
 - **Personal AI**: private conversations, personal topics, and user-scoped work.
 - **Team topics and threads**: SNS-style posts and threaded discussion where people and shared AI participants collaborate in the same context.

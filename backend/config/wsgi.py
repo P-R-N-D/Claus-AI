@@ -1,4 +1,4 @@
-"""Django-only WSGI fallback for SparkCrew."""
+"""Django-only WSGI fallback for Claus."""
 
 import os
 from django.core.wsgi import get_wsgi_application

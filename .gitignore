@@ -111,7 +111,8 @@ supabase/.env.*
 supabase/config.local.*
 supabase/*.local.toml
 
-# SparkCrew local-only unredacted runtime state
+# Claus local-only unredacted runtime state
+.claus-local/
 .sparkcrew-local/
 .evidence-local/
 local-artifacts/

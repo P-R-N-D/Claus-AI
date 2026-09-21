@@ -1,6 +1,6 @@
 # Database Schema Guidelines
 
-This document describes database schema design guidelines for SparkCrew. It does not create migrations, SQL, or ORM models.
+This document describes database schema design guidelines for Claus. It does not create migrations, SQL, or ORM models.
 
 ## Principles
 

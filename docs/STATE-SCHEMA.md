@@ -1,4 +1,4 @@
-# SparkCrew AI-Facing State Shapes
+# Claus State Shapes for AI
 
 This is not a database schema. This document describes conceptual AI-facing collaboration and runtime state for planning and review.
 

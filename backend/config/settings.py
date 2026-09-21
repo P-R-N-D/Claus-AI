@@ -1,4 +1,4 @@
-"""Development settings for the SparkCrew Django project."""
+"""Development settings for the Claus Django project."""
 
 from pathlib import Path
 import os

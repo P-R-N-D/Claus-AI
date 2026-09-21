@@ -1,4 +1,4 @@
-"""Django URL configuration for SparkCrew's control plane."""
+"""Django URL configuration for Claus's control plane."""
 
 from django.contrib import admin
 from django.urls import include, path

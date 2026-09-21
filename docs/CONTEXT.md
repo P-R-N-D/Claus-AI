@@ -1,10 +1,10 @@
-# SparkCrew Agent Guidelines
+# Claus Agent Guidelines
 
 This file is the canonical source of truth for AI-facing context and instructions in this repository. Read it before following any bridge file, tool-specific rule, or generated suggestion.
 
 ## Project purpose
 
-SparkCrew is an AI collaboration project where people and AI share context, discuss work, execute tasks, and produce results together.
+Claus is an AI collaboration project where people and AI share context, discuss work, execute tasks, and produce results together.
 
 The primary collaboration direction is topic- and thread-based rather than chat-only:
 
@@ -67,7 +67,7 @@ The primary backend stack is Django + Django REST Framework + Django Admin. Djan
 
 Long-running AI work and Browser/Terminal/Workspace execution should be separated from normal HTTP request handling. A separate runtime service may be introduced later only when its responsibility and operational benefit are clear.
 
-Agent orchestration is an implementation detail. LangGraph, DeepAgents, or another framework may be used when appropriate, but SparkCrew domain contracts should not depend on one orchestration framework.
+Agent orchestration is an implementation detail. LangGraph, DeepAgents, or another framework may be used when appropriate, but Claus domain contracts should not depend on one orchestration framework.
 
 FastAPI is approved only for the current `agent` execution surface. General product and control-plane APIs remain in `core` with Django REST Framework. Do not expand FastAPI into `core`, create another FastAPI project/service, or introduce another backend framework without explicit approval. Do not add custom domain models, custom migrations, SQL, SQLAlchemy, Alembic, Docker, Nginx, K8s, Helm, or deployment manifests without explicit approval.
 
@@ -92,11 +92,11 @@ Retrieval must respect the current user's and AI participant's effective permiss
 - Terminal and Workspace execution should run in isolated task runtimes when implemented.
 - Newman/Postman CLI is used for API verification when API collection testing is in scope.
 - Local or online LLMs may support planning, retrieval, generation, summarization, and tool use.
-- Existing specialized scanner/compliance skills remain task-level experiments and are not the top-level SparkCrew product definition.
+- Existing specialized scanner/compliance skills remain task-level experiments and are not the top-level Claus product definition.
 
 ## Concurrency direction
 
-SparkCrew should be designed for free-threaded Python compatibility.
+Claus should be designed for free-threaded Python compatibility.
 
 - Application correctness must not rely on the GIL as an implicit synchronization mechanism.
 - Avoid unprotected process-global mutable application state.

@@ -177,7 +177,7 @@ Nothing is implemented, and the API is experimental; when a tool is proposed und
 
 - Feature detection: the Human UI works identically when the API is absent.
 - Registration failure (duplicate `name`, invalid `name`, empty `description`, non-serializable `inputSchema`, `Permissions-Policy: tools=()`) is handled per tool without affecting other tools or the UI.
-- Context switch and logout unregister tools, and in-flight executions are validated against the current context before any server call.
+- Context switch and logout unregister tools, and in-flight executions are validated against the current context before any server call and again before returning a result, so a read that completes after the switch returns no data from the old context.
 - The server rejects a tool-originated operation that the same user could not perform from the UI, and records the origin.
 - Abort through the execution signal stops the operation without partial state, and the invocation is not reported as success.
 - Pages that expose no tools send `Permissions-Policy: tools=()`; a repeated invocation with the same idempotency key does not duplicate the side effect; the audit record carries origin `webmcp`.

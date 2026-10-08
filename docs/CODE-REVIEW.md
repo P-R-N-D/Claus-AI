@@ -44,12 +44,14 @@ git diff --check <base>...<head>            # whitespace errors and conflict mar
 git diff --stat                             # unstaged
 git diff --cached --stat                    # staged
 git diff && git diff --cached               # the diff to read in full
-git diff --check && git diff --cached --check
-# Each untracked file: read it whole, then whitespace-check it the same way
+git diff --check; git diff --cached --check  # run both; each exits nonzero on problems
+# Each untracked file: read it whole, then whitespace-check it with the same rules.
+# --no-index implies --exit-code, so a clean file exits 1 with no output.
+# Judge this command by its output: no output is clean, any line is a finding.
 git diff --no-index --check /dev/null <untracked-file>
 ```
 
-Record in the report: the base and head identifiers (full SHA for commits; "working tree at <SHA> plus N untracked files" otherwise), the commands used, and the file list. If the tree changes while the review runs, the report names the state it reviewed; anything later is unreviewed.
+Record in the report: the base and head identifiers (full SHA for commits; "working tree at <SHA> plus N untracked files" otherwise), the commands used, and the file list. For the untracked-file check, record its output rather than its exit status: Git documents `--check` as not compatible with `--exit-code`, which `--no-index` implies, so the status is nonzero even for a clean file. If the tree changes while the review runs, the report names the state it reviewed; anything later is unreviewed.
 
 ### 2. Preserve the author's work
 

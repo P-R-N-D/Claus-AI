@@ -146,11 +146,17 @@ IDs: `SEC-SECRET-001` to `SEC-SECRET-004`, `SEC-IDEM-001` to `SEC-IDEM-003`, `SE
 - The diff contains no secret, token, key, or real credential; a new environment variable gets an empty placeholder in `.env.example` and nothing more (`SEC-SECRET-001`). Search the diff text, not only the file names:
 
 ```bash
+# Committed change: <base> is the target commit, <head> is the change tip
 git diff <base>...<head> | grep -niE 'password|secret|token|api[_-]?key|private key'
 git diff --name-only <base>...<head> | grep -E '(^|/)\.env'
-# Uncommitted change: untracked files are invisible to git diff, so search them too
-git ls-files --others --exclude-standard | xargs -r grep -niE 'password|secret|token|api[_-]?key|private key'
-git ls-files --others --exclude-standard | grep -E '(^|/)\.env'
+
+# Uncommitted change: the working tree is the head, so scan unstaged and staged edits
+git diff | grep -niE 'password|secret|token|api[_-]?key|private key'
+git diff --cached | grep -niE 'password|secret|token|api[_-]?key|private key'
+{ git diff --name-only -z; git diff --cached --name-only -z; } | tr '\0' '\n' | grep -E '(^|/)\.env'
+# Untracked files are invisible to git diff; NUL-delimited names reach grep intact
+git ls-files -z --others --exclude-standard | xargs -0 -r grep -HniE 'password|secret|token|api[_-]?key|private key' --
+git ls-files -z --others --exclude-standard | tr '\0' '\n' | grep -E '(^|/)\.env'
 ```
 
 - A new configuration value fails clearly when missing or invalid; a new silent fallback to an insecure default is a finding (`SEC-FAIL-002`). The `SECRET_KEY` and `DEBUG` fallbacks are the documented exception (`SEC-SECRET-002`), not a precedent.

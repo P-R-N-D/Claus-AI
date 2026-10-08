@@ -142,7 +142,7 @@ Claus rules:
 Planned and Experimental. A context switch is a Topic/Thread change, a switch between personal and team context, logout, or navigation away from the page.
 
 - On every context switch: abort the current registration controller, then register the tool set for the new context. Each registration and unregistration fires `toolchange` (CG draft), which lets agents refresh their tool list.
-- Unregistration does not cancel executions already running (CG draft). Each `execute` callback therefore captures the context identity and a registration generation at registration time and compares them with the current values when it starts and again before any state-changing call. On mismatch it returns the machine-readable error result `context_changed` and performs no side effect.
+- Unregistration does not cancel executions already running (CG draft). Each `execute` callback therefore captures the context identity and a registration generation at registration time and compares them with the current values when it starts, before any state-changing call, and again immediately before returning any result, including a read result. On a mismatch at the start or before a state-changing call, it returns the machine-readable error result `context_changed` and performs no side effect. On a mismatch before returning, it discards the result, so data from the old context never reaches an agent working in the new one, and returns `context_changed`; when a state-changing call had already completed, the error result says the change was applied, so it is neither reported as lost nor retried.
 - The client-side check reduces noise only. The server re-validates the acting user, the AI participant, and the scope on every operation regardless of how the request originated (SEC-AUTH-001, SEC-SCOPE-003, SEC-AGENT-001), and denies with no partial side effect (SEC-FAIL-001).
 - Execution-time cancellation: `execute` receives `options.signal` (CG draft). Pass it to `fetch()` and other cancellable work. A cancelled invocation must not be reported as success and must not be retried silently.
 - Navigation: the CG draft's unloading cleanup steps complete pending executions of an unloaded target document with failure; Chrome docs say `executeTool()` "returns the result of the tool execution, or null when a navigation is triggered". A tool that triggers navigation must return before navigating or document that its result is lost.
@@ -261,7 +261,9 @@ if ("modelContext" in document) {
         async execute(input, { signal }) {
           // 1. Check the captured context identity against the current one.
           // 2. Call the shared application operation; the server authorizes.
-          // 3. Return a plain object; the browser JSON-serializes it.
+          // 3. Check the context again; on mismatch discard the result and
+          //    return the error result `context_changed`.
+          // 4. Return a plain object; the browser JSON-serializes it.
           return { ok: false, error: { code: "not_implemented" } };
         },
       },
@@ -299,7 +301,7 @@ Tests to add, each with normal, denial, boundary, and retry cases:
 
 - Feature detection: with `document.modelContext` absent, the Human UI renders and works unchanged; with it present, the expected tool set appears in `getTools()`.
 - Registration failure: duplicate `name`, invalid `name`, empty `description`, non-serializable `inputSchema`, and `Permissions-Policy: tools=()` each reject only the affected registration; the page keeps working.
-- Context switch: after a Topic/Thread change or logout, the old set is gone from `getTools()`, the new set is present, and an execution started before the switch returns `context_changed` with no side effect.
+- Context switch: after a Topic/Thread change or logout, the old set is gone from `getTools()`, the new set is present, an execution started before the switch returns `context_changed` with no side effect, and a read already awaiting the server when the switch happens returns `context_changed` instead of the old context's data.
 - Abort: aborting the execution-time signal cancels the underlying request and the invocation is not reported as success.
 - Permissions Policy: pages that expose no tools send `Permissions-Policy: tools=()`.
 - Server contract: an invocation without authorization or without a required approval is rejected server-side; a repeated invocation with the same idempotency key does not duplicate the side effect; the audit record carries origin `webmcp`.

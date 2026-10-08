@@ -16,21 +16,44 @@ The primary collaboration direction is topic- and thread-based rather than chat-
 
 ## Current application scaffold
 
-- Frontend: Next.js user UI at `/`, product Console at `/console/*`, React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright tests.
+- Frontend: Next.js user UI at `/`, product Console at `/console` (reserved as the `/console/*` surface; only the index page exists today), React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright tests.
 - Backend: Django 6 on Python 3.12, or newer, using one Django project (`config`) with Django apps `core` and `agent`.
 - `/core/*`: Django REST Framework control-plane APIs; `/agent/*`: Agent FastAPI; `/admin/*`: Django Admin.
 - `config.asgi.application` composes Django and FastAPI and is served by both Daphne-backed `manage.py runserver` and direct Uvicorn.
+- `config/database.py` builds the Django database setting from `DATABASE_URL` (PostgreSQL only, strict parsing) and falls back to SQLite when it is unset or blank.
+- `core/storage/s3.py` is the default Django file storage: a private S3-compatible backend with name validation, conditional (no-overwrite) saves, and presigned download URLs.
 - Python Playwright under `agent/runtime/browser` is the async Browser Computer Use foundation, separate from frontend Playwright testing.
 
-Only health APIs and architecture boundaries are currently implemented. Collaboration models, RAG, LLM orchestration, background execution, and browser sessions remain future work.
+Implemented today, each with tests in the repository: the health APIs, the ASGI composition, the `DATABASE_URL` configuration with SQLite fallback, and the S3-compatible storage backend. Not implemented: collaboration domain models, authentication and authorization for product features, RAG, LLM orchestration, background execution, Browser sessions, Terminal, Workspace, realtime transport, WebMCP, and frontend i18n. [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) keeps the implemented versus planned breakdown.
 
 ## Document roles
 
 - `docs/CONTEXT.md` is the canonical AI-facing instruction and context file.
 - [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) describes the project architecture direction and current scaffold boundaries.
 - [`docs/STATE-SCHEMA.md`](STATE-SCHEMA.md) describes conceptual collaboration and runtime state shapes. It is not a database schema.
-- [`docs/TESTING.md`](TESTING.md) describes testing strategy and current scaffold checks.
+- [`docs/TESTING.md`](TESTING.md) describes testing strategy, the checks that exist today, and the verification still required.
+- [`docs/SECURITY-ARCHITECTURE.md`](SECURITY-ARCHITECTURE.md) defines trust boundaries and the `SEC-*` security requirements, with the current implementation facts. It is the only place those requirement IDs are defined.
+- [`docs/CODE-REVIEW.md`](CODE-REVIEW.md) defines how a coding agent independently reviews an actual code change and reports findings.
+- [`docs/SECURITY-REVIEW.md`](SECURITY-REVIEW.md) defines the security review procedure for changed code, reusing the `SEC-*` IDs.
+- [`docs/INTERACTION-INTERFACES.md`](INTERACTION-INTERFACES.md) defines the planned boundaries between Human UI, WebMCP, Automation, and Browser Computer Use. Target architecture, not implemented.
+- [`docs/WEBMCP.md`](WEBMCP.md) records the WebMCP technical contract Claus would follow. Experimental external technology; nothing is implemented or adopted yet.
+- [`docs/I18N.md`](I18N.md) records the planned frontend i18n direction based on `next-intl`. Direction only; the library is not installed.
 - Human-facing explanation documents should be split by language when both Korean and English versions are maintained.
+
+### Which documents to read for a task
+
+Read this file first. Then read only the documents that match the work; do not read all of them by default.
+
+| Task | Read |
+|---|---|
+| Any change to repository structure, routing, or runtime boundaries | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Work that touches collaboration, Task, Artifact, Knowledge, or presentation state | [STATE-SCHEMA.md](STATE-SCHEMA.md) |
+| Before claiming anything is tested, and when adding tests | [TESTING.md](TESTING.md) |
+| Reviewing a code change (yours or another agent's) | [CODE-REVIEW.md](CODE-REVIEW.md) |
+| Changes to auth, permissions, scopes, files/storage, retrieval, tools, runtimes, approvals, secrets, logging, agent-originated actions, external content handling, or locale input handling | [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md), then [SECURITY-REVIEW.md](SECURITY-REVIEW.md) |
+| Designing how UI, agents, automation, or Browser Computer Use invoke application operations | [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) |
+| Any proposal to register browser tools for agents | [WEBMCP.md](WEBMCP.md) and [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) |
+| Any user-visible text, locale, date, number, or language preference work | [I18N.md](I18N.md) |
 
 ## Core collaboration rules
 
@@ -109,6 +132,7 @@ Claus should be designed for free-threaded Python compatibility.
 ## Development rules
 
 - Do not claim a planned feature is implemented unless the current code and tests demonstrate it.
+- Review code changes with [`docs/CODE-REVIEW.md`](CODE-REVIEW.md); apply [`docs/SECURITY-REVIEW.md`](SECURITY-REVIEW.md) when a change matches its triggers. A review is evidence, not approval.
 - Preserve the separation between personal and shared context.
 - Preserve the separation between conversation, tasks, files/artifacts, knowledge, and execution runtimes.
 - Check authorization before accessing shared files, knowledge, or tools.

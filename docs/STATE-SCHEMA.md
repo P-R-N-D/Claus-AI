@@ -139,7 +139,7 @@ Fields:
 - `context_ref`: owning personal/team context.
 - `source_task_id`: task that produced the artifact when applicable.
 - `storage_ref`: persistent storage reference.
-- `visibility`: personal or shared visibility scope.
+- `visibility`: `personal` or `shared`. A presentation flag, not one of the five permission scopes; the owning scope follows `context_ref`.
 - `created_at`: creation timestamp.
 
 Conceptual pseudo-schema:
@@ -151,7 +151,7 @@ Conceptual pseudo-schema:
   "context_ref": "context identifier",
   "source_task_id": "task identifier or null",
   "storage_ref": "storage reference",
-  "visibility": "personal or shared scope",
+  "visibility": "personal or shared",
   "created_at": "creation timestamp"
 }
 ```
@@ -186,3 +186,65 @@ Fields:
 - `presentation_state`: page, slide, playback position, filter, or other synchronized presentation state.
 
 `StageItem` is presentation state, not the canonical storage location for the underlying file or artifact.
+
+## PresentationPreferences
+
+`PresentationPreferences` represents how content is presented to one person: UI language, time zone, and the language expected from AI output. It is a conceptual shape for the direction in [I18N.md](I18N.md). Nothing persists it today; no account preference model, API, or cookie handling exists.
+
+Fields:
+
+- `subject_ref`: the user the preferences belong to.
+- `ui_locale_preference`: `system`, `en`, or `ko`. `system` means "follow the environment language".
+- `resolved_ui_locale`: `en` or `ko`, the locale actually used for a request after the resolution order in I18N.md (account setting, explicit cookie, environment language, English fallback).
+- `resolution_source`: `account`, `cookie`, `environment`, or `default`, recorded for diagnostics.
+- `time_zone`: IANA time zone name used for date and time rendering; absent means the application default.
+- `ai_output_language_preference`: the language a user wants AI conversation and generated results in, kept separate from `ui_locale_preference` and possibly different from it.
+
+Conceptual pseudo-schema:
+
+```json
+{
+  "subject_ref": "user identifier",
+  "ui_locale_preference": "system | en | ko",
+  "resolved_ui_locale": "en | ko",
+  "resolution_source": "account | cookie | environment | default",
+  "time_zone": "IANA time zone or null",
+  "ai_output_language_preference": "language preference or null"
+}
+```
+
+`PresentationPreferences` never carries permissions, identifiers, enum values, or error codes; those stay locale-independent. Administrator-level defaults, when designed, are a separate policy object, not a field here.
+
+## InteractionContext
+
+`InteractionContext` describes how one operation was invoked: by a person in the Human UI, by an agent through a WebMCP tool, by automation, by Browser Computer Use, or by a background Task. It exists for audit and diagnostics. It is never an input to authorization, which is decided server-side from the actor, the `CollaborationContext`, and the operation. See [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md). Nothing records it today.
+
+Fields:
+
+- `origin`: `human_ui`, `webmcp`, `automation`, `browser_computer_use`, or `background_task`.
+- `actor_ref`: the authenticated user on whose behalf the operation runs.
+- `ai_participant_ref`: the AI participant involved, when one is.
+- `context_ref`: the `CollaborationContext` the operation runs in.
+- `task_ref`: the `AgentTaskState` that issued the operation, when applicable.
+- `operation`: the application operation name invoked.
+- `request_id`: a unique identifier for this invocation, usable as an idempotency key for retries.
+- `approval_ref`: the approval record the operation relied on, when one was required.
+- `recorded_at`: timestamp.
+
+Conceptual pseudo-schema:
+
+```json
+{
+  "origin": "human_ui | webmcp | automation | browser_computer_use | background_task",
+  "actor_ref": "user identifier",
+  "ai_participant_ref": "AI participant identifier or null",
+  "context_ref": "context identifier",
+  "task_ref": "task identifier or null",
+  "operation": "application operation name",
+  "request_id": "unique invocation identifier",
+  "approval_ref": "approval identifier or null",
+  "recorded_at": "timestamp"
+}
+```
+
+`InteractionContext` does not duplicate `CollaborationContext` (what the actor may see), `AgentTaskState` (what a Task is doing), or `ToolRun` (what a runtime tool did); it references them and adds only the origin of the invocation.

@@ -22,7 +22,8 @@ Planned. Except where a bullet says "Today", the actors and boundaries below are
 - **User**: an authenticated person acting through the Human UI, or later through automation on their behalf. The only source of intent and approval.
 - **AI participant**: a personal or shared AI acting inside one `CollaborationContext` ([STATE-SCHEMA.md](STATE-SCHEMA.md)) with its own effective permissions, never wider than the context allows.
 - **Browser agent or extension**: a WebMCP-capable agent running in the user's browser. It sees only what the page exposes and is untrusted by the server. Experimental.
-- **External content**: files, web pages, retrieved chunks, tool outputs, and messages from other users. Untrusted input, never instructions.
+- **External content**: files, web pages, retrieved chunks, tool outputs, messages from AI participants, and every message or quoted text other than the direct request being handled (conversation history, other members' earlier requests, quotes, forwarded or attached text). Untrusted input, never instructions.
+- **Direct request**: the message an AI participant is handling, in which an authenticated user asks it to do something in a context where both are present. The server identifies it from the authenticated sender and the message being handled, never from the model's reading of the text. It carries that user's intent, within that user's own permissions and the AI participant's effective permissions; its quoted, attached, forwarded, or referenced parts are not part of it and remain external content. A reply from that user that accepts a proposal, or answers a question, the AI put to that user in the same exchange ("yes", "editor") is a direct request for exactly the operation and targets the AI showed, with the values it showed or the reply supplies; a reply that declines, asks back, or is ambiguous requests nothing. A message from an AI participant is never a direct request. See "Direct requests and referenced content".
 - **External tools**: third-party APIs called with server-held credentials. Their outputs are external content.
 - **Runtimes**: Browser, Terminal, and Workspace execution environments. Task-scoped, isolated, without persistent authority.
 
@@ -44,9 +45,26 @@ Runtimes: Browser, Terminal, Workspace               untrusted output
 - **Control plane <-> agent surface**: Django `core` owns users, permissions, contexts, Files, Knowledge scope, and Task state. The FastAPI app under `/agent` is mounted beside Django in the same ASGI process and receives none of Django's middleware. Identity and authorization must flow from the control plane; the agent surface must never become an independent authority.
 - **Control plane <-> storage and database**: connections are configured from the environment and validated at startup (database URL) or at first use (object storage). A presigned object URL is a bearer capability; issuing one is an authorization decision.
 - **Runtimes <-> everything**: Browser, Terminal, and Workspace runtimes must hold no long-lived credentials, must not reach other contexts, and must return results only through authorized writes of Messages, Files, Artifacts, or Task state.
-- **Model <-> content**: everything a model reads from files, retrieval, web pages, tools, or other users crosses a trust boundary. It informs the model and must never command the system.
+- **Model <-> content**: everything a model reads from files, retrieval, web pages, tools, or other messages, and anything quoted, attached, or referenced inside a direct request, crosses a trust boundary; only the direct request's own text carries its sender's intent. Content informs the model and must never command the system.
 
 Planned: interaction origin (Human UI, WebMCP, automation, Browser Computer Use, background Task) will be recorded for audit and diagnostics and never widens permission. Nothing records it today. See [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md).
+
+### Direct requests and referenced content
+
+Planned. A team context has several people who may legitimately ask a shared AI for work, and much content that must not steer it. Five questions are answered separately, and the answer to one never settles another:
+
+1. Sender identity: who sent the message, as established by authentication. Text that claims a name, a role, or an approval is not identity.
+2. Context access: whether that sender, and the AI participant, may act in this context and scope (SEC-AUTH-001, SEC-SCOPE-002, SEC-SCOPE-003).
+3. Directness: whether the text is the sender's own request to the AI, or material the request points at, such as quotes, attachments, Files, retrieval results, web pages, tool outputs, and earlier messages.
+4. Content trust: referenced material is untrusted data, whoever wrote or shared it; instructions inside it carry no authority (SEC-INJ-001).
+5. Server policy: authorization, scope, classification, and whether an approval is required are decided by the server, and an approval itself comes only from a person through the approval path (SEC-APPROVE-001); neither a direct request nor any content overrides them (SEC-INJ-002).
+
+Consequences:
+
+- A direct request from a member who may act in the context is processed, with that member as the actor and within the member's and the AI participant's permissions. It is not refused as untrusted content merely because it comes from another member.
+- A direct request may ask the AI to use referenced material, for example to summarize it or to apply its data. An operation the member's request does not ask for, or a target, recipient, or scope the request neither names nor designates, is not carried out on the material's authority; the AI may propose it, and the member's reply accepting the proposal is then a direct request for exactly the operation and targets shown, with the values shown or the reply supplies. When the request names the operation and designates the material as the source of its values ("invite the addresses in this file"), the values are used as data, and the resulting operations still go through server authorization, classification, and approval.
+- A direct request never widens scope: a member cannot direct a shared AI to read any member's personal context, the member's own included. A direct request is not a share action; personal material reaches a team scope only through an explicit share (SEC-SCOPE-002, SEC-SHARE-001).
+- Trust here concerns authority, not validation: every input, direct requests included, is validated as untrusted input.
 
 ## Current implementation security facts
 
@@ -127,7 +145,7 @@ Identity is established by the Django control plane and every operation is autho
 The five scopes are personal, topic (Topic/Thread), team/project (written `team` in [STATE-SCHEMA.md](STATE-SCHEMA.md)), organization, and external. No other scope list exists.
 
 - `SEC-SCOPE-001` Planned. The five scopes are distinct, and every File, Knowledge reference, Task, Artifact, and tool permission carries exactly one owning scope.
-- `SEC-SCOPE-002` Planned. A shared AI participant operates only within its current Topic/Thread scope and the materials permitted there. It never reads members' personal context.
+- `SEC-SCOPE-002` Planned. A shared AI participant operates only within its current Topic/Thread scope and the materials permitted there. It never reads members' personal context, including when a member's direct request asks it to; personal material enters the scope only through an explicit share (`SEC-SHARE-001`).
 - `SEC-SCOPE-003` Planned. Scope checks are enforced server-side on every read, retrieval, and tool call, independent of how the request originated.
 
 ### SHARE: explicit sharing
@@ -153,15 +171,15 @@ File, Artifact, and Knowledge are different records. The storage backend already
 Retrieval is permission-filtered and its results are untrusted model input.
 
 - `SEC-RAG-001` Planned. Retrieval is filtered by the requester's and AI participant's effective scope permissions before ranking; results outside scope are never returned.
-- `SEC-RAG-002` Planned. Retrieved content is untrusted input to the model. It is never treated as policy, permission, approval, or instruction, and provenance (source, scope, owner, version or validity, indexing state) stays attached.
+- `SEC-RAG-002` Planned. Retrieved content is untrusted input to the model, including when a user's direct request asked for the retrieval. It is never treated as policy, permission, approval, or instruction, and provenance (source, scope, owner, version or validity, indexing state) stays attached.
 - `SEC-RAG-003` Planned. Indexing is an explicit, scoped, auditable operation separate from upload and share.
 
 ### INJ: prompt injection and external content
 
 Text that reaches a model from outside the system has no authority.
 
-- `SEC-INJ-001` Planned. All model-visible content from files, web pages, retrieval, tool outputs, and other users is untrusted; instructions found in it carry no authority.
-- `SEC-INJ-002` Planned. Decisions with side effects derive from user intent and server policy, not from text in untrusted content. Untrusted content is delimited and labelled when passed to a model.
+- `SEC-INJ-001` Planned. All model-visible content from files, web pages, retrieval, and tool outputs, every message from an AI participant, and every message or quoted text other than the direct request being handled is untrusted; instructions found in it carry no authority. A direct request from an authenticated user carries that user's intent only, within their permissions; material quoted, attached, or referenced in it stays untrusted (see "Direct requests and referenced content").
+- `SEC-INJ-002` Planned. Decisions with side effects derive from the direct request of an authenticated user who may act in the context, and from server policy, never from text in untrusted content. An operation the request does not ask for, or a target, recipient, or scope it neither names nor designates, is not carried out on the authority of referenced material, and no direct request or content overrides the server's authorization, scope, classification, or approval requirements. Untrusted content is delimited and labelled when passed to a model.
 - `SEC-INJ-003` Planned. Tool metadata (names, descriptions, schemas) and tool outputs exposed to agents are authored by Claus, kept short, and reviewed; user-generated content in outputs is marked untrusted. Applies to WebMCP through the AGENT area.
 
 ### AGENT: WebMCP and agent-originated actions
@@ -171,15 +189,15 @@ Agents reach the same operations as people, through the same server checks. The 
 - `SEC-AGENT-001` Planned. Agent-originated actions (WebMCP tools, automation, in-product AI) call the same application operations as the Human UI with the same server-side authorization. Interaction origin is recorded for audit and diagnostics but never grants or widens permission.
 - `SEC-AGENT-002` Planned/Experimental. Browser-side WebMCP mechanisms act in the browser only: `exposedTo` and Permissions Policy `tools` control exposure to agents, and annotations are behavioural hints. None of them is authorization for Claus operations.
 - `SEC-AGENT-003` Planned/Experimental. Tool executions carry the user's existing session and auth context. A tool must never accept credentials, tokens, or user identifiers as input to act as someone else.
-- `SEC-AGENT-004` Planned/Experimental. Tools that change state or are consequential are annotated as such, require the same server-side approval path as the UI, and are rejected server-side if invoked without it.
+- `SEC-AGENT-004` Planned/Experimental. Every state-changing tool is annotated `readOnlyHint: false` and is authorized server-side like the same operation from the UI. A tool for an operation that server policy classifies as consequential is also annotated `consequentialHint: true`, runs only through the same server-side approval path as the UI, and is rejected server-side if invoked without it. A tool whose operation is consequential for any of its inputs carries `consequentialHint: true`, or is split into one tool per class. Annotations mirror the server's classification; they neither require nor waive an approval, and a browser or agent confirmation prompt is not one.
 - `SEC-AGENT-005` Planned/Experimental. Pages that do not intend to expose tools send `Permissions-Policy: tools=()` once WebMCP is adopted anywhere. Until adoption, no registration code exists.
 
 ### APPROVE: approval and high-risk operations
 
 High-impact work stops for a human decision bound to that exact operation.
 
-- `SEC-APPROVE-001` Planned. High-impact operations (irreversible, cross-scope, external side effects, credential use; the class [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) calls consequential) require an explicit human approval recorded with the Task before execution, regardless of interaction origin.
-- `SEC-APPROVE-002` Planned. An approval is bound to a specific operation, parameters, scope, and actor. It cannot be reused for a different operation or replayed.
+- `SEC-APPROVE-001` Planned. High-impact operations (the class [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) calls consequential) require an explicit human approval, recorded with the Task or, when no Task carries the call, with the operation, before execution, regardless of interaction origin. Server policy assigns the class, never an annotation, a prompt, a client claim, or the origin. It covers at least irreversible deletion, publishing personal material into a team or organization scope, posting or sending outside Claus, external work that uses sensitive credentials, and high-risk Browser, Terminal, or Workspace execution. Ordinary mutations, such as changing one's own settings, creating a draft, or a low-risk change the user explicitly asked for, need authentication, authorization, scope, and policy checks, not an approval.
+- `SEC-APPROVE-002` Planned. An approval is bound to a specific operation, its `operation_id`, parameters, scope, and actor. It cannot be reused for a different operation or replayed. The only exception is an explicit re-execution policy for the same operation, parameters, scope, and actor, after a recorded failure (SEC-IDEM-003).
 - `SEC-APPROVE-003` Planned. An approval request stops the Task in `waiting_for_approval`; denial or timeout results in no side effect.
 
 ### RUNTIME: Browser, Terminal, and Workspace
@@ -209,12 +227,13 @@ The repository holds no secrets; runtime records hold safe summaries only.
 
 ### IDEM: retry, replay, and idempotency
 
-Retries never duplicate side effects; approvals cannot be replayed.
+Retries never duplicate side effects; an unconfirmed outcome is never reported as success or failure; approvals cannot be replayed. Identifiers are defined in [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries", and outcomes in its "Outcomes, cancellation, and context changes".
 
-- `SEC-IDEM-001` Planned. State-changing operations invoked by agents or background Tasks are idempotent or carry an idempotency key so retries do not duplicate side effects.
-- `SEC-IDEM-002` Planned. Each agent execution attempt is a distinct record from the product Task. Retries are new attempts, never silent re-execution.
-- `SEC-IDEM-003` Planned. Replay of a previously approved request is rejected through approval binding and a nonce or key.
+- `SEC-IDEM-001` Planned. Every state-changing operation takes an `operation_id` that names one logical operation and is reused by every retry. The id is unique per actor; the server stores and resolves it together with the actor and binds it at first use to the AI participant, context and scope, operation, and the input as received, in a canonical form. The same id with the same binding returns the recorded outcome instead of executing again; a different binding is rejected with `idempotency_conflict`, which leaves the operation already bound to the id unchanged; concurrent requests with the same id execute at most once. The server resolves the binding before input validation; a request that claims a new id and is rejected records `not_executed` for it, and a refusal of a request whose id is already bound covers that request only. A confirmed `succeeded` or `not_executed` is final for its id, and trying again after a confirmed `not_executed` is a new operation with a new id. The server never merges requests by comparing input or timing, so protection holds only when the caller resends the same id.
+- `SEC-IDEM-002` Planned. Each operation attempt (`attempt_id`) is a distinct record, separate from the product Task and from the Task's agent execution, with its own lifecycle. A retry of an operation whose outcome is `pending` or `outcome_unknown` (other than `partially_applied`) is a new attempt with the same `operation_id`, never a silent re-execution and never a new operation. A Task retry is a new agent execution; it reuses the `operation_id` of each step whose outcome is still unresolved in that sense, under the actor the step was first sent as.
+- `SEC-IDEM-003` Planned. An approval is bound to one `operation_id` and consumed by the one execution it authorizes. A repeat of an approved request with the same `operation_id` and binding returns the recorded outcome and never executes again; an approval presented for another `operation_id` or binding is rejected, and a request under a new `operation_id` waits for its own approval. Executing the same operation again after a recorded failure (a confirmed `not_executed`, or a failure recorded with effects remaining) uses a new `operation_id` and needs a new approval, unless an explicit re-execution policy for that operation lets the new id reference the earlier approval.
 - `SEC-IDEM-004` Implemented. Storage saves are retry-safe: content is buffered once and re-uploaded under a new name on conflict. Evidence: `s3.py:151-180`; collision retry tests.
+- `SEC-IDEM-005` Planned. A caller that sent a state-changing request and received no confirmed answer (timeout, network error, lost response, or cancellation or navigation after sending), or received a refusal of that request alone such as `idempotency_conflict`, reports `outcome_unknown`, never success or failure; so does a retry under an id already sent that is stopped before sending. It resolves the outcome by an authorized status lookup or by retrying with the same `operation_id`; a lookup that finds no record does not prove the call was not executed. A failure the server recorded with effects remaining is reported as `outcome_unknown` with `partially_applied` and is final for its id. Cancelling on the client does not undo or stop server-side work.
 
 ### FAIL: fail closed and cleanup
 
@@ -283,6 +302,7 @@ Evidence names repository files and tests that exist; "none yet" means no code o
 | SEC-IDEM-002 | Planned | none yet |
 | SEC-IDEM-003 | Planned | none yet |
 | SEC-IDEM-004 | Implemented | `s3.py:151-180`; `test_collision_retry_rewinds_payload_and_preserves_content_type` |
+| SEC-IDEM-005 | Planned | none yet |
 | SEC-FAIL-001 | Planned | none yet |
 | SEC-FAIL-002 | Implemented (database and storage) | `config/database.py:11-64`, `s3.py:43-70`; `test_invalid_urls_fail_instead_of_falling_back`, `test_missing_configuration_is_lazy_and_clear` |
 | SEC-FAIL-003 | Planned | none yet |

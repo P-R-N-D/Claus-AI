@@ -46,7 +46,7 @@ Conceptual fields:
 
 - `task_id`: stable identifier.
 - `context_ref`: personal or team context that owns the task.
-- `requested_by`: user or AI participant that initiated the task.
+- `requested_by`: the user, or the automation identity, whose request started the task; it is the actor of the task's operations. An AI participant that runs the task is not its requester.
 - `status`: queued, running, waiting_for_approval, succeeded, failed, cancelled, or similar state.
 - `plan`: current high-level task plan when one exists.
 - `current_step`: current execution step.
@@ -61,7 +61,7 @@ Conceptual pseudo-schema:
 {
   "task_id": "task identifier",
   "context_ref": "context identifier",
-  "requested_by": "participant identifier",
+  "requested_by": "user identifier",
   "status": "task status",
   "plan": ["task step"],
   "current_step": "step identifier",
@@ -222,14 +222,18 @@ Conceptual pseudo-schema:
 Fields:
 
 - `origin`: `human_ui`, `webmcp`, `automation`, `browser_computer_use`, or `background_task`.
-- `actor_ref`: the authenticated user on whose behalf the operation runs.
+- `actor_ref`: the authenticated user on whose behalf the operation runs; for a shared AI participant acting on a member's direct request, that member.
 - `ai_participant_ref`: the AI participant involved, when one is.
 - `context_ref`: the `CollaborationContext` the operation runs in.
 - `task_ref`: the `AgentTaskState` that issued the operation, when applicable.
 - `operation`: the application operation name invoked.
-- `request_id`: a unique identifier for this invocation, usable as an idempotency key for retries.
+- `operation_id`: the logical operation this call belongs to, unique per actor. It is created before the first attempt, reused by every retry, and is the idempotency key; a new intent gets a new one. Null for a read.
+- `attempt_id`: this try. Every retry has a new one.
 - `approval_ref`: the approval record the operation relied on, when one was required.
+- `request_id`: optional transport or trace identifier, for log correlation only; never used to detect duplicates.
 - `recorded_at`: timestamp.
+
+The identifiers, their binding rules, and the caller-side outcomes (`succeeded`, `not_executed`, `pending`, `outcome_unknown`) are defined in [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries" and "Outcomes, cancellation, and context changes". The operation layer decides whether a call repeats an earlier one from its `operation_id` binding; `InteractionContext` only records the ids for correlation. An attempt's status is not the Task's `status`: a Task can stay `running` or `waiting_for_approval` across several attempts.
 
 Conceptual pseudo-schema:
 
@@ -241,10 +245,12 @@ Conceptual pseudo-schema:
   "context_ref": "context identifier",
   "task_ref": "task identifier or null",
   "operation": "application operation name",
-  "request_id": "unique invocation identifier",
+  "operation_id": "logical operation identifier or null",
+  "attempt_id": "attempt identifier",
   "approval_ref": "approval identifier or null",
+  "request_id": "trace identifier or null",
   "recorded_at": "timestamp"
 }
 ```
 
-`InteractionContext` does not duplicate `CollaborationContext` (what the actor may see), `AgentTaskState` (what a Task is doing), or `ToolRun` (what a runtime tool did); it references them and adds only the origin of the invocation.
+`InteractionContext` does not duplicate `CollaborationContext` (what the actor may see), `AgentTaskState` (what a Task is doing), or `ToolRun` (what a runtime tool did); it references them and adds only the origin of the invocation and the identifiers that correlate it.

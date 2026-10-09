@@ -142,11 +142,42 @@ Claus rules:
 Planned and Experimental. A context switch is a Topic/Thread change, a switch between personal and team context, logout, or navigation away from the page.
 
 - On every context switch: abort the current registration controller, then register the tool set for the new context. Each registration and unregistration fires `toolchange` (CG draft), which lets agents refresh their tool list.
-- Unregistration does not cancel executions already running (CG draft). Each `execute` callback therefore captures the context identity and a registration generation at registration time and compares them with the current values when it starts, before any state-changing call, and again immediately before returning any result, including a read result. On a mismatch at the start or before a state-changing call, it returns the machine-readable error result `context_changed` and performs no side effect. On a mismatch before returning, it discards the result, so data from the old context never reaches an agent working in the new one, and returns `context_changed`; when a state-changing call had already completed, the error result says the change was applied, so it is neither reported as lost nor retried.
-- The client-side check reduces noise only. The server re-validates the acting user, the AI participant, and the scope on every operation regardless of how the request originated (SEC-AUTH-001, SEC-SCOPE-003, SEC-AGENT-001), and denies with no partial side effect (SEC-FAIL-001).
-- Execution-time cancellation: `execute` receives `options.signal` (CG draft). Pass it to `fetch()` and other cancellable work. A cancelled invocation must not be reported as success and must not be retried silently.
-- Navigation: the CG draft's unloading cleanup steps complete pending executions of an unloaded target document with failure; Chrome docs say `executeTool()` "returns the result of the tool execution, or null when a navigation is triggered". A tool that triggers navigation must return before navigating or document that its result is lost.
+- Unregistration does not cancel executions already running (CG draft). Each `execute` callback therefore captures the context identity and a registration generation at registration time and compares them with the current values when it starts, immediately before sending any state-changing request, and again immediately before returning any result, including a read result. A read with a mismatch at any check returns the machine-readable error result `context_changed` and no data, so data from the old context never reaches an agent working in the new one. A state-changing tool with a mismatch before sending sends nothing and returns `not_executed` (`outcome_unknown` for a resend under an `operation_id` already sent); after sending, what it returns depends on whether the server's answer arrived (see "State-changing tools: operation ids and outcomes").
+- The client-side check is the only place a switch of the visible context is noticed; the server cannot see it. The server re-validates the acting user, the AI participant, and the scope for the context the request names, on every operation regardless of how the request originated (SEC-AUTH-001, SEC-SCOPE-003, SEC-AGENT-001), and denies with no partial side effect (SEC-FAIL-001).
+- Execution-time cancellation: `execute` receives `options.signal` (CG draft). The CG draft aborts it only when the agent aborts its `executeTool()` call, which then rejects with the abort reason, or when the calling document is unloaded, which leaves no caller to observe a result. In both cases the browser discards whatever `execute` returns afterwards, so the agent receives neither an `outcome` nor an `operation_id` (CG draft, "cancel a pending tool execution"). `execute` sees an abort only through the signal, so an abort keeps the request from being sent only when it arrives before `execute` sends it, for example while `execute` awaits earlier work; code that sends without awaiting first cannot be stopped this way. Pass the signal to `fetch()` and other cancellable work so the tool stops waiting. Aborting stops the client only: once the request is sent, the server may already have applied the change. An agent that aborted a state-changing call therefore treats it as `outcome_unknown` and resolves it through the status tool's list of recent operations in the current context, never by calling the tool again as a new operation.
+- Navigation: the CG draft's unloading cleanup steps complete pending executions of an unloaded target document with failure; Chrome docs say `executeTool()` "returns the result of the tool execution, or null when a navigation is triggered". A tool that triggers navigation must return before navigating or document that its result is lost. For a state-changing tool, a lost result is `outcome_unknown` to the agent, which recovers through the status tool, not by calling the tool again as a new operation.
 - Logout invalidates the session the tools rely on. Abort the registration controller before clearing the session so no tool stays visible without credentials.
+
+## State-changing tools: operation ids and outcomes
+
+Planned and Experimental. Claus rules that apply the contract in [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries" and "Outcomes, cancellation, and context changes" to tools. The CG draft defines none of this.
+
+- A state-changing tool's `inputSchema` has an optional `operation_id` property. The agent passes it only to resolve an operation whose earlier result was `pending` or `outcome_unknown` other than `partially_applied`; after `succeeded`, `not_executed`, or `partially_applied` it leaves it out, and trying again is a new operation. Leaving it out declares a new intent. `execute` removes it from the input before sending, because it is not part of the operation input that the server binds.
+- When it is absent, `execute` creates one with `crypto.randomUUID()` before sending anything, reuses it for any retry inside the same execution, and returns it in every result, success or not.
+- A supplied `operation_id` is untrusted input. `execute` rejects a value that is not in the format Claus issues. It accepts a well-formed value only when this page issued it for the same user and context identity as the current registration, and it keeps the ids it issues with that identity for this check. For any other value it sends nothing and returns `outcome_unknown` with `error.code: "operation_id_mismatch"`; the agent resolves that id from the context it was issued in, or tells the person. The server resolves an id only among the acting user's own operations (SEC-AGENT-003, SEC-IDEM-001). It grants nothing.
+- `execute` never decides that a call repeats an earlier one by comparing input. Without an `operation_id` from the agent, it is a new operation.
+- A read-only status tool takes an `operation_id`, or lists the actor's recent operations in the current context with their `operation_id`s, and returns their outcomes through the same server authorization as any read (SEC-SCOPE-003). It returns details only for operations owned by the current context; for another context's operation that the AI participant, if any, may also read, it returns only the `operation_id`, the operation name, and the outcome, and otherwise no record. It is how an agent resolves `outcome_unknown`, including after an abort or a navigation lost a result. A lookup that finds no record does not prove the call was not executed: the agent retries with the same `operation_id`, or tells the person, and does not start a new operation on that basis.
+
+Results of a state-changing tool. `ok` is true only when `outcome` is `succeeded`; every result carries `outcome` and `operation_id` (null only when the agent supplied a malformed one).
+
+| What happened | Result |
+|---|---|
+| Context mismatch at the start or immediately before sending | `outcome: "not_executed"`, `error.code: "context_changed"`. Nothing was sent. |
+| Execution signal aborted before sending | `outcome: "not_executed"`, `error.code: "cancelled"`. Reached only when the abort arrives before `execute` sends. The browser discards this result: an agent abort makes `executeTool()` reject with the abort reason, and an unloaded caller observes nothing (CG draft). |
+| Invalid input, including a malformed `operation_id` | `outcome: "not_executed"`, `error.code: "invalid_input"`. Nothing was sent. When the agent supplied an `operation_id`, malformed included, `outcome_unknown` instead (see below). |
+| Server rejected the request that claimed the id (validation, authorization, scope, approval denied) | `outcome: "not_executed"`, the server's `error.code`. The server recorded it as the id's outcome. |
+| Server refused this request alone, with no outcome for the id (`idempotency_conflict`, or a repeat refused because, for example, the actor lost access) | `outcome: "outcome_unknown"`, the server's `error.code`. This request did nothing; the operation already bound to the id keeps its own outcome, read through the status tool. |
+| Server reported a failure recorded with effects remaining | `outcome: "outcome_unknown"`, `error.code: "partially_applied"`, and the server's `error` describing the recorded state. Final for the id: never success, never `not_executed`, not retried under the same id; executing again is a new operation the person decides on. |
+| Server accepted the call and it has not finished | `outcome: "pending"`, with the Task's `status` as `task_status` when a Task carries it (for example `waiting_for_approval`). |
+| Request sent and no confirmed answer arrived (timeout, network error, lost response) | `outcome: "outcome_unknown"`, `error.code: "timeout"` or `"network_error"`. Never success, never failure. |
+| Request sent, then the execution signal aborted | `outcome: "outcome_unknown"`, `error.code: "cancelled"`. Discarded by the browser as above; the agent treats its aborted call as `outcome_unknown`. |
+| Server confirmed success, context unchanged | `outcome: "succeeded"` and the data. |
+| Any server answer, context changed before returning | The outcome as in the rows above, the operation name, `error.code` when there is one, and `data_withheld: "context_changed"`. No data, error details, or Task details from the old context; they come from the status tool called from the owning context. |
+| The session ended (logout) before returning | Logout is a context switch, so the row above applies: `data_withheld: "context_changed"` and no data. Its details need a new session in the owning context. |
+
+With an `operation_id` the agent supplied (malformed included), or one already sent in this execution, every row above that sends nothing reports `outcome_unknown` instead of `not_executed`: only this attempt was not sent, and the operation keeps the outcome of its earlier attempts.
+
+A context switch alone does not stop waiting: a server answer that arrives after it follows the context-changed row, and only the absence of an answer makes the outcome `outcome_unknown`.
 
 ## Tool naming, description, and schemas
 
@@ -170,7 +201,7 @@ Input schema:
 Output:
 
 - CG draft: the result is the JSON-stringified return value of `execute`; there is no `outputSchema`. A rejected `execute` promise reaches the caller only as `UnknownError`.
-- Claus: return a plain JSON object with a stable shape rather than throwing for expected failures: an `ok` boolean, a machine-readable `error.code` on failure (stable, locale-independent, never a translated message), and the data payload on success. Chrome docs recommend about 1.5K characters per tool output. Outputs never contain presigned URLs, tokens, or other secrets (SEC-SECRET-003, SEC-FILE-005). Outputs that contain user-generated or external content are marked with `untrustedContentHint` (next section).
+- Claus: return a plain JSON object with a stable shape rather than throwing for expected failures: an `ok` boolean, a machine-readable `error.code` on failure (stable, locale-independent, never a translated message), and the data payload on success. State-changing tools also return `operation_id` and `outcome` (see "State-changing tools: operation ids and outcomes"). Chrome docs recommend about 1.5K characters per tool output. Outputs never contain presigned URLs, tokens, or other secrets (SEC-SECRET-003, SEC-FILE-005). Outputs that contain user-generated or external content are marked with `untrustedContentHint` (next section).
 
 ## Tool classification and annotations
 
@@ -180,8 +211,10 @@ Planned and Experimental. CG draft: `ToolAnnotations` are hints to agents and br
 |---|---|---|
 | read | `readOnlyHint: true` | No state change; same server-side scope check as the UI (SEC-SCOPE-003). |
 | untrusted read | `readOnlyHint: true`, `untrustedContentHint: true` | Output includes user, file, retrieval, or external content; the agent must treat it as data (SEC-INJ-001, SEC-RAG-002). |
-| mutation | `readOnlyHint: false` | Server-side authorization, idempotency key per invocation, audit (SEC-AUTH-001, SEC-IDEM-001, SEC-SECRET-004). |
-| consequential | `consequentialHint: true` | Irreversible, cross-scope, external side effect, or credential use; requires the same server-side approval path as the UI and is rejected server-side without it (SEC-AGENT-004, SEC-APPROVE-001, SEC-APPROVE-003). |
+| mutation | `readOnlyHint: false` | Server-side authorization, scope, and policy checks; an `operation_id` per logical operation; audit. No approval step (SEC-AUTH-001, SEC-IDEM-001, SEC-SECRET-004). |
+| consequential | `readOnlyHint: false`, `consequentialHint: true` | Server policy classifies the operation as consequential, at least for irreversible deletion, publishing personal material into a team or organization scope, posting or sending outside Claus, external work with sensitive credentials, or high-risk Browser, Terminal, or Workspace execution. It runs only after the same server-side approval path as the UI and is rejected without it (SEC-AGENT-004, SEC-APPROVE-001, SEC-APPROVE-003). |
+
+The annotation mirrors the server's classification ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Classification and approval") so agents can warn people; it never decides it. Setting `consequentialHint` does not make an approval required, and leaving it out does not remove one. A tool whose operation is consequential for any of its inputs carries `consequentialHint: true`, or is split into one tool per class.
 
 `debugging: true` is an annotation flag, not a fifth class: developer tooling only (Chrome docs: available from Chrome 156), never registered in production builds.
 
@@ -219,9 +252,9 @@ Planned and Experimental. The server does not know or care that a request came f
 
 - Authorization: every operation is authorized server-side against the acting user and, for AI, the AI participant's effective permissions (SEC-AUTH-001, SEC-SCOPE-003). Client-side checks in `execute` are UX only.
 - Identity: tool executions carry the user's existing session and auth context (SEC-AGENT-003). The `/agent/*` surface bypasses Django middleware and has no authentication today (SEC-AUTH-004); tools must not target it until that is resolved.
-- Approval: consequential operations go through the Claus approval path before execution, and it is the Task, not the tool invocation, that stops in `waiting_for_approval` (SEC-APPROVE-001 to SEC-APPROVE-003, SEC-IDEM-003).
-- Duplicate execution: each state-changing invocation generates one idempotency key in `execute` and attaches it to the operation; internal retries of that invocation reuse the key (SEC-IDEM-001). A new invocation by the agent is a new attempt and a new record, never a silent re-execution (SEC-IDEM-002).
-- Audit: the interaction origin `webmcp` is recorded with the invocation's actor, AI participant, context, operation, approval, and request id (`InteractionContext` in [STATE-SCHEMA.md](STATE-SCHEMA.md)); the outcome lives on the ToolRun or Task record (SEC-SECRET-004). Origin is diagnostic data; it never widens permission (SEC-AGENT-001).
+- Approval: operations that server policy classifies as consequential go through the Claus approval path before execution; it is the Task, not the tool invocation, that stops in `waiting_for_approval`, and the tool returns `pending` (SEC-APPROVE-001 to SEC-APPROVE-003, SEC-IDEM-003). An ordinary mutation needs authorization and policy checks, not an approval.
+- Duplicate execution: every state-changing request carries the `operation_id` described above. The server binds it at first use; the same id with the same binding returns the recorded outcome instead of executing again, a different binding is rejected with `idempotency_conflict`, and concurrent duplicates execute at most once (SEC-IDEM-001). Each send is a separate attempt record (SEC-IDEM-002). A call without an `operation_id` from the agent is a new operation, never a guessed retry.
+- Audit: the interaction origin `webmcp` is recorded with the invocation's actor, AI participant, context, operation, `operation_id`, `attempt_id`, approval, and request id (`InteractionContext` in [STATE-SCHEMA.md](STATE-SCHEMA.md)); the outcome is the one recorded with the `operation_id` binding ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries"), and a Task or ToolRun record may reference it (SEC-SECRET-004). Origin is diagnostic data; it never widens permission (SEC-AGENT-001).
 - Logs and tool results contain safe summaries only (SEC-SECRET-003).
 
 Requirement IDs are defined in [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md).
@@ -277,6 +310,57 @@ if ("modelContext" in document) {
 }
 ```
 
+Illustrative example, not implemented. The `execute` body of a state-changing tool, registered as above with `readOnlyHint: false`, showing where each outcome in "State-changing tools: operation ids and outcomes" comes from. `captured` is the user and context identity recorded at registration; `contextIsCurrent`, `isOperationId`, `issuedFor`, `issueOperationId`, and `callOperation` are placeholders.
+
+```js
+// Illustrative example, not implemented.
+async function execute(input, { signal }) {
+  const { operation_id: supplied, ...args } = input; // the id is not operation input
+  if (supplied !== undefined && !isOperationId(supplied)) {
+    // The agent was resolving an earlier operation: this attempt says nothing about it.
+    return { ok: false, operation_id: null, outcome: "outcome_unknown", error: { code: "invalid_input" } };
+  }
+  if (supplied !== undefined && !issuedFor(supplied, captured)) {
+    // Issued for another user or context, or not by this page: resolve it there.
+    return { ok: false, operation_id: supplied, outcome: "outcome_unknown", error: { code: "operation_id_mismatch" } };
+  }
+  // crypto.randomUUID(), kept with the identity in `captured` for issuedFor().
+  const operation_id = supplied ?? issueOperationId(captured);
+  // A stop before sending: an id sent before keeps its earlier, unresolved outcome.
+  const notSent = (code) => ({ ok: false, operation_id,
+    outcome: supplied === undefined ? "not_executed" : "outcome_unknown", error: { code } });
+  if (!contextIsCurrent(captured)) return notSent("context_changed");
+  if (signal.aborted) return notSent("cancelled"); // only if an await came before this
+
+  let answer;
+  try {
+    // Resolves with the server's answer: succeeded, not_executed, pending,
+    // outcome_unknown with partially_applied, or a refusal of this request alone
+    // (an error code and no outcome, such as idempotency_conflict). Rejects when
+    // no answer arrived, including a server error that does not say whether the
+    // change was applied.
+    answer = await callOperation("example.update_item", args, { operation_id, signal });
+  } catch (error) {
+    // The request may have been applied: never success, never failure. After
+    // an abort the browser discards this result (CG draft).
+    const code = signal.aborted ? "cancelled"
+      : error.name === "TimeoutError" ? "timeout" : "network_error";
+    return { ok: false, operation_id, outcome: "outcome_unknown", error: { code } };
+  }
+  // A refusal of this request alone: the operation bound to the id may have run.
+  const outcome = answer.outcome ?? "outcome_unknown";
+  if (!contextIsCurrent(captured)) {
+    // The agent now works in another context: outcome and codes only, no details.
+    return { ok: outcome === "succeeded", operation_id, outcome, operation: "example.update_item",
+      error: answer.error && { code: answer.error.code }, data_withheld: "context_changed" };
+  }
+  if (outcome !== "succeeded") {
+    return { ok: false, operation_id, outcome, error: answer.error, task_status: answer.task_status };
+  }
+  return { ok: true, operation_id, outcome, data: answer.data };
+}
+```
+
 ## Current repository status
 
 Facts, HEAD 8ec5623, 2026-10-08:
@@ -301,10 +385,15 @@ Tests to add, each with normal, denial, boundary, and retry cases:
 
 - Feature detection: with `document.modelContext` absent, the Human UI renders and works unchanged; with it present, the expected tool set appears in `getTools()`.
 - Registration failure: duplicate `name`, invalid `name`, empty `description`, non-serializable `inputSchema`, and `Permissions-Policy: tools=()` each reject only the affected registration; the page keeps working.
-- Context switch: after a Topic/Thread change or logout, the old set is gone from `getTools()`, the new set is present, an execution started before the switch returns `context_changed` with no side effect, and a read already awaiting the server when the switch happens returns `context_changed` instead of the old context's data.
-- Abort: aborting the execution-time signal cancels the underlying request and the invocation is not reported as success.
+- Context switch: after a Topic/Thread change or logout, the old set is gone from `getTools()` and the new set is present; a state-changing execution whose context changed before sending sends nothing and returns `not_executed` with `context_changed` (`outcome_unknown` when the agent supplied the `operation_id`); a read already awaiting the server when the switch happens returns `context_changed` and none of the old context's data.
+- Cancellation before sending: an abort that arrives while `execute` awaits work before sending makes it send nothing, and `executeTool()` rejects with the abort reason; an abort issued before `execute` starts does not stop code that sends without awaiting first, so the test checks through the status tool that at most one side effect occurred.
+- Supplied ids: an `operation_id` issued for another user or context returns `outcome_unknown` with `operation_id_mismatch` and sends nothing; a resend under a supplied id that is stopped before sending returns `outcome_unknown`, never `not_executed`.
+- Cancellation after the server started: aborting after the request reached the server rejects `executeTool()` with the abort reason, the change stands, and the status tool's listing reports the actual outcome with one side effect.
+- Lost response: when the server applies a change and the response is dropped, the tool returns `outcome_unknown`; a retry with the returned `operation_id` returns the recorded outcome, and the side effect happens once.
+- Duplicates: the same `operation_id` sent twice, one after the other and concurrently, produces one side effect; the same id with a different input is rejected with `idempotency_conflict` and reported as `outcome_unknown`; a call without an `operation_id` is a new operation even when its input repeats an earlier call.
+- Stale data: any server answer that arrives after a switch between contexts, including between personal and team, returns only the safe summary, and its details, recorded state included, are readable only through the status tool called from the owning context.
 - Permissions Policy: pages that expose no tools send `Permissions-Policy: tools=()`.
-- Server contract: an invocation without authorization or without a required approval is rejected server-side; a repeated invocation with the same idempotency key does not duplicate the side effect; the audit record carries origin `webmcp`.
+- Server contract: an invocation without authorization is rejected server-side; an ordinary mutation completes without an approval step; a consequential operation never executes before a bound approval (the tool returns `pending` while its Task waits in `waiting_for_approval`, and an attempt to execute it outside the approval path is rejected); the audit record carries origin `webmcp` and the `operation_id`.
 
 Review: WebMCP and agent-originated actions are a security review trigger ([CODE-REVIEW.md](CODE-REVIEW.md), [SECURITY-REVIEW.md](SECURITY-REVIEW.md)).
 

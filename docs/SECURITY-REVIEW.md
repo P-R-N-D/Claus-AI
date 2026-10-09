@@ -26,7 +26,7 @@ Triggers are the ones listed in [CODE-REVIEW.md](CODE-REVIEW.md) step 9. Area na
 
 | Trigger | Primary areas | Also |
 |---|---|---|
-| Authentication, permission, or scope code; a new DRF view; a new `/agent/*` route | AUTH, SCOPE, SHARE | FAIL, API, `SEC-AGENT-001`, `SEC-SECRET-004` |
+| Authentication, permission, or scope code; a new DRF view; a new `/agent/*` route | AUTH, SCOPE, SHARE | FAIL, API, `SEC-AGENT-001`, `SEC-SECRET-004`, `SEC-IDEM-001`, `SEC-IDEM-005` |
 | File and storage code (`core/storage/s3.py`, object naming, overwrite semantics, presigned URLs, upload and download paths) | FILE, `SEC-IDEM-004` | SCOPE, `SEC-FAIL-002`, `SEC-SECRET-003` |
 | Retrieval and indexing | RAG, SHARE, SCOPE | INJ, `SEC-FILE-001` |
 | Tool or runtime execution (Browser, Terminal, Workspace, Playwright, external tool calls) | RUNTIME, TOOL | IDEM, SECRET, `SEC-FILE-006`, `SEC-FAIL-003` |
@@ -79,7 +79,7 @@ For each entry point the change adds or alters, write the flow. When the change 
 entry -> validation -> authentication -> authorization -> approval -> operation -> side effects -> outputs
 ```
 
-- Entry: request body, query, path, header, cookie, environment variable, file content, retrieved text, tool input, tool output, runtime output, or a message from another user. Everything from the browser, a file, retrieval, a tool, a runtime, or another user is untrusted (`SEC-INJ-001`).
+- Entry: request body, query, path, header, cookie, environment variable, file content, retrieved text, tool input, tool output, runtime output, or a message from another user. Everything from the browser, a file, retrieval, a tool, a runtime, or another user is untrusted input and is validated (`SEC-INJ-001`). For a message, also record whether it is the direct request being handled (its server-authenticated sender, a user, asks the AI for something in a context the user may act in, or accepts a proposal or answers a question the AI put to that user, for exactly the operation and targets shown; a reply that declines, asks back, or is ambiguous requests nothing) or material the AI reads (history, other members' earlier requests, messages from AI participants, quotes, attachments, referenced content); only a direct request carries intent, and only its sender's ([SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md), "Direct requests and referenced content").
 - Validation: what is checked (type, length, charset, allowlist), where, and what happens on failure. Note a check that is missing or that runs after a side effect.
 - Side effects: database writes, object storage writes, outbound calls, log lines, cache or process state, files on disk, messages to other users.
 - Outputs: what is returned and to whom, what is logged, what reaches a model, what reaches another context.
@@ -99,19 +99,21 @@ IDs: `SEC-AUTH-001` to `SEC-AUTH-004`, `SEC-SCOPE-001` to `SEC-SCOPE-003`, `SEC-
 
 ### 4. Check approval and side effects
 
-IDs: `SEC-APPROVE-001` to `SEC-APPROVE-003`, `SEC-AGENT-004`, `SEC-FAIL-001`.
+IDs: `SEC-APPROVE-001` to `SEC-APPROVE-003`, `SEC-AGENT-002`, `SEC-AGENT-004`, `SEC-FAIL-001`.
 
-- Classify every operation in the traced flows as read, untrusted read, mutation, or consequential (irreversible, cross-scope, external side effect, credential use), the classification defined in [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md).
-- A consequential operation has a recorded human approval before execution, bound to the operation, parameters, scope, and actor (`SEC-APPROVE-001`, `SEC-APPROVE-002`); the Task stops in `waiting_for_approval`, and denial or timeout leaves no side effect (`SEC-APPROVE-003`).
+- Classify every operation in the traced flows as read, untrusted read, mutation, or consequential, the classes defined in [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Classification and approval". Consequential covers at least irreversible deletion, publishing personal material into a team or organization scope, posting or sending outside Claus, external work with sensitive credentials, and high-risk Browser, Terminal, or Workspace execution (`SEC-APPROVE-001`).
+- A consequential operation has a recorded human approval before execution, bound to the operation, its `operation_id`, parameters, scope, and actor (`SEC-APPROVE-001`, `SEC-APPROVE-002`); the Task stops in `waiting_for_approval`, and denial or timeout leaves no side effect (`SEC-APPROVE-003`).
 - The approval path is the same for every origin; an agent-originated invocation without it is rejected server-side (`SEC-AGENT-004`).
+- An ordinary mutation needs server-side authentication, authorization, scope, and policy checks, not an approval (`SEC-APPROVE-001`). Deciding whether an approval is required from a tool annotation, a browser or agent prompt, a client claim, or the interaction origin is a finding (`SEC-APPROVE-001`, `SEC-AGENT-002`, `SEC-AGENT-004`). An approval step added to an ordinary mutation without a server policy classifying it as consequential is a non-blocking finding: it stalls agents on low-risk work and adds no control.
 - A side effect that occurs before authorization or approval completes, or that survives a denial, is a finding (`SEC-FAIL-001`). A partial write left behind by a failure midway is a finding.
 
 ### 5. Review prompt injection and untrusted content handling
 
-IDs: `SEC-INJ-001` to `SEC-INJ-003`, `SEC-RAG-002`, `SEC-AGENT-002`, `SEC-AGENT-005`.
+IDs: `SEC-INJ-001` to `SEC-INJ-003`, `SEC-RAG-002`, `SEC-SCOPE-002`, `SEC-AGENT-002`, `SEC-AGENT-005`.
 
 - Find every path by which text from an untrusted source (step 2) reaches a model, a decision, or another user. No such path exists at HEAD; a change that introduces one is in scope in full.
 - Untrusted content is delimited and labelled before it reaches a model, and instructions inside it change nothing about authorization, approval, scope, or what the system does (`SEC-INJ-001`, `SEC-INJ-002`).
+- Messages are told apart by authenticated sender and directness, not by their wording. A design that treats every team member's message as untrusted, so members cannot direct a shared AI they may use, is a finding; so is one that carries out an operation, target, recipient, or scope found only in quoted or referenced material and not named or designated by the member's request, or that lets a member's request reach any member's personal context, the member's own included (`SEC-INJ-001`, `SEC-INJ-002`, `SEC-SCOPE-002`).
 - Retrieved chunks keep their provenance and are never treated as policy (`SEC-RAG-002`).
 - Tool names, descriptions, and schemas exposed to agents are authored in the repository, short, and reviewed; outputs that carry user content are marked untrusted (`SEC-INJ-003`).
 - Once a change registers any WebMCP tool, pages that expose none send `Permissions-Policy: tools=()` (`SEC-AGENT-005`). No registration code exists today, and WebMCP is Experimental ([WEBMCP.md](WEBMCP.md)).
@@ -141,29 +143,107 @@ External tools (Planned):
 
 ### 7. Check secrets, audit, and duplicate-execution risks
 
-IDs: `SEC-SECRET-001` to `SEC-SECRET-004`, `SEC-IDEM-001` to `SEC-IDEM-003`, `SEC-FAIL-002`, `SEC-API-001` to `SEC-API-003`, `SEC-AGENT-003`.
+IDs: `SEC-SECRET-001` to `SEC-SECRET-004`, `SEC-IDEM-001` to `SEC-IDEM-003`, `SEC-IDEM-005`, `SEC-FAIL-002`, `SEC-API-001` to `SEC-API-003`, `SEC-AGENT-003`.
 
-- The diff contains no secret, token, key, or real credential; a new environment variable gets an empty placeholder in `.env.example` and nothing more (`SEC-SECRET-001`). Search the diff text, not only the file names:
+- The diff contains no secret, token, key, or real credential; a new environment variable gets an empty placeholder in `.env.example` and nothing more (`SEC-SECRET-001`). Search the added text and the file names of every source of change: the committed range for a committed change; unstaged edits, staged edits, and untracked files for an uncommitted one. The check below uses only git and the Python standard library. It reads file names NUL-delimited, so spaces, tabs, newlines, and non-ASCII characters in names are handled, and it prints each name as a Python string literal. It reports the location and the matched keyword, never the matching line, so a real secret is not copied into the review record. `-I` keeps modules in the reviewed tree from shadowing the standard library.
 
 ```bash
-# Committed change: <base> is the target commit, <head> is the change tip
-git diff <base>...<head> | grep -niE 'password|secret|token|api[_-]?key|private key'
-git diff --name-only <base>...<head> | grep -E '(^|/)\.env'
+# Run inside the work tree.
+# Committed change: <base> is the target commit, <head> is the change tip.
+# Uncommitted change: leave out <base> <head>; unstaged, staged, and untracked files are scanned.
+python3 -I - <base> <head> <<'PY'
+import os, re, subprocess, sys
 
-# Uncommitted change: the working tree is the head, so scan unstaged and staged edits
-git diff | grep -niE 'password|secret|token|api[_-]?key|private key'
-git diff --cached | grep -niE 'password|secret|token|api[_-]?key|private key'
-{ git diff --name-only -z; git diff --cached --name-only -z; } | tr '\0' '\n' | grep -E '(^|/)\.env'
-# Untracked files are invisible to git diff; NUL-delimited names reach grep intact
-git ls-files -z --others --exclude-standard | xargs -0 -r grep -HniE 'password|secret|token|api[_-]?key|private key' --
-git ls-files -z --others --exclude-standard | tr '\0' '\n' | grep -E '(^|/)\.env'
+WORD = re.compile(rb'password|secret|token|api[_-]?key|private key', re.I)
+ENV = re.compile(rb'(^|/)\.env')
+DIFF = ['--no-renames', '--no-ext-diff', '--no-textconv', '--diff-filter=d']
+found = 0
+
+def git(*args):
+    r = subprocess.run(['git', '--literal-pathspecs', *args], capture_output=True)
+    if r.returncode:
+        sys.stderr.buffer.write(r.stderr)
+        sys.exit(2)
+    return r.stdout
+
+def report(source, path, what):
+    global found
+    found = 1
+    print(source, repr(os.fsdecode(path)), what)
+
+def scan(source, path, lines):
+    for n, text in lines:
+        m = WORD.search(text)
+        if m:
+            report(source, path, 'line %d: %s' % (n, m.group().decode().lower()))
+
+def added(diff):
+    n = None
+    for d in diff.split(b'\n'):
+        if d.startswith(b'diff '):
+            n = None
+        elif d.startswith(b'@@'):
+            m = re.match(rb'@@ -\S+ \+(\d+)', d)
+            if not m:
+                raise ValueError('unsupported diff hunk; resolve unmerged paths first')
+            n = int(m.group(1))
+        elif n is not None and d.startswith(b'+'):
+            yield n, d[1:]
+            n += 1
+
+def scan_diff(source, rng):
+    for rec in git('diff', *DIFF, '--numstat', '-z', *rng).split(b'\0'):
+        if rec:
+            count, _, path = rec.split(b'\t', 2)
+            if ENV.search(path):
+                report(source, path, '.env name')
+            if count == b'-':
+                report(source, path, 'binary, not scanned')
+            else:
+                scan(source, path, added(git('diff', *DIFF, '--no-color', '-U0', '--inter-hunk-context=0', *rng, '--', path)))
+
+def main(args):
+    os.chdir(git('rev-parse', '--show-toplevel')[:-1])
+    if len(args) == 2:
+        return scan_diff('committed', [args[0] + '...' + args[1]])
+    if args:
+        raise ValueError('expected no arguments or <base> <head>')
+    if git('ls-files', '-u', '-z'):
+        raise ValueError('unmerged paths; resolve them first')
+    scan_diff('unstaged', [])
+    scan_diff('staged', ['--cached'])
+    for path in git('ls-files', '-z', '--others', '--exclude-standard').split(b'\0'):
+        if not path:
+            continue
+        if ENV.search(path):
+            report('untracked', path, '.env name')
+        if os.path.islink(path) or not os.path.isfile(path):
+            report('untracked', path, 'not a regular file, not scanned')
+            continue
+        with open(path, 'rb') as f:
+            data = f.read()
+        if b'\0' in data[:8000]:
+            report('untracked', path, 'binary, not scanned')
+        else:
+            scan('untracked', path, enumerate(data.split(b'\n'), 1))
+
+try:
+    main(sys.argv[1:])
+except Exception as e:
+    print('check failed:', e, file=sys.stderr)
+    sys.exit(2)
+sys.exit(found)
+PY
+echo "exit status: $?"
 ```
+
+Exit status 0 means nothing matched and every changed file was scanned. 1 means at least one line needs review: a keyword match, a `.env` name, or a file the check could not scan (binary, symlink, or not a regular file). 2 means the check itself failed (not a repository, an unknown revision, unmerged paths, an unreadable file) and is never a clean result. Only added lines are scanned; deleted files are skipped. Committed mode scans the net diff from the merge base to `<head>`, not each commit, so a secret added and later removed inside the range is not found; for a multi-commit change, also run it with `<commit>^ <commit>` for each commit in `git rev-list --no-merges <base>..<head>`. When the head is the working tree and the branch also has commits after `<base>`, run it twice, once with `<base> HEAD` and once with no arguments; the result is clean only when both exit 0. Matches are leads: the keywords also match ordinary words such as `token` in prose, and a secret that contains none of them is not found. This is a heuristic, not a dedicated secret scanner, and none is configured in this repository. A secret that reached a commit is treated as exposed even after it is removed from the branch.
 
 - A new configuration value fails clearly when missing or invalid; a new silent fallback to an insecure default is a finding (`SEC-FAIL-002`). The `SECRET_KEY` and `DEBUG` fallbacks are the documented exception (`SEC-SECRET-002`), not a precedent.
 - New log lines, Task records, and tool run summaries carry no credentials, presigned URLs, raw tokens, or full prompts containing personal data (`SEC-SECRET-003`).
 - A state-changing operation produces an audit record with actor, operation, scope and resource, origin, time, approval, and outcome (`SEC-SECRET-004`).
 - No tool or endpoint accepts credentials, tokens, or user identifiers as input in order to act as someone else (`SEC-AGENT-003`).
-- Duplicate execution: a mutation invoked by an agent or a background Task is idempotent or keyed (`SEC-IDEM-001`); a retry is a new attempt record (`SEC-IDEM-002`); a replayed approved request is rejected (`SEC-IDEM-003`).
+- Duplicate execution: every state-changing operation takes an `operation_id` that the caller creates before the first attempt and reuses on every retry; the server keys it per actor, binds it to AI participant, context, operation, and input, returns the recorded outcome for a repeat, rejects a different binding without touching the bound operation, and claims the id atomically under concurrency (`SEC-IDEM-001`). Each try is its own attempt record, separate from Task state (`SEC-IDEM-002`). A repeat of an approved request with the same id returns the recorded outcome without executing again, an approval presented for another id or binding is rejected, and a new `operation_id` never inherits an approval unless, after a recorded failure, an explicit re-execution policy for that operation lets it reference the earlier one (`SEC-IDEM-003`). Deduplicating by comparing input or timing (`SEC-IDEM-001`), creating a new `operation_id` to retry a call whose outcome is `pending` or an `outcome_unknown` other than `partially_applied` (`SEC-IDEM-002`), or reporting a sent request with no confirmed answer, or a stopped or refused retry under an id already sent, as success or failure instead of `outcome_unknown` (`SEC-IDEM-005`) is a finding.
 - API surface: the health endpoints still return nothing sensitive (`SEC-API-001`; a new endpoint's payload is examined under steps 3 and 5); the browsable API, `/agent/docs`, `/agent/openapi.json`, and FastAPI's default `/agent/redoc` remain development conveniences whose exposure is decided before deployment (`SEC-API-002`); `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS` are not widened in code (`SEC-API-003`).
 
 ### 8. Require normal, denial, boundary, and retry tests

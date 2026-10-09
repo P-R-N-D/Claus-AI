@@ -136,7 +136,7 @@ Claus should be designed for free-threaded Python compatibility.
 - Preserve the separation between personal and shared context.
 - Preserve the separation between conversation, tasks, files/artifacts, knowledge, and execution runtimes.
 - Check authorization before accessing shared files, knowledge, or tools.
-- Require explicit approval for high-impact or state-changing actions when such workflows are implemented.
+- Require explicit approval for high-impact actions, as server policy classifies them, when such workflows are implemented; every state-changing action still requires server-side authorization.
 - UI/web design changes must include Playwright-based visual testing.
 - Backend changes must at least run Django checks.
 - API contract changes should include appropriate Django/DRF tests and Postman/Newman verification when that workflow is in scope.

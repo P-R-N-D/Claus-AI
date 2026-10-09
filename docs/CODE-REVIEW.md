@@ -84,7 +84,7 @@ Check the change against the invariants in [CONTEXT.md](CONTEXT.md), [ARCHITECTU
 
 - Personal context stays separate from team context; nothing moves across without an explicit user share.
 - File, Artifact, and Knowledge are distinct; upload implies neither sharing nor indexing.
-- A Task is not a Message; a product Task is not an agent execution attempt; retries are new attempts.
+- A Task is not a Message; a product Task is not an agent execution, and an agent execution is not an operation attempt. Retrying an operation whose outcome is `pending` or an `outcome_unknown` other than `partially_applied` is a new attempt with the same `operation_id`; trying again after a confirmed `not_executed` or a `partially_applied` failure is a new operation ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries").
 - Browser, Terminal, and Workspace runtimes are task-scoped and separate from persistent state; results return only as Messages, Files, Artifacts, or Task results.
 - A shared viewing surface holds presentation state, not storage.
 - The Agent FastAPI surface is an execution interface, not a source of truth for users, permissions, or contexts.

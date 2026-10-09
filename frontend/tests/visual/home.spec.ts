@@ -19,6 +19,22 @@ test("user and console surfaces render with both backend services", async ({ pag
     expect(response.status(), `${path} must not redirect`).toBe(200);
   }
 
+  const query = "?view=tasks&filter=a%2Fb";
+  for (const path of ["/console", "/core-ui", "/agent-ui"]) {
+    const response = await page.request.get(`${path}/${query}`, { maxRedirects: 0 });
+    expect(response.status(), `${path}/ must keep its canonical UI redirect`).toBe(308);
+    const location = response.headers()["location"];
+    expect(location).toBeDefined();
+    expect(new URL(location, response.url()).href).toBe(new URL(`${path}${query}`, response.url()).href);
+  }
+
+  const docsResponse = await page.request.get("/agent/docs", { maxRedirects: 0 });
+  expect(docsResponse.status()).toBe(200);
+  const docsRedirect = await page.request.get(`/agent/docs/${query}`, { maxRedirects: 0 });
+  expect(docsRedirect.status()).toBe(307);
+  const docsLocation = new URL(docsRedirect.headers()["location"], docsRedirect.url());
+  expect(`${docsLocation.pathname}${docsLocation.search}`).toBe(`/agent/docs${query}`);
+
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Claus" })).toBeVisible();
@@ -42,7 +58,8 @@ test("user and console surfaces render with both backend services", async ({ pag
   await expect(page.getByRole("article", { name: "Core health" }).getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("article", { name: "Agent health" }).getByText("Connected", { exact: true })).toBeVisible();
 
-  await page.goto("/console");
+  await page.goto(`/console/${query}`);
+  await expect(page).toHaveURL(new URL(`/console${query}`, page.url()).href);
   await expect(page.getByText("Claus Console")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Operations workspace" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);

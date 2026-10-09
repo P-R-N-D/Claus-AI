@@ -45,7 +45,7 @@ Selected after checking npm/PyPI release metadata on 2026-10-09. Versions below 
 
 | Group | Applied version | Migration or selection |
 |---|---|---|
-| Next.js / eslint-config-next | 16.4.0 | Native flat ESLint configuration; Next 16 TypeScript output. Preserve backend trailing slashes through the proxy so `/core/health/` completes without a redirect loop. |
+| Next.js / eslint-config-next | 16.4.0 | Native flat ESLint configuration; Next 16 TypeScript output. Preserve backend trailing slashes through rewrites so `/core/health/` completes without a redirect loop; restore UI canonical 308 redirects in `src/proxy.ts` with query parameters preserved. |
 | axios / PostCSS | 1.20.0 / 8.5.29 | Refresh the complete lock, including nested dependencies. |
 | React / React DOM / their types | 19.3.0 | Update together; initialize health loading state without synchronous effect setters and retain explicit retry behavior. |
 | Node Playwright | 1.64.0 | Four desktop/mobile, light/dark projects. Paired Chromium download is blocked; see the browser exception below. |

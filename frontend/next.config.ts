@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Let Django and FastAPI retain their own trailing-slash route contracts.
+  // Preserve backend slashes; src/proxy.ts restores canonical UI redirects.
   skipTrailingSlashRedirect: true,
   async rewrites() {
     return [

@@ -5,6 +5,7 @@ The frontend uses Next.js 16 App Router, React 19.3, TypeScript 6.0, Tailwind CS
 - `/` is the user surface, implemented by the `(user)` route group (which adds no URL segment).
 - `/console` is the separate Claus product-operations surface, reserved as `/console/*`; only the `/console` index page exists today, and it is not Django Admin.
 - `/core/*` and `/agent/*` are rewritten to the backend at `127.0.0.1:8000`, preserving trailing slashes and letting Django/FastAPI handle their own canonical URLs.
+- UI trailing slashes retain their permanent (308) redirect, such as `/console/` to `/console`, with query parameters preserved by `src/proxy.ts`. Only the exact `/core/` and `/agent/` prefixes are exempt; similarly named UI paths follow the normal redirect.
 - `coreApi` and `agentApi` keep those URL contracts separate, and the home scaffold checks both health endpoints.
 - The root layout hard-codes `<html lang="en">`. No i18n library is installed; the planned direction is in [docs/I18N.md](../docs/I18N.md).
 - No WebMCP or agent-tool code exists; see [docs/INTERACTION-INTERFACES.md](../docs/INTERACTION-INTERFACES.md) and [docs/WEBMCP.md](../docs/WEBMCP.md) before proposing any.

@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a capability or a change to Claus.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is public. Do not include secrets or personal data, or exploit details for a security vulnerability that is not fixed yet.
+        All fields are optional. Opening an issue does not approve or schedule work.
+  - type: textarea
+    id: problem-to-solve
+    attributes:
+      label: Problem to solve
+      description: What need or limitation does this address?
+  - type: textarea
+    id: proposed-feature
+    attributes:
+      label: Proposed feature
+  - type: textarea
+    id: use-cases
+    attributes:
+      label: Use cases
+      description: Who would use it, and in which situations?
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Permission, scope, security, compatibility, or other limits that apply.
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: How would we know the feature is done?

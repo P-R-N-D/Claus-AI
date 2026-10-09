@@ -134,7 +134,7 @@ Verified on 2026-10-08. Line numbers refer to the file named in each heading unl
 - `.gitignore` ignores `.env` and `.env.*` except example files (lines 30-33), private key files (lines 36-43), credential-shaped JSON (lines 46-53), logs (lines 64-65), `backend/db.sqlite3` (line 26), and browser profile directories (lines 83-88).
 - `.env.example` (lines 2-13) holds empty placeholders for `DJANGO_SECRET_KEY`, `DATABASE_URL`, and the five storage variables, plus `DJANGO_DEBUG=true`.
 - The ignore rules only keep untracked files out of a commit. They do not apply to a file that is already tracked or that is added with `git add -f`, and they do not catch a secret written into source code, documentation, tests, or configuration, or one already in the history.
-- No Git hook, CI workflow, or secret scanner is configured; `.github/` holds only `copilot-instructions.md`. [SECURITY-REVIEW.md](SECURITY-REVIEW.md) step 7 defines a keyword check of a change's added lines, which a reviewer runs; nothing runs or enforces it automatically.
+- No Git hook, CI workflow, or secret scanner is configured in the repository's files; `.github/` holds `copilot-instructions.md` and advisory issue and pull request templates, none of which runs a check. (Updated 2026-10-09.) [SECURITY-REVIEW.md](SECURITY-REVIEW.md) step 7 defines a keyword check of a change's added lines, which a reviewer runs; nothing runs or enforces it automatically.
 
 ### Frontend
 

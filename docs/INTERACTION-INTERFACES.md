@@ -19,8 +19,10 @@ Planned. The terms name target-architecture concepts; none of them exists in cod
 
 - **Interaction interface**: the path through which a request enters Claus. There are four: Human UI, WebMCP adapter, Automation, Browser Computer Use.
 - **Application operation**: a named, server-side action on Claus state with a defined actor, context, scope, input, and classification. Operations are defined in terms of the collaboration model (Topic/Thread, Message, File, Knowledge, Task, Artifact, approval), never in terms of UI widgets, DOM elements, or agent tools.
-- **Interaction origin**: which interface a request came through. It is recorded, never trusted as a permission input.
-- **Actor**: the authenticated user whose session and permissions the request runs under. When an AI participant acts, it is recorded separately and its effective permissions apply (SEC-AUTH-001). When a shared AI participant acts on a member's direct request, that member is the actor ([SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md), "Direct requests and referenced content").
+- **Interaction origin**: which interface a request came through. It is recorded, never trusted as a permission input, and the server can verify it only for some interfaces (see "Interaction origin as audit data").
+- **Actor**: the authenticated principal the request runs under: a user, or an automation identity that the control plane authenticates and authorizes (see "Automation"). Authorization starts from the actor. When a shared AI participant acts on a member's direct request, that member is the actor ([SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md), "Direct requests and referenced content").
+- **AI participant**: a personal AI, or a shared AI of a Topic/Thread, that Claus itself identifies and runs as a participant of a context. When one acts, it is recorded separately and its effective permissions apply (SEC-AUTH-001), but only when the server has established that it is acting (see "Callers and identity").
+- **External browser agent**: an agent outside Claus acting in the user's browser, for example by calling the WebMCP tools a page exposes. It is not an AI participant (see "Callers and identity").
 
 ## Core contracts
 
@@ -32,7 +34,7 @@ All Planned.
 4. **Visual and spatial manipulation is handled by the Human UI or by Browser Computer Use.** Drag, placement, drawing, region selection, and other actions whose meaning is the visual result are not forced into semantic operations. A person does them in the Human UI; an agent does them by actuating a browser.
 5. **Application operations are separated from the browser execution environment.** An operation is valid without a browser, a DOM, a tab, or any client-side state. A browser is a client of operations, or, for Computer Use, a task-scoped runtime that is itself a client. Runtime-local state never becomes product state by itself (SEC-RUNTIME-002, SEC-FILE-006).
 6. **Authorization and approval for state changes are verified server-side in the end.** Client-side checks, tool annotations, browser exposure lists, and runtime isolation improve UX or reduce attack surface; none of them is the decision (SEC-AUTH-001, SEC-SCOPE-003, SEC-APPROVE-001).
-7. **Interaction origin is audit and diagnostic data, not a basis for permission.** Knowing that a request came from WebMCP, Automation, or a Browser session never grants, widens, or narrows what the actor may do (SEC-AGENT-001).
+7. **Interaction origin is audit and diagnostic data, not a basis for permission.** That a request came, or is reported to have come, from WebMCP, Automation, or a Browser session never grants, widens, or narrows what the actor may do (SEC-AGENT-001).
 
 ## Interfaces
 
@@ -80,12 +82,12 @@ Planned.
 
 | Concern | Human UI | WebMCP adapter | Automation | Browser Computer Use |
 |---|---|---|---|---|
-| Who acts | A person | A browser agent in the person's session | A non-interactive caller or AI participant | An AI participant driving a browser in a Task |
+| Who acts | A person | An external browser agent in the person's session | A non-interactive caller or AI participant | An AI participant driving a browser in a Task |
 | How state is reached | Calls operations | Tool callback calls operations | Calls operations | Actuates a page; the page calls operations |
 | Semantic operations | Yes | Yes | Yes | Indirect, through the UI |
 | Visual/spatial manipulation | Yes | No | No | Yes |
 | Works without the others | Yes | Needs the Human UI page | Needs no UI | Needs a runtime |
-| Recorded origin | `human_ui` | `webmcp` | `automation` or `background_task` | `browser_computer_use` |
+| Recorded origin | `human_ui`, client-reported | `webmcp`, client-reported | `automation` or `background_task`, server-verified | `browser_computer_use`, server-verified from the runtime session |
 | Authorization decided by | Server | Server | Server | Server |
 | Approval path | Same | Same | Same | Same |
 
@@ -116,8 +118,8 @@ Illustrative example, not implemented. The shape an operation call might carry, 
 {
   "operation": "operation identifier",
   "operation_id": "logical operation identifier, reused by retries; null for a read",
-  "actor_ref": "user identifier",
-  "ai_participant_ref": "AI participant identifier or null",
+  "actor_ref": "authenticated user or automation identity",
+  "ai_participant_ref": "AI participant the server established, or null",
   "context_ref": "personal or Topic/Thread context",
   "scope": "personal | topic | team | organization | external",
   "classification": "read | untrusted_read | mutation | consequential",
@@ -140,8 +142,8 @@ Planned. Every state change is authenticated, authorized, scope-checked, and sub
 | consequential | Server policy requires an explicit approval. At least: irreversible deletion; publishing personal material into a team or organization scope; posting or sending outside Claus; external work that uses sensitive credentials; high-risk Browser, Terminal, or Workspace execution. | Everything a mutation requires, plus an approval bound to this operation before execution (SEC-APPROVE-001 to SEC-APPROVE-003). Until the approval is recorded it is not executed: a call carried by a Task returns `pending` while the Task waits in `waiting_for_approval`, and a path that bypasses the approval is rejected (SEC-AGENT-004 for tools). |
 
 - The server assigns the class per operation, and per input where the risk depends on it (moving an item to a recoverable trash versus deleting it permanently). A caller's claim, a tool annotation, a browser or agent confirmation prompt, and the interaction origin neither raise nor lower it (SEC-APPROVE-001, SEC-AGENT-001, SEC-AGENT-002).
-- An approval is a recorded decision by a person with authority over the operation. A confirmation prompt shown by a browser or an agent is not one.
-- When no Task carries the call (a person's own action in the Human UI) and server policy lets that person approve it, the approval is that person's explicit confirmation of the operation shown to them, recorded server-side and bound to the `operation_id` before the request is sent; the call then executes without a `pending` state.
+- An approval is an explicit decision by a person with authority over the operation, which the server verifies and records bound to the operation's `operation_id`, actor, target, parameters, and scope (SEC-APPROVE-002). A consequential operation never executes without one. The agent that requests or runs the operation never completes the approval step by itself, and a UI click, an agent's reply, a confirmation prompt shown by a browser or an agent, or an approval flag sent by a client is not by itself a verified approval.
+- When no Task carries the call (a person's own action in the Human UI) and server policy lets that person approve it, the approval is that person's explicit confirmation of the operation shown to them, verified and recorded server-side and bound to the `operation_id` before the request is sent; the call then executes without a `pending` state. A confirmation sent under the person's browser session may have been sent by an agent acting there, so it counts only through an approval step such an agent cannot complete by itself (see "Callers and identity").
 - An approval step on an ordinary mutation is not a safety measure. When a mutation needs one, server policy reclassifies it as consequential, which is a security change.
 
 ## Operation identity and retries
@@ -165,11 +167,19 @@ Retry or new intent:
 
 - The server cannot reliably tell a retry from a new intent with the same input, and it never merges requests by comparing input, content, or timing. Duplicate protection holds only when the caller resends the same `operation_id`; a caller that creates a new id for every HTTP call gets no protection from it.
 - A new intent gets a new `operation_id`, even when its input equals an earlier one. Sending the same message twice on purpose is two operations.
-- A caller that lost its `operation_id` (reload, crash, navigation) does not guess. It looks up the actor's recent operations in the current context, which the server returns with the `operation_id`, the operation name, a safe input summary, and the outcome. If the listing shows the operation, the caller uses that outcome and id; if it shows none, the caller does not start a new operation on its own and asks the person (see `outcome_unknown`).
+- A caller that lost its `operation_id` (reload, crash, navigation, a new page or browser) does not guess. It looks up the actor's recent operations in the current context, which the server returns with the `operation_id`, the operation name, a safe input summary, and the outcome. An entry is the lost operation only when the caller identifies it by its `operation_id` (kept from an earlier result) or the person confirms it; an equal input summary alone does not identify it. If the caller identifies the operation, it uses that outcome and id. If the listing shows none, or several entries that could be it, the caller does not pick one and does not start a new operation on its own: it keeps `outcome_unknown` and asks the person (see `outcome_unknown`).
+
+Recovering an `operation_id`:
+
+- The server, not the caller, decides whether an id belongs to the actor and may be retried. A page's or client's own record of the ids it issued is an early check that helps the UI and agents; losing that record (a reload) does not make an id foreign or unusable.
+- A status lookup and a retry are separate operations, each authorized on its own; a successful lookup does not admit a retry. A retry under a recovered id is accepted only for the same actor, with the AI participant, context and scope, operation, and input of the original binding, and only while the actor, and the AI participant if any, may still act in that context. It then returns the recorded outcome, or `pending`, and never executes again.
+- A retry under an id the caller has no issuance record for (recovered after a reload, or supplied by an agent) only resolves an existing operation. The server never binds such an id to a new operation: when it has no record of the id for the actor, including when the id belongs to another actor, which it does not reveal, it records nothing for the id, refuses that request alone, and the caller reports `outcome_unknown`, because the original request may still arrive and then executes once under its own binding. How a request says that it only resolves an existing operation is set with the implementation.
+- A recovered id is used only for the operation it names. A new intent, a changed input included, takes a new `operation_id`.
+- When the caller cannot resolve the operation (the server has no record of the id, or no entry or several entries could be it), the earlier operation stays `outcome_unknown`. No caller, whether an AI agent, a tool, a Task runner, or the UI, issues a new `operation_id` for it or executes it again on its own; the person decides whether to request it anew. That decision alone does not rule out a duplicate: unless the caller has confirmed that the earlier request left no effect and can no longer execute late, it tells the person that the earlier operation may already have taken effect or may still take effect. A consequential operation requested anew in that state is not executed without the state check and reconciliation it needs to avoid a duplicate effect, and it waits for its own approval (SEC-IDEM-003). How state is checked, recovered, or reconciled is not decided.
 
 Server rules (SEC-IDEM-001 to SEC-IDEM-003):
 
-- An `operation_id` is unique per actor: the server stores and resolves it together with the actor, so the same id sent by another actor is a different key and neither returns nor reveals the first actor's operation. It is not a credential.
+- An `operation_id` is unique per actor: the server stores and resolves it together with the actor, so the same id sent by another actor is a different key and neither returns nor reveals the first actor's operation. It is neither a credential nor proof of permission: holding an id grants nothing.
 - The first request with an `operation_id` binds it to the AI participant, the context and scope, the operation, and the input as received, in a canonical form, before validation. The `operation_id` itself is not part of the bound input.
 - A later request with the same id and the same binding is never executed again. It receives the recorded outcome, or `pending` while the first execution runs.
 - A later request with the same id and a different binding is rejected with `idempotency_conflict`. The rejection applies only to that request; the operation already bound to the id keeps its own outcome, which the caller reads by status lookup.
@@ -187,7 +197,7 @@ Planned. A caller reports what it knows, not what it expects. A state-changing c
 - `succeeded`: the server confirmed that the change was applied.
 - `not_executed`: it is confirmed that no change was applied. Either no request under its `operation_id` was ever sent (cancelled, or the context changed first), or the server rejected the request that claimed the id (validation, authorization, scope, approval denied) and recorded `not_executed` for it. A failure after execution began is `not_executed` only when the server confirms no effect remains, which SEC-FAIL-001 requires for authorization, scope, and approval failures; otherwise the server records what remains and the caller treats the call as `outcome_unknown` until a status lookup shows the state. A failure recorded with effects remaining is final for its `operation_id`: a repeat or status lookup returns that recorded state, and the caller reports it as `outcome_unknown` with `error.code: "partially_applied"` together with the state, never as success or as `not_executed`. The caller does not retry it or look it up again for a different answer; any further execution is a new operation, with a new `operation_id` and, when consequential, a new approval unless a re-execution policy allows otherwise (see "Operation identity and retries"), that the person decides on.
 - `pending`: the server accepted the call and it has not finished, for example while its Task waits in `waiting_for_approval`.
-- `outcome_unknown`: the call was sent and no confirmed answer arrived, because of a timeout, a network error, a lost response, or because the caller stopped waiting on cancellation, a context change, or navigation. It is never reported as success or as failure. The caller resolves it by a status lookup, or by retrying with the same `operation_id` and the same input, as the same actor, from the same context, which returns the recorded outcome instead of executing again (SEC-IDEM-005). When another member asks a shared AI to redo an operation whose outcome is unknown, the AI does not resend it under that member's key; it reports that the earlier outcome is unknown. A lookup that finds no record does not prove the call was not executed, because the original request may still arrive; the caller then retries with the same id or asks the person, and never starts a new operation on that basis. A refusal of the request alone, such as `idempotency_conflict`, is also `outcome_unknown` for the caller: it shows only that this request did nothing. An `outcome_unknown` with `partially_applied` is the one confirmed, final case (see `not_executed` above) and is not resolved further.
+- `outcome_unknown`: the call was sent and no confirmed answer arrived, because of a timeout, a network error, a lost response, or because the caller stopped waiting on cancellation, a context change, or navigation. It is never reported as success or as failure. The caller resolves it by a status lookup, or by retrying with the same `operation_id` and the same input, as the same actor, from the same context, which returns the recorded outcome instead of executing again (SEC-IDEM-005). When another member asks a shared AI to redo an operation whose outcome is unknown, the AI does not resend it under that member's key; it reports that the earlier outcome is unknown. A lookup that finds no record does not prove the call was not executed, because the original request may still arrive; the caller then retries with the same id (which, for a recovered id, only resolves an existing operation; see "Operation identity and retries") or asks the person, and never starts a new operation on that basis. A refusal of the request alone, such as `idempotency_conflict`, is also `outcome_unknown` for the caller: it shows only that this request did nothing. An `outcome_unknown` with `partially_applied` is the one confirmed, final case (see `not_executed` above) and is not resolved further.
 
 Rules:
 
@@ -196,13 +206,13 @@ Rules:
 - Every call names its context. The server re-validates actor, AI participant, and scope for that context on every call (SEC-AUTH-001, SEC-SCOPE-003), but it does not know which Topic/Thread a client currently shows, so noticing that the person has moved to another context before sending is the caller's job.
 - A read whose context changed while it was in flight returns no data; the caller discards the response and reports `context_changed`.
 - A server answer that arrives after the context changed is reported with a safe summary only: the `operation_id`, the operation name, the outcome, and the error code when there is one. Its details, recorded state included, are read again through a status lookup called from the owning context, so personal and team data never cross through a stale response.
-- A status lookup by `operation_id` is a read operation. It names its context like every call, is limited to the actor's own operations, and returns details only for an operation owned by the context it names. For an operation owned by another context that the AI participant, if any, may also read, it returns only the `operation_id`, the operation name, and the outcome; otherwise it returns no record.
+- A status lookup by `operation_id` is a read operation. It names its context like every call, is authorized like any read, is limited to the actor's own operations, and returns details only for an operation owned by the context it names. Once the actor, or the AI participant, may no longer read a context, the lookup returns nothing from it, and a retry under an id bound there is refused. For an operation owned by another context that the AI participant, if any, may also read, it returns only the `operation_id`, the operation name, and the outcome; otherwise it returns no record.
 
 ## Server-side authority
 
 Planned. For every operation, regardless of interface:
 
-- **Authorization** is checked against the actor and, for AI, the AI participant's effective permissions, on the server, on every call (SEC-AUTH-001, SEC-SCOPE-003). New API views are default-deny (SEC-AUTH-003).
+- **Authorization** is checked against the actor and, for an AI participant the server has established, that participant's effective permissions, on the server, on every call (SEC-AUTH-001, SEC-SCOPE-003; see "Callers and identity"). New API views are default-deny (SEC-AUTH-003).
 - **Approval** for consequential (high-impact) operations is an explicit, recorded human decision bound to the specific operation and its `operation_id`; a Task that carries the call waits on it (SEC-APPROVE-001 to SEC-APPROVE-003, SEC-IDEM-003). An ordinary mutation needs authorization and policy checks, not an approval (see "Classification and approval").
 - **Consequential operations invoked without the approval path are rejected server-side**, whatever annotation or UI hint the caller claims (SEC-AGENT-004).
 - **Failure is closed**: an authorization, scope, or approval failure leaves no partial side effect (SEC-FAIL-001).
@@ -210,22 +220,42 @@ Planned. For every operation, regardless of interface:
 
 Client-side state, including which tools are registered, which controls are visible, and what a browser agent believes it may do, is never consulted for these decisions.
 
+## Callers and identity
+
+Planned. Three identities are kept apart. None is inferred from another or from the interaction origin.
+
+| Identity | What it is | How the server knows it | Effect on authorization |
+|---|---|---|---|
+| Authenticated actor | The user, or the automation identity, that the control plane authenticated for the request. | Server-side authentication (SEC-AUTH-002). | The starting point: the operation is authorized for this actor (SEC-AUTH-001). That an AI asked for it, or that it came through WebMCP, does not widen it. |
+| AI participant | A personal AI, or a shared AI of a Topic/Thread, that Claus identifies and runs as a participant of a context. | From what the server itself runs for that participant: its Task, model call, or tool call. | Its effective permissions also apply, never wider than the context allows. |
+| External browser agent | An agent outside Claus that calls the WebMCP tools a page exposes or otherwise acts in the user's browser, such as an extension or a browser's built-in agent. | Not at all today. It acts inside the user's authenticated browser session, and Claus has no verifiable delegation or agent-identification mechanism. | None of its own. Its requests are authorized as the user's; it gains no AI participant's permissions. |
+
+Rules:
+
+- A request under a user's browser session is that user's request as far as the server can tell, whether a person clicked in the Human UI, a WebMCP tool callback sent it, an extension called the API, or an external agent drove the page. The server cannot reliably tell these apart and does not claim to. The same actor, scope, and operation get the same authorization, classification, and approval requirement on every path (SEC-AUTH-001, SEC-AGENT-001).
+- The server sets `ai_participant_ref` from the AI participant it runs. A participant name or reference in a request, a tool input, or a message establishes nothing. An external browser agent is never treated, recorded, or shown as a Claus AI participant, shared or personal, and never receives one's permissions (SEC-AGENT-003).
+- A request under a user's browser session has no verifiable delegation and is handled conservatively: it runs as the authenticated actor alone, with no AI participant and with its origin recorded as client-reported at most (see "Interaction origin as audit data"). Nothing that depends on knowing which agent called is granted to it.
+- An approval is a person's decision (SEC-APPROVE-001). A confirmation sent under the person's browser session may have been sent by an agent acting there, so the approval step for a consequential operation must be one that such an agent cannot complete by itself. How independent human approval is implemented, for example re-authentication, a user-presence check, or a confirmation outside the page, is decided when the authentication and approval system is designed.
+- If a security control or an audit requirement ever needs to know which agent acted, or to give an external agent less than the user's session allows, a server-side delegation or agent-identification mechanism is designed first. Until then Claus records what it can verify and marks the rest as unverified.
+
 ## Interaction origin as audit data
 
-Planned. Every operation call carries an `InteractionContext`, described conceptually in [STATE-SCHEMA.md](STATE-SCHEMA.md). Its fields: `origin`, `actor_ref`, `ai_participant_ref`, `context_ref`, `task_ref`, `operation`, `operation_id`, `attempt_id`, `approval_ref`, `request_id` (trace only), and `recorded_at`. It is not persisted today.
+Planned. Every operation call carries an `InteractionContext`, described conceptually in [STATE-SCHEMA.md](STATE-SCHEMA.md). Its fields: `origin`, `origin_basis`, `actor_ref`, `ai_participant_ref`, `context_ref`, `task_ref`, `operation`, `operation_id`, `attempt_id`, `approval_ref`, `request_id` (trace only), and `recorded_at`. It is not persisted today.
 
-`origin` takes one of:
+`origin` takes one of the values below, or is null when the server establishes none and the client reports neither `human_ui` nor `webmcp`:
 
-- `human_ui`: a person acting in the frontend.
-- `webmcp`: a tool callback registered by the WebMCP adapter.
+- `human_ui`: a person acting in the frontend, as reported by the page.
+- `webmcp`: a tool callback registered by the WebMCP adapter, as reported by the page.
 - `automation`: a non-interactive caller.
 - `browser_computer_use`: a Computer Use session actuating a page.
 - `background_task`: a Task runner executing on behalf of a Task.
 
 Rules:
 
-- Origin is set by the server from what it can verify (the authenticated session, the known Task or Browser session, the entry endpoint). A client-supplied origin value is ignored or rejected, never trusted.
-- Origin is used for the audit trail (who, what, on which scope, via which origin, when, with what approval, with what outcome: SEC-SECRET-004), for diagnostics, for abuse analysis, and for presentation ("done by AI through a tool"). It is never an input to authorization or approval (contract 7).
+- `origin_basis` records how the server knows the origin: `server_verified` when it derived the value from something it runs or authenticates (a Task runner it runs, an automation identity's credential, a Browser runtime session it started, an entry endpoint only one interface can reach); `client_reported` when the value is only what the client sent.
+- The server cannot tell requests under a user's browser session apart (see "Callers and identity"): the Human UI and the WebMCP adapter run in the same page, with the same session, and call the same operations. For such a request, `human_ui` or `webmcp` is recorded as `client_reported`, or `origin` is null when the client reports neither. A client-reported value is never recorded as verified, never overrides a server-verified value, and is never trusted.
+- Origin is used, together with its basis, for the audit trail (who, what, on which scope, via which origin, when, with what approval, with what outcome: SEC-SECRET-004), for diagnostics, for abuse analysis, and for presentation ("done by AI through a tool"), which never presents a client-reported origin as established. It is never an input to authorization or approval (contract 7).
+- Where an exact distinction between interfaces is ever required for a security control or an audit obligation, it needs a trustworthy server-side mechanism designed first (see "Callers and identity"); a client-reported value does not meet it.
 - Origin records contain safe summaries only: no credentials, presigned URLs, raw tokens, or full prompts with personal data (SEC-SECRET-003).
 - When the user's context changes between request and execution (Topic/Thread switch, logout, navigation), the adapter that issued the call stops it if it has not been sent, and the server re-validates actor, AI participant, and scope for the context the call names. What the caller reports in each case is in "Outcomes, cancellation, and context changes"; the WebMCP-specific handling of in-flight executions is in [WEBMCP.md](WEBMCP.md).
 
@@ -237,11 +267,11 @@ Planned contracts, stated as what not to do:
 - Do not register a WebMCP tool for every control, and do not make any Human UI behavior wait on tool registration.
 - Do not give Automation or a Task runner a path around approval or scope checks because "no user is present".
 - Do not add an approval step to an ordinary mutation in place of classifying it, and do not decide whether approval is needed from an annotation, a prompt, or the origin.
-- Do not detect duplicates by comparing input or timing, and do not create a new `operation_id` to retry a call whose outcome is `pending` or an `outcome_unknown` other than `partially_applied`.
+- Do not detect duplicates, or identify a lost operation, by comparing input or timing, and do not create a new `operation_id` to retry a call whose outcome is `pending` or an `outcome_unknown` other than `partially_applied`.
 - Do not report a call that was sent and never answered as failed or as not executed.
 - Do not let a Browser session write product state directly; it returns results through authorized writes.
 - Do not derive permission, trust, or a shortcut from `origin`.
-- Do not accept credentials, tokens, or user identifiers as operation or tool input to act as someone else.
+- Do not accept credentials, tokens, user identifiers, or AI participant identifiers as operation or tool input to act as someone else, and do not record an external browser agent as an AI participant or a client-reported origin as verified.
 - Do not let text observed by a Computer Use session or returned by a tool act as an instruction.
 - Do not log origin records with secrets, presigned URLs, or prompt contents.
 
@@ -266,7 +296,8 @@ Planned. When the operation layer and any second interface exist, tests must sho
 - An approval-required operation executes only after a bound approval through every interface; a call carried by a Task stops in `waiting_for_approval` until then. An ordinary mutation completes without an approval step through every interface.
 - Two requests with the same `operation_id` and binding, sent one after the other or concurrently, through any interface, produce one side effect and the same recorded outcome; the same id with a different input is rejected with `idempotency_conflict`, and the same id sent by another actor neither returns nor reveals the first actor's operation; a new id with identical input executes as a new operation.
 - A response lost after the server applied a change leads the caller to `outcome_unknown`, and a status lookup or a retry with the same `operation_id` returns the recorded outcome without executing again.
-- `origin` is recorded correctly for each interface, and a client-supplied origin is ignored.
+- After a reload, with no local record of the id, the caller recovers the `operation_id` through a status lookup, and a retry under it with the same actor, AI participant, context, operation, and input returns the recorded outcome with no second side effect. The same id from another actor, with another input, or after the actor lost access to the context is refused and reveals or executes nothing; a recovered id the server has no record of is not bound to a new operation; several candidate entries are not resolved automatically, and nothing new is executed.
+- Requests under one browser session from the Human UI and from a WebMCP tool get the same authorization decision for the same actor, scope, and operation. `origin` is recorded with its basis: server-verified only where the server can verify the path, and `human_ui` or `webmcp` from a browser session as client-reported at most. A forged `origin` or `ai_participant_ref` widens nothing and never overrides a server-verified value, and an external browser agent is never treated as an AI participant.
 - The Human UI functions with WebMCP absent or disabled.
 - A context switch before sending stops the call in the adapter with no request sent; after sending, the caller reports `outcome_unknown` or, on any server answer, a safe summary without the old context's data. The server re-validates actor and scope for the context the call names.
 - A Browser session's runtime-local state does not survive Task completion or failure as product state.

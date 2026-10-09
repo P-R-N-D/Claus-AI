@@ -46,7 +46,7 @@ Conceptual fields:
 
 - `task_id`: stable identifier.
 - `context_ref`: personal or team context that owns the task.
-- `requested_by`: the user, or the automation identity, whose request started the task; it is the actor of the task's operations. An AI participant that runs the task is not its requester.
+- `requested_by`: the authenticated user, or the automation identity, whose request started the task. An automation identity is one the control plane authenticates and authorizes, never a name a client supplies. The task's operations run with the requester as their actor. An AI participant that runs the task is not its requester: that AI participant, the actor of each operation, each agent execution of the task (one attempt to perform it; a Task retry is a new one), and each operation attempt are separate. The participant, actor, and operation attempt are recorded with each operation call in `InteractionContext` (`ai_participant_ref`, `actor_ref`, `attempt_id`).
 - `status`: queued, running, waiting_for_approval, succeeded, failed, cancelled, or similar state.
 - `plan`: current high-level task plan when one exists.
 - `current_step`: current execution step.
@@ -61,7 +61,7 @@ Conceptual pseudo-schema:
 {
   "task_id": "task identifier",
   "context_ref": "context identifier",
-  "requested_by": "user identifier",
+  "requested_by": "authenticated user or automation identity",
   "status": "task status",
   "plan": ["task step"],
   "current_step": "step identifier",
@@ -221,9 +221,10 @@ Conceptual pseudo-schema:
 
 Fields:
 
-- `origin`: `human_ui`, `webmcp`, `automation`, `browser_computer_use`, or `background_task`.
-- `actor_ref`: the authenticated user on whose behalf the operation runs; for a shared AI participant acting on a member's direct request, that member.
-- `ai_participant_ref`: the AI participant involved, when one is.
+- `origin`: `human_ui`, `webmcp`, `automation`, `browser_computer_use`, or `background_task`; null when the server establishes none and the client reports neither `human_ui` nor `webmcp`.
+- `origin_basis`: `server_verified` when the server derived `origin` from something it runs or authenticates, `client_reported` when the value is only what the client sent; null when `origin` is null. For a request under a user's browser session, `human_ui` and `webmcp` are `client_reported`, because the server cannot tell them apart.
+- `actor_ref`: the authenticated user, or automation identity, on whose behalf the operation runs; for a shared AI participant acting on a member's direct request, that member.
+- `ai_participant_ref`: the Claus AI participant involved, when the server itself established one; never taken from a value a client sends. Null for an external browser agent.
 - `context_ref`: the `CollaborationContext` the operation runs in.
 - `task_ref`: the `AgentTaskState` that issued the operation, when applicable.
 - `operation`: the application operation name invoked.
@@ -239,9 +240,10 @@ Conceptual pseudo-schema:
 
 ```json
 {
-  "origin": "human_ui | webmcp | automation | browser_computer_use | background_task",
-  "actor_ref": "user identifier",
-  "ai_participant_ref": "AI participant identifier or null",
+  "origin": "human_ui | webmcp | automation | browser_computer_use | background_task | null",
+  "origin_basis": "server_verified | client_reported | null",
+  "actor_ref": "authenticated user or automation identity",
+  "ai_participant_ref": "AI participant the server established, or null",
   "context_ref": "context identifier",
   "task_ref": "task identifier or null",
   "operation": "application operation name",

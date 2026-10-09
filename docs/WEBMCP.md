@@ -154,9 +154,14 @@ Planned and Experimental. Claus rules that apply the contract in [INTERACTION-IN
 
 - A state-changing tool's `inputSchema` has an optional `operation_id` property. The agent passes it only to resolve an operation whose earlier result was `pending` or `outcome_unknown` other than `partially_applied`; after `succeeded`, `not_executed`, or `partially_applied` it leaves it out, and trying again is a new operation. Leaving it out declares a new intent. `execute` removes it from the input before sending, because it is not part of the operation input that the server binds.
 - When it is absent, `execute` creates one with `crypto.randomUUID()` before sending anything, reuses it for any retry inside the same execution, and returns it in every result, success or not.
-- A supplied `operation_id` is untrusted input. `execute` rejects a value that is not in the format Claus issues. It accepts a well-formed value only when this page issued it for the same user and context identity as the current registration, and it keeps the ids it issues with that identity for this check. For any other value it sends nothing and returns `outcome_unknown` with `error.code: "operation_id_mismatch"`; the agent resolves that id from the context it was issued in, or tells the person. The server resolves an id only among the acting user's own operations (SEC-AGENT-003, SEC-IDEM-001). It grants nothing.
+- A supplied `operation_id` is untrusted input, and the server decides whether it may be used ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries"). `execute` rejects a value that is not in the format Claus issues. It keeps the ids it issues with the user and context identity of the registration, and uses that record only as an early check:
+  - Issued by this page for the current identity: sent as an ordinary retry.
+  - Issued by this page for another user or context: nothing is sent; the result is `outcome_unknown` with `error.code: "operation_id_mismatch"`, and the agent resolves the id from the context it was issued in, or tells the person.
+  - Not issued by this page, for example recovered through the status tool after a reload: not rejected for that reason. It is sent as a request that only resolves an existing operation, which the server accepts only for the acting user's own operation with the same binding, while that user may still act in the context, and never binds to a new operation.
+
+  The server resolves an id only among the acting user's own operations (SEC-AGENT-003, SEC-IDEM-001). The id grants nothing.
 - `execute` never decides that a call repeats an earlier one by comparing input. Without an `operation_id` from the agent, it is a new operation.
-- A read-only status tool takes an `operation_id`, or lists the actor's recent operations in the current context with their `operation_id`s, and returns their outcomes through the same server authorization as any read (SEC-SCOPE-003). It returns details only for operations owned by the current context; for another context's operation that the AI participant, if any, may also read, it returns only the `operation_id`, the operation name, and the outcome, and otherwise no record. It is how an agent resolves `outcome_unknown`, including after an abort or a navigation lost a result. A lookup that finds no record does not prove the call was not executed: the agent retries with the same `operation_id`, or tells the person, and does not start a new operation on that basis.
+- A read-only status tool takes an `operation_id`, or lists the actor's recent operations in the current context with their `operation_id`s, and returns their outcomes through the same server authorization as any read (SEC-SCOPE-003). It returns details only for operations owned by the current context; for another context's operation that the AI participant, if any, may also read, it returns only the `operation_id`, the operation name, and the outcome, and otherwise no record. It is how an agent resolves `outcome_unknown`, including after an abort or a navigation lost a result, and how it recovers an id after a reload. An entry is the operation the agent lost only when the agent kept its `operation_id` or the person confirms it, never because the input looks the same; with several possible entries, the agent asks the person. A lookup that finds no record does not prove the call was not executed: the agent retries with the same `operation_id`, or tells the person, and neither creates a new `operation_id` for it nor starts a new operation on that basis. When it tells the person, it says that the earlier call may already have taken effect or may still take effect, unless that has been ruled out ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries").
 
 Results of a state-changing tool. `ok` is true only when `outcome` is `succeeded`; every result carries `outcome` and `operation_id` (null only when the agent supplied a malformed one).
 
@@ -166,7 +171,7 @@ Results of a state-changing tool. `ok` is true only when `outcome` is `succeeded
 | Execution signal aborted before sending | `outcome: "not_executed"`, `error.code: "cancelled"`. Reached only when the abort arrives before `execute` sends. The browser discards this result: an agent abort makes `executeTool()` reject with the abort reason, and an unloaded caller observes nothing (CG draft). |
 | Invalid input, including a malformed `operation_id` | `outcome: "not_executed"`, `error.code: "invalid_input"`. Nothing was sent. When the agent supplied an `operation_id`, malformed included, `outcome_unknown` instead (see below). |
 | Server rejected the request that claimed the id (validation, authorization, scope, approval denied) | `outcome: "not_executed"`, the server's `error.code`. The server recorded it as the id's outcome. |
-| Server refused this request alone, with no outcome for the id (`idempotency_conflict`, or a repeat refused because, for example, the actor lost access) | `outcome: "outcome_unknown"`, the server's `error.code`. This request did nothing; the operation already bound to the id keeps its own outcome, read through the status tool. |
+| Server refused this request alone, with no outcome for the id (`idempotency_conflict`; a repeat refused because, for example, the actor lost access; or `operation_not_found` for a resolving request whose id the server has no record of for this user) | `outcome: "outcome_unknown"`, the server's `error.code`. This request did nothing and bound nothing; the operation already bound to the id, if any, keeps its own outcome, read through the status tool. |
 | Server reported a failure recorded with effects remaining | `outcome: "outcome_unknown"`, `error.code: "partially_applied"`, and the server's `error` describing the recorded state. Final for the id: never success, never `not_executed`, not retried under the same id; executing again is a new operation the person decides on. |
 | Server accepted the call and it has not finished | `outcome: "pending"`, with the Task's `status` as `task_status` when a Task carries it (for example `waiting_for_approval`). |
 | Request sent and no confirmed answer arrived (timeout, network error, lost response) | `outcome: "outcome_unknown"`, `error.code: "timeout"` or `"network_error"`. Never success, never failure. |
@@ -196,7 +201,7 @@ Description:
 Input schema:
 
 - CG draft: `inputSchema` is a JSON Schema object. Chrome docs: JSON-stringified input arguments are deprecated from Chrome 155; pass objects.
-- Claus: keep schemas small and self-describing with `description` on every property; use enum values that are stable machine strings. Validate strictly inside `execute` (explainer: "validate strictly in code, loosely in schema"); schema constraints are hints to the agent, not security controls. Inputs are untrusted (SEC-INJ-001, SEC-INJ-002). A tool never accepts credentials, tokens, or user identifiers to act as someone else (SEC-AGENT-003).
+- Claus: keep schemas small and self-describing with `description` on every property; use enum values that are stable machine strings. Validate strictly inside `execute` (explainer: "validate strictly in code, loosely in schema"); schema constraints are hints to the agent, not security controls. Inputs are untrusted (SEC-INJ-001, SEC-INJ-002). A tool never accepts credentials, tokens, user identifiers, or AI participant identifiers to act as someone else (SEC-AGENT-003).
 
 Output:
 
@@ -248,13 +253,13 @@ Planned and Experimental.
 
 ## Server contract
 
-Planned and Experimental. The server does not know or care that a request came from a tool, except for audit:
+Planned and Experimental. The server cannot reliably tell that a request came from a tool rather than from the Human UI in the same session, and its decisions do not depend on it:
 
-- Authorization: every operation is authorized server-side against the acting user and, for AI, the AI participant's effective permissions (SEC-AUTH-001, SEC-SCOPE-003). Client-side checks in `execute` are UX only.
-- Identity: tool executions carry the user's existing session and auth context (SEC-AGENT-003). The `/agent/*` surface bypasses Django middleware and has no authentication today (SEC-AUTH-004); tools must not target it until that is resolved.
-- Approval: operations that server policy classifies as consequential go through the Claus approval path before execution; it is the Task, not the tool invocation, that stops in `waiting_for_approval`, and the tool returns `pending` (SEC-APPROVE-001 to SEC-APPROVE-003, SEC-IDEM-003). An ordinary mutation needs authorization and policy checks, not an approval.
-- Duplicate execution: every state-changing request carries the `operation_id` described above. The server binds it at first use; the same id with the same binding returns the recorded outcome instead of executing again, a different binding is rejected with `idempotency_conflict`, and concurrent duplicates execute at most once (SEC-IDEM-001). Each send is a separate attempt record (SEC-IDEM-002). A call without an `operation_id` from the agent is a new operation, never a guessed retry.
-- Audit: the interaction origin `webmcp` is recorded with the invocation's actor, AI participant, context, operation, `operation_id`, `attempt_id`, approval, and request id (`InteractionContext` in [STATE-SCHEMA.md](STATE-SCHEMA.md)); the outcome is the one recorded with the `operation_id` binding ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries"), and a Task or ToolRun record may reference it (SEC-SECRET-004). Origin is diagnostic data; it never widens permission (SEC-AGENT-001).
+- Authorization: every operation is authorized server-side against the acting user (SEC-AUTH-001, SEC-SCOPE-003). The calling agent is an external browser agent ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Callers and identity"): the server cannot establish which agent called, and the agent adds no AI participant's effective permissions. Client-side checks in `execute` are UX only.
+- Identity: tool executions carry the user's existing session and auth context (SEC-AGENT-003). A tool never accepts an AI participant name or reference as input, the adapter sends none, and the server records no AI participant for a tool call. The `/agent/*` surface bypasses Django middleware and has no authentication today (SEC-AUTH-004); tools must not target it until that is resolved.
+- Approval: operations that server policy classifies as consequential go through the Claus approval path before execution; it is the Task, not the tool invocation, that stops in `waiting_for_approval`, and the tool returns `pending` (SEC-APPROVE-001 to SEC-APPROVE-003, SEC-IDEM-003). The approval comes from a person with authority over the operation, through a step that the calling agent, acting in the same browser session, cannot complete by itself; no tool input, tool result, or agent reply supplies it or stands for it ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Classification and approval", "Callers and identity"). An ordinary mutation needs authorization and policy checks, not an approval.
+- Duplicate execution: every state-changing request carries the `operation_id` described above. The server binds it at first use; the same id with the same binding returns the recorded outcome instead of executing again, a different binding is rejected with `idempotency_conflict`, and concurrent duplicates execute at most once (SEC-IDEM-001). Each send is a separate attempt record (SEC-IDEM-002). A call without an `operation_id` from the agent is a new operation, never a guessed retry, and a request that only resolves an existing operation never binds a new one.
+- Audit: the origin `webmcp` that the adapter reports is recorded as client-reported (`origin_basis` in `InteractionContext`, [STATE-SCHEMA.md](STATE-SCHEMA.md)), because the server cannot verify it, with the invocation's actor, context, operation, `operation_id`, `attempt_id`, approval, and request id, and with no AI participant; the outcome is the one recorded with the `operation_id` binding ([INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries"), and a Task or ToolRun record may reference it (SEC-SECRET-004). Origin is diagnostic data; it never widens permission (SEC-AGENT-001).
 - Logs and tool results contain safe summaries only (SEC-SECRET-003).
 
 Requirement IDs are defined in [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md).
@@ -310,7 +315,7 @@ if ("modelContext" in document) {
 }
 ```
 
-Illustrative example, not implemented. The `execute` body of a state-changing tool, registered as above with `readOnlyHint: false`, showing where each outcome in "State-changing tools: operation ids and outcomes" comes from. `captured` is the user and context identity recorded at registration; `contextIsCurrent`, `isOperationId`, `issuedFor`, `issueOperationId`, and `callOperation` are placeholders.
+Illustrative example, not implemented. The `execute` body of a state-changing tool, registered as above with `readOnlyHint: false`, showing where each outcome in "State-changing tools: operation ids and outcomes" comes from. `captured` is the user and context identity recorded at registration; `contextIsCurrent`, `isOperationId`, `issuedIdentity`, `sameIdentity`, `issueOperationId`, and `callOperation` are placeholders.
 
 ```js
 // Illustrative example, not implemented.
@@ -320,11 +325,16 @@ async function execute(input, { signal }) {
     // The agent was resolving an earlier operation: this attempt says nothing about it.
     return { ok: false, operation_id: null, outcome: "outcome_unknown", error: { code: "invalid_input" } };
   }
-  if (supplied !== undefined && !issuedFor(supplied, captured)) {
-    // Issued for another user or context, or not by this page: resolve it there.
+  // This page's record of the ids it issued is an early check; the server decides.
+  const issuedTo = supplied === undefined ? null : issuedIdentity(supplied);
+  if (issuedTo && !sameIdentity(issuedTo, captured)) {
+    // Issued here for another user or context: resolve it there.
     return { ok: false, operation_id: supplied, outcome: "outcome_unknown", error: { code: "operation_id_mismatch" } };
   }
-  // crypto.randomUUID(), kept with the identity in `captured` for issuedFor().
+  // An id this page has no record of (recovered after a reload, for example) only
+  // resolves an existing operation: the server never binds it to a new one.
+  const resolveOnly = supplied !== undefined && !issuedTo;
+  // crypto.randomUUID(), recorded with the identity in `captured` for issuedIdentity().
   const operation_id = supplied ?? issueOperationId(captured);
   // A stop before sending: an id sent before keeps its earlier, unresolved outcome.
   const notSent = (code) => ({ ok: false, operation_id,
@@ -336,10 +346,11 @@ async function execute(input, { signal }) {
   try {
     // Resolves with the server's answer: succeeded, not_executed, pending,
     // outcome_unknown with partially_applied, or a refusal of this request alone
-    // (an error code and no outcome, such as idempotency_conflict). Rejects when
-    // no answer arrived, including a server error that does not say whether the
-    // change was applied.
-    answer = await callOperation("example.update_item", args, { operation_id, signal });
+    // (an error code and no outcome, such as idempotency_conflict, or
+    // operation_not_found when a resolveOnly request names an id the server has
+    // no record of for this user). Rejects when no answer arrived, including a
+    // server error that does not say whether the change was applied.
+    answer = await callOperation("example.update_item", args, { operation_id, resolveOnly, signal });
   } catch (error) {
     // The request may have been applied: never success, never failure. After
     // an abort the browser discards this result (CG draft).
@@ -387,13 +398,14 @@ Tests to add, each with normal, denial, boundary, and retry cases:
 - Registration failure: duplicate `name`, invalid `name`, empty `description`, non-serializable `inputSchema`, and `Permissions-Policy: tools=()` each reject only the affected registration; the page keeps working.
 - Context switch: after a Topic/Thread change or logout, the old set is gone from `getTools()` and the new set is present; a state-changing execution whose context changed before sending sends nothing and returns `not_executed` with `context_changed` (`outcome_unknown` when the agent supplied the `operation_id`); a read already awaiting the server when the switch happens returns `context_changed` and none of the old context's data.
 - Cancellation before sending: an abort that arrives while `execute` awaits work before sending makes it send nothing, and `executeTool()` rejects with the abort reason; an abort issued before `execute` starts does not stop code that sends without awaiting first, so the test checks through the status tool that at most one side effect occurred.
-- Supplied ids: an `operation_id` issued for another user or context returns `outcome_unknown` with `operation_id_mismatch` and sends nothing; a resend under a supplied id that is stopped before sending returns `outcome_unknown`, never `not_executed`.
+- Supplied ids: an `operation_id` this page issued for another user or context returns `outcome_unknown` with `operation_id_mismatch` and sends nothing; a resend under a supplied id that is stopped before sending returns `outcome_unknown`, never `not_executed`.
+- Recovery after a reload: in a new page with no local record of the id, the status tool lists the earlier operation and its `operation_id`; a retry with that id and the same input returns the recorded outcome with one side effect in total; with another input it is rejected with `idempotency_conflict`; an id of another user, an id in a context the user can no longer access, and an id the server has no record of each return `outcome_unknown`, reveal nothing, and bind nothing; with several possible entries the agent asks the person and starts nothing; while the operation stays unresolved, the agent creates no new `operation_id` and starts nothing, and its message to the person says that the earlier call may have taken effect or may still take effect.
 - Cancellation after the server started: aborting after the request reached the server rejects `executeTool()` with the abort reason, the change stands, and the status tool's listing reports the actual outcome with one side effect.
 - Lost response: when the server applies a change and the response is dropped, the tool returns `outcome_unknown`; a retry with the returned `operation_id` returns the recorded outcome, and the side effect happens once.
 - Duplicates: the same `operation_id` sent twice, one after the other and concurrently, produces one side effect; the same id with a different input is rejected with `idempotency_conflict` and reported as `outcome_unknown`; a call without an `operation_id` is a new operation even when its input repeats an earlier call.
 - Stale data: any server answer that arrives after a switch between contexts, including between personal and team, returns only the safe summary, and its details, recorded state included, are readable only through the status tool called from the owning context.
 - Permissions Policy: pages that expose no tools send `Permissions-Policy: tools=()`.
-- Server contract: an invocation without authorization is rejected server-side; an ordinary mutation completes without an approval step; a consequential operation never executes before a bound approval (the tool returns `pending` while its Task waits in `waiting_for_approval`, and an attempt to execute it outside the approval path is rejected); the audit record carries origin `webmcp` and the `operation_id`.
+- Server contract: an invocation without authorization is rejected server-side; an ordinary mutation completes without an approval step; a consequential operation never executes before a bound approval (the tool returns `pending` while its Task waits in `waiting_for_approval`, and an attempt to execute it outside the approval path is rejected); a tool call receives the same decision as the same user's Human UI request; the audit record carries the user as actor, origin `webmcp` marked client-reported, no AI participant, and the `operation_id`; a request with a forged origin or AI participant reference gains nothing.
 
 Review: WebMCP and agent-originated actions are a security review trigger ([CODE-REVIEW.md](CODE-REVIEW.md), [SECURITY-REVIEW.md](SECURITY-REVIEW.md)).
 

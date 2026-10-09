@@ -25,7 +25,7 @@ Next.js frontend는 개인 AI 대화, 팀 Topic/Thread, 파일과 Artifact, AI �
 현재 저장소에 실제로 포함된 초기 scaffold는 다음과 같습니다.
 
 - Frontend: `/`의 Next.js 사용자 UI와 `/console` 아래의 별도 제품 Console(`/console/*`로 예약되어 있으며 현재는 `/console` 인덱스 페이지만 존재), React, TypeScript, Tailwind CSS, axios, SweetAlert2, Node Playwright 테스트.
-- Backend: Python 3.12 이상(Django 6.0은 3.12–3.14를 공식 지원)에서 실행되는 Django 6, 하나의 Django project(`config`)와 두 Django app(`core`, `agent`).
+- Backend: Django 6.1, 하나의 Django project(`config`)와 두 Django app(`core`, `agent`). 잠금 파일을 검증한 기준 환경은 Linux x86-64의 CPython 3.12.15이며 다른 런타임·플랫폼 조합은 별도 검증이 필요합니다.
 - URL: `/core/*`의 Django REST Framework control-plane API, `/agent/*`의 Agent FastAPI, `/admin/*`의 Django Admin.
 - ASGI 구성: `config.asgi.application`이 FastAPI와 Django를 하나의 ASGI application으로 구성하며, Daphne 기반 `manage.py runserver`와 Uvicorn에서 동일하게 제공합니다.
 - Local 연동: Next.js 개발 서버가 `/core/*`와 `/agent/*` 요청을 `http://127.0.0.1:8000` backend로 rewrite합니다.
@@ -45,6 +45,7 @@ AI 코딩 에이전트와 기여자를 위한 기술 문서는 영어로 작성�
 - [ARCHITECTURE.md](ARCHITECTURE.md): 전체 구조와 구현됨/계획됨 구분.
 - [STATE-SCHEMA.md](STATE-SCHEMA.md): 개념적 상태 모양(DB schema 아님).
 - [TESTING.md](TESTING.md): 현재 존재하는 테스트와 앞으로 필요한 검증.
+- [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md): 적용한 의존성 업데이트와 호환성·보안 예외, 기존 free-threading 방침에 따른 Python 3.15 Limited API/`abi3t` wheel 대응, 성능 검증 및 유지보수 전략. Python 3.15 지원은 아직 미검증입니다.
 - [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md): 신뢰 경계와 `SEC-*` 보안 요구사항.
 - [CODE-REVIEW.md](CODE-REVIEW.md), [SECURITY-REVIEW.md](SECURITY-REVIEW.md): 코드 변경의 독립 리뷰와 보안 리뷰 절차.
 - [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md), [WEBMCP.md](WEBMCP.md), [I18N.md](I18N.md): 아직 구현되지 않은 상호작용 구조, WebMCP(실험적 기술) 계약, 프런트엔드 i18n 방향.
@@ -52,16 +53,22 @@ AI 코딩 에이전트와 기여자를 위한 기술 문서는 영어로 작성�
 ## 로컬 실행 순서
 
 ```bash
-# Backend
-python -m pip install -r backend/requirements.txt
-playwright install chromium
+# Backend: Linux x86-64, uv 0.12.24 사용, 저장소 루트에서 실행
+uv venv --python 3.12.15
+source .venv/bin/activate
+uv pip sync --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64.txt
 python backend/manage.py check
 python backend/manage.py test core agent
 python backend/manage.py runserver 127.0.0.1:8000
 
-# Frontend
+# Frontend: 다른 터미널에서 저장소 루트부터 실행
+source .venv/bin/activate
+nvm install
+nvm use
+npm install --global npm@11.21.0
 cd frontend
-npm install
+npm ci
+npx playwright install chromium
 npm run lint
 npm run build
 npm run test:visual
@@ -69,6 +76,8 @@ npm run dev -- --hostname 127.0.0.1 --port 3000
 ```
 
 `http://127.0.0.1:3000`에서 사용자 화면을, `http://127.0.0.1:3000/console`에서 제품 Console을 열 수 있습니다. Django Admin은 `http://127.0.0.1:8000/admin/`에서 제공됩니다.
+
+프런트엔드는 Node 24.21.0, npm 11.21.0, Next 16, Tailwind 4를 사용합니다. 다른 플랫폼의 검증은 [백엔드 잠금 안내](../backend/locks/README.md), 브라우저 제약은 [프런트엔드 설정](../frontend/README.md)을 참고하세요. Python Playwright의 브라우저 설치는 별도이며 현재 health 화면 실행에는 필요하지 않습니다. 지원 종료 및 개발 도구의 잔여 보안 권고는 의존성 전략에 명시했습니다.
 
 ### 선택 사항: Django Admin 설정
 

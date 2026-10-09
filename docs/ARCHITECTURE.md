@@ -7,7 +7,7 @@ This document distinguishes the current runnable scaffold from longer-term archi
 ## Current runnable scaffold
 
 - Frontend: Next.js user surface at `/` and a separate product-operations Console reserved under `/console/*` (only the `/console` index page exists today), using React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright.
-- Backend baseline: Django 6 on Python 3.12 or newer (Django 6.0 officially supports 3.12 through 3.14), Django REST Framework, django-cors-headers, FastAPI, Daphne, Uvicorn, psycopg (PostgreSQL driver), boto3 (S3-compatible storage client), and Python Playwright.
+- Backend baseline: Django 6.1, Django REST Framework 3.18, django-cors-headers, FastAPI, Daphne, Uvicorn, psycopg (PostgreSQL driver), boto3 (S3-compatible storage client), and Python Playwright. CPython 3.12.15 on Linux x86-64 is the checked, hashed-lock baseline; Django's wider 3.12–3.14 support does not qualify every Claus runtime combination.
 - Django project: `config`.
 - Django apps: `core` for the persistent product/control plane and `agent` for AI/RAG/agent execution.
 - Routing: `/core/*` uses Django/DRF, `/agent/*` uses FastAPI, and `/admin/*` remains Django Admin.
@@ -23,6 +23,8 @@ config.asgi.application
 ```
 
 It sets Django settings and calls `get_asgi_application()` before importing Agent FastAPI. Daphne is first in `INSTALLED_APPS`, so `manage.py runserver` uses this ASGI application; Uvicorn imports the same object directly. WSGI is a Django-only fallback.
+
+The Next.js 16 proxy preserves the full path, including a trailing slash, and delegates slash redirects to Django/FastAPI. Both health URLs retain their final slash; `/agent/openapi.json` retains its unsuffixed form. The frontend uses Tailwind 4's PostCSS integration and native Next ESLint flat configuration. Runtime pins, locks, and remaining tooling exceptions are recorded in [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md).
 
 ### Implemented foundations
 
@@ -160,6 +162,8 @@ Claus is designed so correctness does not depend on the GIL:
 - Keep a GIL-enabled runtime as a compatibility fallback.
 
 Free-threading does not remove the need for process isolation, task workers, or horizontal scaling where operationally appropriate.
+
+[DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md) applies this existing direction to Python 3.15 Limited API and `abi3t` wheels. It defines compatible version selection, native artifact qualification, performance budgets, and the GIL-enabled fallback when a target combination is blocked. Neither a published wheel nor a resolver result means Claus currently supports Python 3.15/3.15t.
 
 ## Authorization and safety
 

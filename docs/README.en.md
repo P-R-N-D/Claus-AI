@@ -25,7 +25,7 @@ Long-running AI execution and browser/terminal/workspace runtimes should be sepa
 The repository currently contains this initial scaffold:
 
 - Frontend: Next.js user UI at `/`, a separate product Console under `/console` (reserved as `/console/*`; only the `/console` index page exists today), React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright tests.
-- Backend: Django 6 on Python 3.12 or newer (Django 6.0 officially supports 3.12 through 3.14), using one Django project (`config`) with two Django apps (`core`, `agent`).
+- Backend: Django 6.1 using one Django project (`config`) with two Django apps (`core`, `agent`). CPython 3.12.15 on Linux x86-64 is the checked lock baseline; other runtime/platform combinations need separate verification.
 - URLs: core DRF at `/core/*`, Agent FastAPI at `/agent/*`, and Django Admin at `/admin/*`.
 - Composition: `config.asgi.application` mounts FastAPI and Django into one ASGI application, served identically by Daphne-backed `manage.py runserver` or Uvicorn.
 - Local integration: the Next.js dev server rewrites `/core/*` and `/agent/*` to the backend at `http://127.0.0.1:8000`.
@@ -45,6 +45,7 @@ Technical documents for AI coding agents and contributors are written in English
 - [ARCHITECTURE.md](ARCHITECTURE.md): overall structure and the implemented versus planned breakdown.
 - [STATE-SCHEMA.md](STATE-SCHEMA.md): conceptual state shapes (not a database schema).
 - [TESTING.md](TESTING.md): the tests that exist today and the verification still required.
+- [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md): the applied dependency update and its compatibility/security exceptions, plus Python 3.15 Limited API/`abi3t` wheel qualification, performance admission, and maintenance under the existing free-threading direction. Python 3.15 support remains unqualified.
 - [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md): trust boundaries and the `SEC-*` security requirements.
 - [CODE-REVIEW.md](CODE-REVIEW.md), [SECURITY-REVIEW.md](SECURITY-REVIEW.md): independent code review and security review procedures for code changes.
 - [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md), [WEBMCP.md](WEBMCP.md), [I18N.md](I18N.md): the not-yet-implemented interaction architecture, the WebMCP (experimental technology) contract, and the frontend i18n direction.
@@ -52,16 +53,22 @@ Technical documents for AI coding agents and contributors are written in English
 ## Local development
 
 ```bash
-# Backend
-python -m pip install -r backend/requirements.txt
-playwright install chromium
+# Backend: Linux x86-64, using uv 0.12.24, from the repository root
+uv venv --python 3.12.15
+source .venv/bin/activate
+uv pip sync --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64.txt
 python backend/manage.py check
 python backend/manage.py test core agent
 python backend/manage.py runserver 127.0.0.1:8000
 
-# Frontend
+# Frontend: another terminal, starting from the repository root
+source .venv/bin/activate
+nvm install
+nvm use
+npm install --global npm@11.21.0
 cd frontend
-npm install
+npm ci
+npx playwright install chromium
 npm run lint
 npm run build
 npm run test:visual
@@ -69,6 +76,8 @@ npm run dev -- --hostname 127.0.0.1 --port 3000
 ```
 
 Open `http://127.0.0.1:3000` for the user surface and `http://127.0.0.1:3000/console` for the product Console. Django Admin remains at `http://127.0.0.1:8000/admin/`.
+
+The frontend uses Node 24.21.0, npm 11.21.0, Next 16, and Tailwind 4. See [backend locks](../backend/locks/README.md) for other-platform qualification and [frontend setup](../frontend/README.md) for browser constraints. Python Playwright has a separate browser installation and is not required to render the current health scaffold. Remaining EOL/tooling advisory exceptions are explicit in the dependency strategy.
 
 ### Optional Django Admin setup
 

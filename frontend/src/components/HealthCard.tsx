@@ -4,42 +4,46 @@ import { useCallback, useEffect, useState } from "react";
 import Swal from "sweetalert2";
 import { agentApi, coreApi, type HealthResponse } from "@/lib/api";
 
-type LoadState = "idle" | "loading" | "ok" | "error";
+type LoadState = "loading" | "ok" | "error";
 type ServiceHealth = { state: LoadState; health: HealthResponse | null };
 
-const initialHealth: ServiceHealth = { state: "idle", health: null };
+const initialHealth: ServiceHealth = { state: "loading", health: null };
 
 export function HealthCard() {
   const [core, setCore] = useState<ServiceHealth>(initialHealth);
   const [agent, setAgent] = useState<ServiceHealth>(initialHealth);
 
-  const loadHealth = useCallback(async (showAlert: boolean) => {
-    setCore((current) => ({ ...current, state: "loading" }));
-    setAgent((current) => ({ ...current, state: "loading" }));
-    const [coreResult, agentResult] = await Promise.allSettled([
+  const loadHealth = useCallback((showAlert: boolean) =>
+    Promise.allSettled([
       coreApi.get<HealthResponse>("health/"),
       agentApi.get<HealthResponse>("health/"),
-    ]);
-    setCore(coreResult.status === "fulfilled" ? { state: "ok", health: coreResult.value.data } : { state: "error", health: null });
-    setAgent(agentResult.status === "fulfilled" ? { state: "ok", health: agentResult.value.data } : { state: "error", health: null });
+    ]).then(async ([coreResult, agentResult]) => {
+      setCore(coreResult.status === "fulfilled" ? { state: "ok", health: coreResult.value.data } : { state: "error", health: null });
+      setAgent(agentResult.status === "fulfilled" ? { state: "ok", health: agentResult.value.data } : { state: "error", health: null });
 
-    const failed = [
-      coreResult.status === "rejected" ? "Core" : null,
-      agentResult.status === "rejected" ? "Agent" : null,
-    ].filter((service): service is string => service !== null);
-    if (showAlert && failed.length > 0) {
-      await Swal.fire({
-        title: `${failed.join(" and ")} connection failed`,
-        text: `Could not reach ${failed.join(" and ")} health ${failed.length === 1 ? "endpoint" : "endpoints"}.`,
-        icon: "error",
-        confirmButtonText: "OK",
-      });
-    }
-  }, []);
+      const failed = [
+        coreResult.status === "rejected" ? "Core" : null,
+        agentResult.status === "rejected" ? "Agent" : null,
+      ].filter((service): service is string => service !== null);
+      if (showAlert && failed.length > 0) {
+        await Swal.fire({
+          title: `${failed.join(" and ")} connection failed`,
+          text: `Could not reach ${failed.join(" and ")} health ${failed.length === 1 ? "endpoint" : "endpoints"}.`,
+          icon: "error",
+          confirmButtonText: "OK",
+        });
+      }
+    }), []);
 
   useEffect(() => {
     void loadHealth(false);
   }, [loadHealth]);
+
+  const retryHealth = () => {
+    setCore((current) => ({ ...current, state: "loading" }));
+    setAgent((current) => ({ ...current, state: "loading" }));
+    void loadHealth(true);
+  };
 
   return (
     <section className="rounded-3xl border border-slate-200 bg-white/90 p-6 shadow-xl shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-900/90 dark:shadow-black/20">
@@ -68,8 +72,8 @@ export function HealthCard() {
 
       <button
         type="button"
-        onClick={() => void loadHealth(true)}
-        className="mt-5 rounded-full bg-slate-950 px-5 py-2 text-sm font-semibold text-white shadow-lg transition hover:-translate-y-0.5 hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
+        onClick={retryHealth}
+        className="mt-5 cursor-pointer rounded-full bg-slate-950 px-5 py-2 text-sm font-semibold text-white shadow-lg transition hover:-translate-y-0.5 hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
       >
         Retry backend check
       </button>

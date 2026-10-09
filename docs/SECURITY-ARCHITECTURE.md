@@ -341,3 +341,4 @@ Evidence names repository files and tests that exist; "none yet" means no code o
 - [SECURITY-REVIEW.md](SECURITY-REVIEW.md): the review procedure that cites these IDs.
 - [CODE-REVIEW.md](CODE-REVIEW.md): the general review procedure and finding format.
 - [TESTING.md](TESTING.md): existing tests and the security-negative, boundary, and approval tests still required.
+- [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md): dependency/native-artifact remediation and maintenance planning, including `abi3t` wheel provenance and bundled-library updates; it changes no `SEC-*` definition or status.

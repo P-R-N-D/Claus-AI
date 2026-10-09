@@ -9,16 +9,23 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:3000",
     trace: "on-first-retry",
-  },
-  projects: [
-    {
-      name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+    launchOptions: {
+      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
     },
-  ],
+  },
+  projects: (["light", "dark"] as const).flatMap((colorScheme) => [
+    {
+      name: `desktop-${colorScheme}`,
+      use: { ...devices["Desktop Chrome"], colorScheme },
+    },
+    {
+      name: `mobile-${colorScheme}`,
+      use: { ...devices["Pixel 7"], colorScheme },
+    },
+  ]),
   webServer: [
     {
-      command: "python ../backend/manage.py runserver 127.0.0.1:8000",
+      command: "python ../backend/manage.py runserver 127.0.0.1:8000 --noreload",
       url: "http://127.0.0.1:8000/core/health/",
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,

@@ -104,7 +104,7 @@ API (DRF under `/core/*`, FastAPI under `/agent/*`):
 Frontend (Next.js App Router under `frontend/src`):
 
 - `/` and `/console` still render; `coreApi` and `agentApi` keep the `/core/` and `/agent/` URL contracts in `frontend/src/lib/api.ts` and the rewrites in `frontend/next.config.ts`.
-- Rendered changes are checked at phone and desktop widths for overflow and clipping, in light and dark rendering, with no console errors and no failed network or resource requests. The existing Playwright test covers one desktop viewport and console errors only; the rest is run ad hoc and reported ([TESTING.md](TESTING.md)).
+- Rendered changes are checked at phone and desktop widths for overflow and clipping, in light and dark rendering, with no console errors and no failed network or resource requests. The existing Playwright scenario runs desktop/mobile and light/dark projects, checks horizontal overflow and request/page/console errors, and saves screenshots. Review those images for clipping and report the browser actually used ([TESTING.md](TESTING.md)).
 - No secrets or server-only values in client components. New user-visible strings are noted against the i18n direction in [I18N.md](I18N.md); `<html lang="en">` is hard-coded today.
 
 Realtime (Planned; nothing exists): a change introducing WebSocket or SSE is checked for transport matching the resource (no large binaries over message transport; [ARCHITECTURE.md](ARCHITECTURE.md) "Realtime collaboration"), for per-context event separation, and for connection authentication (the AUTH and SCOPE areas of [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md)).

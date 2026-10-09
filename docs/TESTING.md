@@ -12,16 +12,18 @@ The repository contains these automated tests. Their existence is a fact; whethe
 | `backend/core/test_database.py` | `DATABASE_URL` parsing: SQLite fallback for unset/blank values, PostgreSQL URL parsing with percent-decoding and query preservation, `postgres` alias and default port, nine invalid URLs rejected with `ImproperlyConfigured`; `SECRET_KEY` placeholder fallback. |
 | `backend/core/test_storage.py` | `S3CompatibleStorage` contract against a fake S3 client: default backend wiring, save/open/exists/size/delete/url, binary-only reads, content type handling, collision retry (including `max_length` and concurrent saves), no implicit overwrite, missing-object errors, dangerous object names rejected, lazy and clear configuration errors, path-style SigV4 client, endpoint validation. Not an integration test against a real object store. |
 | `backend/agent/tests.py` | ASGI routing through `config.asgi.application`: `/core/health/`, `/agent/health/`, `/agent/openapi.json` are 200; `/api/health/` is 404. |
-| `frontend/tests/visual/home.spec.ts` | One Chromium test: `/` shows the heading, both health cards report Connected with the expected JSON fragments, a full-page screenshot is non-empty; `/console` shows its label text and heading; no console errors were logged. |
+| `frontend/tests/visual/home.spec.ts` | One scenario in four Chromium projects (desktop/mobile × light/dark): health/OpenAPI proxy URLs return 200 without redirects; `/` and `/console` render; both health cards show their expected JSON and retry successfully; no horizontal page overflow, console/page errors, failed requests, or HTTP errors. Saves a full-page screenshot of each surface. |
 
 No test covers authentication, authorization, scope separation, approval, Tasks, retrieval, Browser sessions, realtime, i18n, or WebMCP, because none of those features exist.
 
 ## Current scaffold checks
 
-The backend baseline is Django 6 on Python 3.12 or newer (Django 6.0 officially supports 3.12 through 3.14). Confirm resolved dependency versions when the baseline changes.
+The checked backend baseline is Django 6.1 on CPython 3.12.15, Linux x86-64. Use uv 0.12.24 and the matching hash lock; [backend/locks/README.md](../backend/locks/README.md) describes regeneration, artifact evidence, and other-platform limits.
 
 ```bash
-python -m pip install -r backend/requirements.txt
+uv venv --python 3.12.15
+source .venv/bin/activate
+uv pip sync --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64.txt
 python backend/manage.py check
 
 cd backend
@@ -51,12 +53,16 @@ Frontend checks remain:
 
 ```bash
 cd frontend
+npm ci
+npx playwright install chromium
 npm run lint
 npm run build
 npm run test:visual
 ```
 
-Frontend Playwright coverage today is the single `home.spec.ts` test described above: `/` and `/console` render, both health cards are Connected, and no console errors occur, on one desktop Chromium viewport. It does not check failed network or resource requests, responsive viewports or overflow, light and dark rendering, or accessibility. Those remain required for UI changes that affect rendered behavior or appearance and must be added or run ad hoc, with the result reported. Environment-limited browser failures must be reported rather than treated as success.
+Use Node 24.21.0 and npm 11.21.0, and activate the backend environment in the terminal that starts Playwright: its web-server command invokes `python`. Playwright starts the local servers unless they are already running outside CI. The four projects check desktop/mobile widths, light/dark rendering, retries, horizontal overflow, and network/page/console failures. Inspect the saved screenshots for clipping and visual regressions; accessibility and pixel-diff baselines remain unimplemented.
+
+The default browser is the binary paired with `@playwright/test`. If its download is unavailable, `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/absolute/path/to/chromium` explicitly selects a separately installed browser. Record its version and the failed download; that run is supplemental UI evidence, not qualification of Playwright's paired browser. Environment-limited failures must never be reported as passing. The dated results and remaining checks are in [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md#applied-baseline-and-verification).
 
 ## Topic/Thread and context testing
 
@@ -127,13 +133,16 @@ Do not issue state-changing requests against production without explicit approva
 
 ## Free-threading compatibility testing
 
+The architecture already requires free-threading compatibility. [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md) defines Python 3.15 Limited API/`abi3t` artifact selection, the dated wheel gaps, and performance admission budgets. These qualification checks and benchmarks are planned; the current test suite does not establish Python 3.15/3.15t support.
+
 When a suitable environment and dependency set are available:
 
-- Run relevant tests with the GIL disabled.
-- Run a GIL-enabled compatibility baseline.
-- Exercise concurrent access rather than assuming serialization.
-- Verify native and third-party dependency compatibility.
-- Record what was actually tested; do not infer support from static review.
+- Use separate environments for the qualified baseline, regular `cp315`, and free-threaded `cp315t`, with each lane's resolved lock, platform artifacts, and installer versions recorded.
+- Check actual supported wheel tags and binary-only installation, including `abi3t` and dual `abi3.abi3t` wheels. A cross-version resolver probe or `py3-none-any` wheel is not runtime/thread-safety evidence.
+- Verify `Py_GIL_DISABLED` and actual GIL state before and after imports, lazy initialization, and workloads; detect automatic GIL re-enablement instead of masking it with a forced-off flag.
+- Run the existing backend checks and both ASGI server entrypoints on each candidate. Exercise concurrency, cancellation, GC/shutdown, storage collisions, and context propagation; database and real object-storage/browser integrations need separate environments and evidence.
+- Compare Limited API versus version-specific artifacts on the same runtime separately from regular-versus-free-threaded runtime performance. Apply the strategy's workload, repetition, latency, throughput, and memory criteria.
+- Preserve the known-good GIL-enabled fallback and record failed or unavailable lanes. No synthetic tag check, wheel inventory, or benchmark of only health endpoints qualifies the full stack.
 
 ## Security-negative testing
 

@@ -7,7 +7,7 @@ It is not a security policy (see [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTUR
 ## Status
 
 - In effect for every code change, starting at HEAD 8ec5623 (committed 2026-09-21; the repository facts in this document were verified on 2026-10-08). The procedure depends on nothing that is Planned.
-- Tooling: none. The repository has no pull request template, no `.github/workflows`, and no CI configuration; `.github/` holds only `copilot-instructions.md`, a bridge file that points to [CONTEXT.md](CONTEXT.md). Adding any of these is a separate, explicitly requested change.
+- Tooling: none configured in this repository's files. There is no `.github/workflows` directory and no CI configuration. GitHub-side integrations, such as review bots, are configured outside the repository's files; whether one runs depends on the connected service and its settings, and its output is evidence to read (see "Independence and authority"). `.github/` holds `copilot-instructions.md`, a bridge file that points to [CONTEXT.md](CONTEXT.md), and the advisory issue forms and pull request template described in [CONTEXT.md](CONTEXT.md) "GitHub issues and pull requests"; they are writing aids, not review tooling or evidence. Adding a workflow or CI configuration is a separate, explicitly requested change. (Updated 2026-10-09.)
 - Verification baseline: the automated tests that exist are listed in [TESTING.md](TESTING.md) under "Tests that exist today". They were not executed in this documentation pass. "Exists" and "executed" stay distinct throughout this document.
 - The checks under "Boundary-specific checks" for Realtime, Task, and Runtime cover Planned areas. They apply to a change that introduces such code; they never imply the feature exists.
 

@@ -1,0 +1,39 @@
+name: Bug report
+description: Report behavior in the current scaffold that does not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is public. Do not include passwords, API keys, tokens, cookie or session values, `.env` values, presigned URLs, or personal data.
+        For a security vulnerability that is not fixed yet, do not post reproduction steps or exploit details here; open an issue that says only that you have a security report, and wait for a maintainer to follow up.
+        All fields are optional. Opening an issue does not approve or schedule work.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What went wrong?
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The shortest sequence of steps that shows the problem. Leave out environment variable values such as `DATABASE_URL` or storage keys.
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual behavior
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: For example the area (backend Python/Django or frontend Node/Next.js), operating system, browser, and how you ran it. Leave out environment variable values such as `DATABASE_URL` or storage keys.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log or error output. Remove passwords, API keys, tokens, cookie or session values, `.env` values, presigned URLs, and personal data before pasting.
+      render: text

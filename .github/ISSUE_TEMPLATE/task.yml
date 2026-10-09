@@ -1,0 +1,37 @@
+name: Repository task
+description: Track repository work such as research, documentation, implementation preparation, or general development. Unrelated to the Claus product's Task concept.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is public. Do not include secrets or personal data, or exploit details for a security vulnerability that is not fixed yet.
+        All fields are optional. Opening an issue does not approve or schedule work.
+  - type: dropdown
+    id: kind-of-work
+    attributes:
+      label: Kind of work
+      options:
+        - Research
+        - Documentation
+        - Implementation preparation
+        - General development
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should this work achieve?
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is in scope, and what is explicitly out of scope?
+  - type: textarea
+    id: done-when
+    attributes:
+      label: Done when
+      description: What result or evidence shows that the work is complete?
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Related issues, pull requests, or documents.

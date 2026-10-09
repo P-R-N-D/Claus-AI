@@ -8,7 +8,7 @@ It is not a vulnerability reporting policy, not a review procedure (see [SECURIT
 
 - The repository implements health endpoints, the ASGI composition, `DATABASE_URL` parsing with SQLite fallback, and the S3-compatible storage backend. [ARCHITECTURE.md](ARCHITECTURE.md) keeps the implemented versus planned breakdown.
 - No authentication flow, authorization check, scope model, sharing action, approval workflow, or audit trail exists for product features. There are no collaboration domain models. Requirements in those areas are Planned and describe target behavior only.
-- Requirements marked Implemented are backed by repository code and, except `SEC-SECRET-001` (file evidence only), by tests that exist in the repository; the tests were not executed in this documentation pass.
+- Requirements marked Implemented are backed by repository code and by tests that exist in the repository; the tests were not executed in this documentation pass.
 - WebMCP-related requirements are Planned and Experimental: WebMCP is a draft Community Group report, and no status-page entry reported default-on support in a stable browser release as of 2026-10-08 (see [WEBMCP.md](WEBMCP.md)).
 
 Status words: Implemented, Partial, Planned, Experimental. Partial means supporting code exists but the requirement is not enforced. Fact/Partial marks a requirement that records a fact about current code with no product behavior behind it.
@@ -19,11 +19,11 @@ Planned. Except where a bullet says "Today", the actors and boundaries below are
 
 ### Actors
 
-- **User**: an authenticated person acting through the Human UI, or later through automation on their behalf. The only source of intent and approval.
-- **Automation identity**: a non-interactive caller that the control plane authenticates and authorizes with its own identity. It acts only within the permissions granted to that identity and is never a source of approval.
+- **User**: an authenticated person acting through the Human UI, or later through automation on their behalf. Intent reaches Claus from users in two ways: a direct request, or a standing authorization that a user, or an administrator with authority over the context, set up in advance for automation (see "Basis for state changes"). Approval is a separate decision that only a person with authority over the operation makes (SEC-APPROVE-001); neither a direct request nor a standing authorization is one.
+- **Automation identity**: a non-interactive caller that the control plane authenticates and authorizes with its own identity; a name or identifier a client sends is not one. It acts on a standing authorization, only within the permissions granted to that identity and the authorization's scope, and is never a source of approval.
 - **AI participant**: a personal or shared AI acting inside one `CollaborationContext` ([STATE-SCHEMA.md](STATE-SCHEMA.md)) with its own effective permissions, never wider than the context allows. Claus identifies and runs it; the server applies its permissions only when the server itself established that this participant is acting, never because a request, tool input, or message names it.
 - **External browser agent or extension**: an agent outside Claus that calls the WebMCP tools a page exposes or otherwise acts in the user's browser. It acts inside the user's authenticated session, so the server sees its requests as that user's and cannot establish which agent sent them; no delegation or agent-identification mechanism exists. It is not an AI participant and is untrusted by the server. Experimental.
-- **External content**: files, web pages, retrieved chunks, tool outputs, messages from AI participants, and every message or quoted text other than the direct request being handled (conversation history, other members' earlier requests, quotes, forwarded or attached text). Untrusted input, never instructions.
+- **External content**: files, web pages, retrieved chunks, tool outputs, the payload of an external event or webhook, messages from AI participants, and every message or quoted text other than the direct request being handled (conversation history, other members' earlier requests, quotes, forwarded or attached text). Untrusted input, never instructions.
 - **Direct request**: the message an AI participant is handling, in which an authenticated user asks it to do something in a context where both are present. The server identifies it from the authenticated sender and the message being handled, never from the model's reading of the text. It carries that user's intent, within that user's own permissions and the AI participant's effective permissions; its quoted, attached, forwarded, or referenced parts are not part of it and remain external content. A reply from that user that accepts a proposal, or answers a question, the AI put to that user in the same exchange ("yes", "editor") is a direct request for exactly the operation and targets the AI showed, with the values it showed or the reply supplies; a reply that declines, asks back, or is ambiguous requests nothing. A message from an AI participant is never a direct request. See "Direct requests and referenced content".
 - **External tools**: third-party APIs called with server-held credentials. Their outputs are external content.
 - **Runtimes**: Browser, Terminal, and Workspace execution environments. Task-scoped, isolated, without persistent authority.
@@ -46,7 +46,7 @@ Runtimes: Browser, Terminal, Workspace               untrusted output
 - **Control plane <-> agent surface**: Django `core` owns users, permissions, contexts, Files, Knowledge scope, and Task state. The FastAPI app under `/agent` is mounted beside Django in the same ASGI process and receives none of Django's middleware. Identity and authorization must flow from the control plane; the agent surface must never become an independent authority.
 - **Control plane <-> storage and database**: connections are configured from the environment and validated at startup (database URL) or at first use (object storage). A presigned object URL is a bearer capability; issuing one is an authorization decision.
 - **Runtimes <-> everything**: Browser, Terminal, and Workspace runtimes must hold no long-lived credentials, must not reach other contexts, and must return results only through authorized writes of Messages, Files, Artifacts, or Task state.
-- **Model <-> content**: everything a model reads from files, retrieval, web pages, tools, or other messages, and anything quoted, attached, or referenced inside a direct request, crosses a trust boundary; only the direct request's own text carries its sender's intent. Content informs the model and must never command the system.
+- **Model <-> content**: everything a model reads from files, retrieval, web pages, tools, or other messages, and anything quoted, attached, or referenced inside a direct request, crosses a trust boundary; only the direct request's own text carries its sender's intent, and in an automated run only the stored definition of its standing authorization carries the intent of whoever authorized it. Content informs the model and must never command the system.
 
 Planned: interaction origin (Human UI, WebMCP, automation, Browser Computer Use, background Task) will be recorded for audit and diagnostics and never widens permission. A value the server cannot verify, such as `human_ui` or `webmcp` for a request under a user's browser session, is recorded only as client-reported. Nothing records it today. See [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md).
 
@@ -66,6 +66,24 @@ Consequences:
 - A direct request may ask the AI to use referenced material, for example to summarize it or to apply its data. An operation the member's request does not ask for, or a target, recipient, or scope the request neither names nor designates, is not carried out on the material's authority; the AI may propose it, and the member's reply accepting the proposal is then a direct request for exactly the operation and targets shown, with the values shown or the reply supplies. When the request names the operation and designates the material as the source of its values ("invite the addresses in this file"), the values are used as data, and the resulting operations still go through server authorization, classification, and approval.
 - A direct request never widens scope: a member cannot direct a shared AI to read any member's personal context, the member's own included. A direct request is not a share action; personal material reaches a team scope only through an explicit share (SEC-SCOPE-002, SEC-SHARE-001).
 - Trust here concerns authority, not validation: every input, direct requests included, is validated as untrusted input.
+
+### Basis for state changes
+
+Planned. A state change needs a basis the server can verify. There are two, and neither replaces authentication, authorization, scope, classification, or a required approval (SEC-INJ-002):
+
+1. A direct request: an authenticated user explicitly asks for the work in a context they may act in, either by calling the operation under their own session or in a message an AI participant handles (see "Direct requests and referenced content"). The server checks the user, the scope, the effective permissions of the AI participant if one acts, the operation's class, and any approval it needs. That a request is direct widens nothing.
+2. A standing authorization: a Task or an automation policy that an authenticated user, or an administrator with authority over the context, set up and authorized in advance. A run needs no new message from a person, but does only what the server can verify from the stored definition: its operations, targets, scope, and conditions. It runs as an actor the control plane authenticates, the user who set it up or an automation identity, never as a name a client supplies. It covers nothing that the user or administrator who authorized it may not do in that context, so running it as an automation identity widens nothing (SEC-AUTH-001).
+
+Rules for a standing authorization:
+
+- A schedule reaching its time, or an external event arriving, may start a run that the authorization covers. A trigger is neither an authorization nor an approval and adds nothing to the definition.
+- An event's payload, and retrieved, file, or tool content read during a run, are untrusted (SEC-INJ-001). They may supply values that the definition designates as input, but they never add an operation, target, recipient, or scope, change the definition, or establish a role, permission, or approval they claim.
+- Each run is checked against the authorization, permissions, and scope in effect when it executes. A revoked or otherwise invalid authorization executes nothing, and narrowed permissions or scope narrow or stop the run (SEC-AUTH-001, SEC-SCOPE-003).
+- A standing authorization is not an approval. Setting up, authorizing, or scheduling it approves none of the consequential operations a run may reach; each waits for its own approval, bound to its `operation_id` (SEC-APPROVE-001, SEC-APPROVE-002).
+
+Under either basis, an AI participant may plan the work and split it into steps, but it adds no state change that the direct request or the standing authorization does not cover. A step outside them is not executed; the AI may propose it to a person, whose direct request then covers it. A consequential step that a basis covers, including one a person's direct request covers after such a proposal, still waits for its approval; an approval is not a basis and never covers a step that neither basis covers. The AI's own judgment is neither a direct request nor an authorization.
+
+How a standing authorization is stored, who may grant one, and how an automation identity authenticates are not designed.
 
 ## Current implementation security facts
 
@@ -115,6 +133,8 @@ Verified on 2026-10-08. Line numbers refer to the file named in each heading unl
 
 - `.gitignore` ignores `.env` and `.env.*` except example files (lines 30-33), private key files (lines 36-43), credential-shaped JSON (lines 46-53), logs (lines 64-65), `backend/db.sqlite3` (line 26), and browser profile directories (lines 83-88).
 - `.env.example` (lines 2-13) holds empty placeholders for `DJANGO_SECRET_KEY`, `DATABASE_URL`, and the five storage variables, plus `DJANGO_DEBUG=true`.
+- The ignore rules only keep untracked files out of a commit. They do not apply to a file that is already tracked or that is added with `git add -f`, and they do not catch a secret written into source code, documentation, tests, or configuration, or one already in the history.
+- No Git hook, CI workflow, or secret scanner is configured; `.github/` holds only `copilot-instructions.md`. [SECURITY-REVIEW.md](SECURITY-REVIEW.md) step 7 defines a keyword check of a change's added lines, which a reviewer runs; nothing runs or enforces it automatically.
 
 ### Frontend
 
@@ -179,8 +199,8 @@ Retrieval is permission-filtered and its results are untrusted model input.
 
 Text that reaches a model from outside the system has no authority.
 
-- `SEC-INJ-001` Planned. All model-visible content from files, web pages, retrieval, and tool outputs, every message from an AI participant, and every message or quoted text other than the direct request being handled is untrusted; instructions found in it carry no authority. A direct request from an authenticated user carries that user's intent only, within their permissions; material quoted, attached, or referenced in it stays untrusted (see "Direct requests and referenced content").
-- `SEC-INJ-002` Planned. Decisions with side effects derive from the direct request of an authenticated user who may act in the context, and from server policy, never from text in untrusted content. An operation the request does not ask for, or a target, recipient, or scope it neither names nor designates, is not carried out on the authority of referenced material, and no direct request or content overrides the server's authorization, scope, classification, or approval requirements. Untrusted content is delimited and labelled when passed to a model.
+- `SEC-INJ-001` Planned. All model-visible content from files, web pages, retrieval, and tool outputs, the payload of an external event that starts or feeds an automated run, every message from an AI participant, and every message or quoted text other than the direct request being handled is untrusted; instructions found in it carry no authority. A direct request from an authenticated user carries that user's intent only, within their permissions; material quoted, attached, or referenced in it stays untrusted (see "Direct requests and referenced content").
+- `SEC-INJ-002` Planned. Decisions with side effects derive from server policy and from a basis the server can verify: the direct request of an authenticated user who may act in the context, or a standing authorization (a Task or automation policy that an authenticated user, or an administrator with authority over the context, set up and authorized in advance), within its stored operations, targets, scope, and conditions (see "Basis for state changes"). They never derive from text in untrusted content, an event payload included, or from the AI's own judgment. An operation the request or the authorization does not cover, or a target, recipient, or scope it neither names nor designates, is not carried out on the authority of referenced material; a schedule or an event only starts a run that the authorization covers. Neither basis, nor any content, overrides the server's authentication, authorization, scope, classification, or approval requirements, and a standing authorization is not an approval. Untrusted content is delimited and labelled when passed to a model.
 - `SEC-INJ-003` Planned. Tool metadata (names, descriptions, schemas) and tool outputs exposed to agents are authored by Claus, kept short, and reviewed; user-generated content in outputs is marked untrusted. Applies to WebMCP through the AGENT area.
 
 ### AGENT: WebMCP and agent-originated actions
@@ -219,9 +239,9 @@ Credentials stay on the server; every call is accountable.
 
 ### SECRET: secrets, logs, and audit
 
-The repository holds no secrets; runtime records hold safe summaries only.
+No secret enters the repository or its history, and runtime records hold safe summaries only. The controls in place today lower the risk; none of them shows that the repository holds no secret.
 
-- `SEC-SECRET-001` Implemented. No secrets in the repository; `.env` files are ignored; `.env.example` holds placeholders only. Evidence: `.gitignore:30-33`, `.env.example`.
+- `SEC-SECRET-001` Partial. No secret or real credential enters the repository, whether in a tracked file of any kind or in the history. In place: `.gitignore` excludes `.env` files other than examples, private key and certificate files, and credential-shaped JSON; `.env.example` holds empty placeholders instead of credentials; and [SECURITY-REVIEW.md](SECURITY-REVIEW.md) step 7 defines a check of a change's added lines. Not in place: enforcement of these controls, a scan of tracked files or history, and any protection for a file that is already tracked or force-added. These are repository and review controls, not proof that no secret is present; a secret that reached a commit is treated as exposed even after it is removed. Evidence: `.gitignore:30-53`, `.env.example:2-13`.
 - `SEC-SECRET-002` Partial. `DJANGO_SECRET_KEY` and `DJANGO_DEBUG=false` must be set in any non-local environment. The code falls back to a dev placeholder key and `DEBUG=true` by default; the `SECRET_KEY` fallback is documented and has a test in the repository (`test_secret_key_uses_placeholder_for_missing_or_empty_environment`), the `DEBUG` default is documented but untested, and nothing enforces the override at deployment.
 - `SEC-SECRET-003` Planned. Logs, Task records, and ToolRun summaries contain safe summaries only: never credentials, presigned URLs, raw tokens, or full prompts containing personal data.
 - `SEC-SECRET-004` Planned. The audit trail records who (the actor, a user or automation identity, and the AI participant, if any), what operation, on which scope and resource, via which interaction origin, when, with what approval, and with what outcome.
@@ -295,7 +315,7 @@ Evidence names repository files and tests that exist; "none yet" means no code o
 | SEC-RUNTIME-004 | Fact/Partial | `agent/runtime/browser/playwright.py:6-8` |
 | SEC-TOOL-001 | Planned | none yet |
 | SEC-TOOL-002 | Planned | none yet |
-| SEC-SECRET-001 | Implemented | `.gitignore:30-33`, `.env.example:2-13` |
+| SEC-SECRET-001 | Partial | `.gitignore:30-53`, `.env.example:2-13` (ignore rules and placeholders; nothing enforces them or scans tracked files and history) |
 | SEC-SECRET-002 | Partial | `settings.py:10-14`; `test_secret_key_uses_placeholder_for_missing_or_empty_environment` |
 | SEC-SECRET-003 | Planned | none yet |
 | SEC-SECRET-004 | Planned | none yet |

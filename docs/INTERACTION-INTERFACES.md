@@ -59,7 +59,9 @@ Planned and Experimental. The WebMCP adapter is browser-side code in the Human U
 Planned. Automation is any non-interactive caller of application operations: scheduled or triggered flows, integrations and scripted clients, and in-product AI invoking operations outside a live UI. Responsibilities and limits:
 
 - Runs as an authenticated actor known to the control plane. Anonymous automation does not exist. The Agent FastAPI surface is not an identity authority for it (SEC-AUTH-002).
-- Calls the same operations with the same validation, scope checks, and approval path as the Human UI (contract 2). Automation does not get a bypass for approval-required operations (SEC-APPROVE-001).
+- Runs on a standing authorization: a Task or automation policy that an authenticated user, or an administrator with authority over the context, set up and authorized in advance. A run needs no new message from a person, but does only what the stored definition covers (its operations, targets, scope, and conditions), under the authorization, permissions, and scope in effect when it executes; a revoked or otherwise invalid authorization executes nothing ([SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) "Basis for state changes", SEC-INJ-002).
+- A schedule or an external event only starts a run that the authorization covers. The event's payload is untrusted data (SEC-INJ-001): a role, permission, or approval it claims establishes nothing, and it adds no operation, target, recipient, or scope.
+- Calls the same operations with the same validation, scope checks, and approval path as the Human UI (contract 2). Automation does not get a bypass for approval-required operations (SEC-APPROVE-001), and setting up or scheduling an automation approves none of the consequential operations it later reaches.
 - Retries are expected, so every state-changing automated call carries the `operation_id` of its logical operation, created and stored before the first attempt and reused by every retry (SEC-IDEM-001). Each attempt is a distinct record (SEC-IDEM-002). See "Operation identity and retries".
 - Long-running work runs as a background Task and never blocks a conversation. Entry through Automation is recorded as `automation`; execution inside a Task runner is recorded as `background_task`. A product Task and an execution attempt remain distinct, as ARCHITECTURE requires.
 - Automation that reaches external systems holds credentials server-side only and logs each call with a safe summary (SEC-TOOL-001, SEC-TOOL-002).
@@ -106,6 +108,7 @@ Planned. The operation layer belongs to the Django control plane (`core`), which
 Each operation defines:
 
 - An actor and, when AI is involved, an AI participant.
+- For a state change, the basis the server verified for it: the direct request being handled, or the standing authorization that a Task or an automation run carries (SEC-INJ-002). The basis replaces no authorization, scope, classification, or approval check.
 - The context (personal, or Topic/Thread) and exactly one owning scope: personal, topic, team/project, organization, or external (SEC-SCOPE-001).
 - Validated input. Input is data; instructions embedded in it carry no authority (SEC-INJ-001).
 - A classification, assigned by server policy (see "Classification and approval"): read, untrusted read, mutation, or consequential (the class [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) calls high-impact). The classification decides server-side whether an approval is required and is what [WEBMCP.md](WEBMCP.md) maps to tool annotations. Changing the classification of an operation is a security change.

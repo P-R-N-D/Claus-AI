@@ -6,8 +6,8 @@ This document distinguishes the current runnable scaffold from longer-term archi
 
 ## Current runnable scaffold
 
-- Frontend: Next.js user surface at `/` and a separate product-operations Console at `/console/*`, using React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright.
-- Backend baseline: Django 6 on Python 3.12–3.14, Django REST Framework, FastAPI, Daphne, and Uvicorn.
+- Frontend: Next.js user surface at `/` and a separate product-operations Console reserved under `/console/*` (only the `/console` index page exists today), using React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright.
+- Backend baseline: Django 6 on Python 3.12 or newer (Django 6.0 officially supports 3.12 through 3.14), Django REST Framework, django-cors-headers, FastAPI, Daphne, Uvicorn, psycopg (PostgreSQL driver), boto3 (S3-compatible storage client), and Python Playwright.
 - Django project: `config`.
 - Django apps: `core` for the persistent product/control plane and `agent` for AI/RAG/agent execution.
 - Routing: `/core/*` uses Django/DRF, `/agent/*` uses FastAPI, and `/admin/*` remains Django Admin.
@@ -24,7 +24,24 @@ config.asgi.application
 
 It sets Django settings and calls `get_asgi_application()` before importing Agent FastAPI. Daphne is first in `INSTALLED_APPS`, so `manage.py runserver` uses this ASGI application; Uvicorn imports the same object directly. WSGI is a Django-only fallback.
 
-The current implementation provides health APIs and package boundaries only. It does not implement the collaboration domain models, RAG pipeline, LLM provider, agent orchestration, background execution, Browser sessions, Terminal, Workspace, realtime transport, or authorization features described below.
+### Implemented foundations
+
+The scaffold implements the following. The first three have tests in the repository (`backend/core/tests.py`, `backend/core/test_database.py`, `backend/core/test_storage.py`, `backend/agent/tests.py`); the runtime boundary has none:
+
+- Health APIs: `GET /core/health/` (DRF) and `GET /agent/health/` (FastAPI), plus the ASGI routing contract above (`/agent/openapi.json` served, legacy `/api/health/` absent).
+- Database configuration: `config/database.py` builds `DATABASES["default"]` from `DATABASE_URL`. Only `postgres`/`postgresql` URLs are accepted, parsing is strict (hostname and database name required, no fragment, no duplicate or malformed query parameters), query parameters become `OPTIONS`, and invalid URLs raise `ImproperlyConfigured` instead of falling back. An unset or blank `DATABASE_URL` selects SQLite at `backend/db.sqlite3`.
+- File storage: `core/storage/s3.py` (`S3CompatibleStorage`) is the default Django storage backend. It reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_REGION`, and `OBJECT_STORAGE_BUCKET` lazily, validates the endpoint, rejects unsafe object names, saves with a conditional create so existing objects are never overwritten (a collision allocates a new name and retries), supports binary reads only, and returns presigned download URLs valid for one hour. The tests use a fake S3 client; no integration test against a real object store exists.
+- Runtime boundary: `agent/runtime/browser/playwright.py` returns the async Playwright context manager without launching a browser. The `agent/llm`, `agent/rag`, `agent/orchestration`, and `agent/tools` packages are docstring-only boundaries.
+
+### Not implemented
+
+The repository does not implement the collaboration domain models (no Django models beyond Django's built-ins), authentication or authorization for product features (DRF default permissions apply, and the `/agent/*` surface runs outside Django middleware), approval workflows, the RAG pipeline, an LLM provider, agent orchestration, background execution, Browser sessions, Terminal, Workspace, realtime transport, WebMCP, or frontend i18n. The frontend consists of two pages and a health card component that calls both health endpoints. Sections below describe direction, not behavior.
+
+### Related direction documents
+
+- Interaction architecture (planned): Human UI, WebMCP, Automation, and Browser Computer Use are separate entry points that should invoke the same application operations, with authorization and approval decided server-side and the interaction origin recorded only for audit. See [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md); the WebMCP-specific contract, an experimental external technology, is in [WEBMCP.md](WEBMCP.md).
+- Internationalization (planned): English canonical with Korean, `next-intl` without locale-prefixed routes, preference resolved from account setting, cookie, environment, then English. Nothing is installed yet. See [I18N.md](I18N.md).
+- Security: trust boundaries, `SEC-*` requirements, and the security facts of the current code are in [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md).
 
 ## Collaboration model
 
@@ -156,4 +173,4 @@ When the corresponding features are implemented, every context or tool operation
 - Required human approval
 - Artifact and secret-handling requirements
 
-These are architecture contracts, not claims that the current health-only scaffold already implements them.
+These are architecture contracts, not claims that the current scaffold already implements them. The requirement-level version of these contracts, with stable `SEC-*` identifiers and the current implementation status of each, lives in [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md).

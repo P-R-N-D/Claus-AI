@@ -24,17 +24,30 @@ Long-running AI execution and browser/terminal/workspace runtimes should be sepa
 
 The repository currently contains this initial scaffold:
 
-- Frontend: Next.js user UI at `/`, a separate product Console at `/console/*`, React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright tests.
-- Backend: Django 6 on Python 3.12–3.14, using one Django project (`config`) with two Django apps (`core`, `agent`).
+- Frontend: Next.js user UI at `/`, a separate product Console under `/console` (reserved as `/console/*`; only the `/console` index page exists today), React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright tests.
+- Backend: Django 6 on Python 3.12 or newer (Django 6.0 officially supports 3.12 through 3.14), using one Django project (`config`) with two Django apps (`core`, `agent`).
 - URLs: core DRF at `/core/*`, Agent FastAPI at `/agent/*`, and Django Admin at `/admin/*`.
 - Composition: `config.asgi.application` mounts FastAPI and Django into one ASGI application, served identically by Daphne-backed `manage.py runserver` or Uvicorn.
 - Local integration: the Next.js dev server rewrites `/core/*` and `/agent/*` to the backend at `http://127.0.0.1:8000`.
 - Health endpoints: `GET /core/health/` and `GET /agent/health/`.
+- Database configuration: `DATABASE_URL` (PostgreSQL URLs only; an invalid value fails at startup) configures the Django database, and SQLite at `backend/db.sqlite3` is the fallback when it is unset or blank.
+- File storage: the default Django storage is a private S3-compatible object storage backend (`core/storage/s3.py`) that requires the object storage variables listed in `.env.example`.
 - Browser foundation: backend Python Playwright provides the async Agent Browser Computer Use package boundary; it is separate from frontend Playwright tests.
 
-The scaffold implements health endpoints and package boundaries only. It does not implement domain models, RAG, LLM orchestration, browser sessions, Terminal, or Workspace behavior.
+The scaffold implements the health endpoints, the ASGI composition, the `DATABASE_URL`-based database configuration, and the S3-compatible storage backend, each with tests in the repository. It does not implement collaboration domain models, authentication or authorization for product features, RAG, LLM orchestration, background execution, browser sessions, Terminal, Workspace, realtime transport, WebMCP, or frontend i18n.
 
 This initial scaffold does not include Docker, Nginx, K8s, Helm, production deployment manifests, custom domain models, custom migrations, or SQL schema work.
+
+## Technical documents
+
+Technical documents for AI coding agents and contributors are written in English, and [docs/CONTEXT.md](CONTEXT.md) is the entry point. It says which document to read for each kind of task.
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): overall structure and the implemented versus planned breakdown.
+- [STATE-SCHEMA.md](STATE-SCHEMA.md): conceptual state shapes (not a database schema).
+- [TESTING.md](TESTING.md): the tests that exist today and the verification still required.
+- [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md): trust boundaries and the `SEC-*` security requirements.
+- [CODE-REVIEW.md](CODE-REVIEW.md), [SECURITY-REVIEW.md](SECURITY-REVIEW.md): independent code review and security review procedures for code changes.
+- [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md), [WEBMCP.md](WEBMCP.md), [I18N.md](I18N.md): the not-yet-implemented interaction architecture, the WebMCP (experimental technology) contract, and the frontend i18n direction.
 
 ## Local development
 

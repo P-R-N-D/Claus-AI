@@ -24,17 +24,30 @@ Next.js frontend는 개인 AI 대화, 팀 Topic/Thread, 파일과 Artifact, AI �
 
 현재 저장소에 실제로 포함된 초기 scaffold는 다음과 같습니다.
 
-- Frontend: `/`의 Next.js 사용자 UI와 `/console/*`의 별도 제품 Console, React, TypeScript, Tailwind CSS, axios, SweetAlert2, Node Playwright 테스트.
-- Backend: Python 3.12–3.14에서 실행되는 Django 6, 하나의 Django project(`config`)와 두 Django app(`core`, `agent`).
+- Frontend: `/`의 Next.js 사용자 UI와 `/console` 아래의 별도 제품 Console(`/console/*`로 예약되어 있으며 현재는 `/console` 인덱스 페이지만 존재), React, TypeScript, Tailwind CSS, axios, SweetAlert2, Node Playwright 테스트.
+- Backend: Python 3.12 이상(Django 6.0은 3.12–3.14를 공식 지원)에서 실행되는 Django 6, 하나의 Django project(`config`)와 두 Django app(`core`, `agent`).
 - URL: `/core/*`의 Django REST Framework control-plane API, `/agent/*`의 Agent FastAPI, `/admin/*`의 Django Admin.
 - ASGI 구성: `config.asgi.application`이 FastAPI와 Django를 하나의 ASGI application으로 구성하며, Daphne 기반 `manage.py runserver`와 Uvicorn에서 동일하게 제공합니다.
 - Local 연동: Next.js 개발 서버가 `/core/*`와 `/agent/*` 요청을 `http://127.0.0.1:8000` backend로 rewrite합니다.
 - Health endpoint: `GET /core/health/`, `GET /agent/health/`.
+- Database 설정: `DATABASE_URL`(PostgreSQL URL만 허용, 잘못된 값은 시작 시 오류)로 Django database를 구성하고, 설정이 없거나 비어 있으면 `backend/db.sqlite3` SQLite로 fallback합니다.
+- File storage: 기본 Django storage는 비공개 S3-compatible object storage backend(`core/storage/s3.py`)이며 `.env.example`의 object storage 환경 변수가 필요합니다.
 - Browser 기반: backend Python Playwright는 비동기 Agent Browser Computer Use package 경계를 제공하며 frontend Playwright 테스트와 분리되어 있습니다.
 
-현재 scaffold에는 health endpoint와 package 경계만 구현되어 있습니다. Domain model, RAG, LLM orchestration, browser session, Terminal 또는 Workspace 동작은 아직 구현되어 있지 않습니다.
+현재 scaffold에 구현된 것은 health endpoint, ASGI 구성, `DATABASE_URL` 기반 database 설정, S3-compatible storage backend이며 각각 저장소에 테스트가 있습니다. 협업 domain model, 제품 기능의 인증·인가, RAG, LLM orchestration, 백그라운드 실행, browser session, Terminal, Workspace, 실시간 통신, WebMCP, frontend i18n은 아직 구현되어 있지 않습니다.
 
 이번 초기 scaffold에는 Docker, Nginx, K8s, Helm, production deployment manifest, custom domain model, custom migration, SQL schema 작업이 포함되지 않습니다.
+
+## 기술 문서
+
+AI 코딩 에이전트와 기여자를 위한 기술 문서는 영어로 작성되며 [docs/CONTEXT.md](CONTEXT.md)가 진입점입니다. 그 문서가 작업 유형별로 어떤 문서를 읽어야 하는지 안내합니다.
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): 전체 구조와 구현됨/계획됨 구분.
+- [STATE-SCHEMA.md](STATE-SCHEMA.md): 개념적 상태 모양(DB schema 아님).
+- [TESTING.md](TESTING.md): 현재 존재하는 테스트와 앞으로 필요한 검증.
+- [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md): 신뢰 경계와 `SEC-*` 보안 요구사항.
+- [CODE-REVIEW.md](CODE-REVIEW.md), [SECURITY-REVIEW.md](SECURITY-REVIEW.md): 코드 변경의 독립 리뷰와 보안 리뷰 절차.
+- [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md), [WEBMCP.md](WEBMCP.md), [I18N.md](I18N.md): 아직 구현되지 않은 상호작용 구조, WebMCP(실험적 기술) 계약, 프런트엔드 i18n 방향.
 
 ## 로컬 실행 순서
 

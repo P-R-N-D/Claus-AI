@@ -46,7 +46,7 @@ Conceptual fields:
 
 - `task_id`: stable identifier.
 - `context_ref`: personal or team context that owns the task.
-- `requested_by`: user or AI participant that initiated the task.
+- `requested_by`: the authenticated user, or the automation identity, whose request started the task. An automation identity is one the control plane authenticates and authorizes, never a name a client supplies. The task's operations run with the requester as their actor. An AI participant that runs the task is not its requester: that AI participant, the actor of each operation, each agent execution of the task (one attempt to perform it; a Task retry is a new one), and each operation attempt are separate. The participant, actor, and operation attempt are recorded with each operation call in `InteractionContext` (`ai_participant_ref`, `actor_ref`, `attempt_id`).
 - `status`: queued, running, waiting_for_approval, succeeded, failed, cancelled, or similar state.
 - `plan`: current high-level task plan when one exists.
 - `current_step`: current execution step.
@@ -61,7 +61,7 @@ Conceptual pseudo-schema:
 {
   "task_id": "task identifier",
   "context_ref": "context identifier",
-  "requested_by": "participant identifier",
+  "requested_by": "authenticated user or automation identity",
   "status": "task status",
   "plan": ["task step"],
   "current_step": "step identifier",
@@ -139,7 +139,7 @@ Fields:
 - `context_ref`: owning personal/team context.
 - `source_task_id`: task that produced the artifact when applicable.
 - `storage_ref`: persistent storage reference.
-- `visibility`: personal or shared visibility scope.
+- `visibility`: `personal` or `shared`. A presentation flag, not one of the five permission scopes; the owning scope follows `context_ref`.
 - `created_at`: creation timestamp.
 
 Conceptual pseudo-schema:
@@ -151,7 +151,7 @@ Conceptual pseudo-schema:
   "context_ref": "context identifier",
   "source_task_id": "task identifier or null",
   "storage_ref": "storage reference",
-  "visibility": "personal or shared scope",
+  "visibility": "personal or shared",
   "created_at": "creation timestamp"
 }
 ```
@@ -186,3 +186,73 @@ Fields:
 - `presentation_state`: page, slide, playback position, filter, or other synchronized presentation state.
 
 `StageItem` is presentation state, not the canonical storage location for the underlying file or artifact.
+
+## PresentationPreferences
+
+`PresentationPreferences` represents how content is presented to one person: UI language, time zone, and the language expected from AI output. It is a conceptual shape for the direction in [I18N.md](I18N.md). Nothing persists it today; no account preference model, API, or cookie handling exists.
+
+Fields:
+
+- `subject_ref`: the user the preferences belong to.
+- `ui_locale_preference`: `system`, `en`, or `ko`. `system` means "follow the environment language".
+- `resolved_ui_locale`: `en` or `ko`, the locale actually used for a request after the resolution order in I18N.md (account setting, explicit cookie, environment language, English fallback).
+- `resolution_source`: `account`, `cookie`, `environment`, or `default`, recorded for diagnostics.
+- `time_zone`: IANA time zone name used for date and time rendering; absent means the application default.
+- `ai_output_language_preference`: the language a user wants AI conversation and generated results in, kept separate from `ui_locale_preference` and possibly different from it.
+
+Conceptual pseudo-schema:
+
+```json
+{
+  "subject_ref": "user identifier",
+  "ui_locale_preference": "system | en | ko",
+  "resolved_ui_locale": "en | ko",
+  "resolution_source": "account | cookie | environment | default",
+  "time_zone": "IANA time zone or null",
+  "ai_output_language_preference": "language preference or null"
+}
+```
+
+`PresentationPreferences` never carries permissions, identifiers, enum values, or error codes; those stay locale-independent. Administrator-level defaults, when designed, are a separate policy object, not a field here.
+
+## InteractionContext
+
+`InteractionContext` describes how one operation was invoked: by a person in the Human UI, by an agent through a WebMCP tool, by automation, by Browser Computer Use, or by a background Task. It exists for audit and diagnostics. It is never an input to authorization, which is decided server-side from the actor, the `CollaborationContext`, and the operation. See [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md). Nothing records it today.
+
+Fields:
+
+- `origin`: `human_ui`, `webmcp`, `automation`, `browser_computer_use`, or `background_task`; null when the server establishes none and the client reports neither `human_ui` nor `webmcp`.
+- `origin_basis`: `server_verified` when the server derived `origin` from something it runs or authenticates, `client_reported` when the value is only what the client sent; null when `origin` is null. For a request under a user's browser session, `human_ui` and `webmcp` are `client_reported`, because the server cannot tell them apart.
+- `actor_ref`: the authenticated user, or automation identity, on whose behalf the operation runs; for a shared AI participant acting on a member's direct request, that member.
+- `ai_participant_ref`: the Claus AI participant involved, when the server itself established one; never taken from a value a client sends. Null for an external browser agent.
+- `context_ref`: the `CollaborationContext` the operation runs in.
+- `task_ref`: the `AgentTaskState` that issued the operation, when applicable.
+- `operation`: the application operation name invoked.
+- `operation_id`: the logical operation this call belongs to, unique per actor. It is created before the first attempt, reused by every retry, and is the idempotency key; a new intent gets a new one. Null for a read.
+- `attempt_id`: this try. Every retry has a new one.
+- `approval_ref`: the approval record the operation relied on, when one was required.
+- `request_id`: optional transport or trace identifier, for log correlation only; never used to detect duplicates.
+- `recorded_at`: timestamp.
+
+The identifiers, their binding rules, and the caller-side outcomes (`succeeded`, `not_executed`, `pending`, `outcome_unknown`) are defined in [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md) "Operation identity and retries" and "Outcomes, cancellation, and context changes". The operation layer decides whether a call repeats an earlier one from its `operation_id` binding; `InteractionContext` only records the ids for correlation. An attempt's status is not the Task's `status`: a Task can stay `running` or `waiting_for_approval` across several attempts.
+
+Conceptual pseudo-schema:
+
+```json
+{
+  "origin": "human_ui | webmcp | automation | browser_computer_use | background_task | null",
+  "origin_basis": "server_verified | client_reported | null",
+  "actor_ref": "authenticated user or automation identity",
+  "ai_participant_ref": "AI participant the server established, or null",
+  "context_ref": "context identifier",
+  "task_ref": "task identifier or null",
+  "operation": "application operation name",
+  "operation_id": "logical operation identifier or null",
+  "attempt_id": "attempt identifier",
+  "approval_ref": "approval identifier or null",
+  "request_id": "trace identifier or null",
+  "recorded_at": "timestamp"
+}
+```
+
+`InteractionContext` does not duplicate `CollaborationContext` (what the actor may see), `AgentTaskState` (what a Task is doing), or `ToolRun` (what a runtime tool did); it references them and adds only the origin of the invocation and the identifiers that correlate it.

@@ -8,7 +8,7 @@ Free-threaded compatibility is already the architecture direction in [CONTEXT.md
 
 The objective is the newest **supported, secure, reproducible combination** of packages, interpreter, ABI, and platform. A newer version is the first candidate, not permission to ignore its dependency constraints. Claus currently consumes third-party native extensions; it does not publish its own extension wheels.
 
-The checked baseline is CPython 3.12.15 on Linux x86-64 with a hashed backend lock and a wheel inventory, plus Node 24.21.0/npm 11.21.0 with an npm lock. Other operating systems, CPU architectures and accelerators have only static evidence; see [Platform and accelerator lanes](#platform-and-accelerator-lanes). Neither Python 3.15 nor 3.15t is qualified. Automated dependency alerts, CI, ABI qualification and performance benchmarks remain planned work. The compatibility and security exceptions below prevent treating this batch as an unconditional all-clear.
+The checked baseline is CPython 3.12.15 on Linux x86-64 with a hashed backend lock and a wheel inventory, plus Node 24.21.0/npm 11.21.0 with an npm lock. Other operating systems, CPU architectures and accelerators have only static evidence; see [Platform and accelerator lanes](#platform-and-accelerator-lanes). Neither Python 3.15 nor 3.15t is qualified. Since 2026-10-10, `.github/workflows/ci.yml` runs this baseline's checks on Linux x86-64 for pull requests and pushes to `main` ([TESTING.md](TESTING.md#continuous-integration)); automated dependency alerts, CI for any other lane, ABI qualification and performance benchmarks remain planned work. The compatibility and security exceptions below prevent treating this batch as an unconditional all-clear.
 
 ## Version selection and adjustment
 

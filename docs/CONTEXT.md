@@ -51,6 +51,7 @@ Read this file first. Then read only the documents that match the work; do not r
 | Work that touches collaboration, Task, Artifact, Knowledge, or presentation state | [STATE-SCHEMA.md](STATE-SCHEMA.md) |
 | Before claiming anything is tested, and when adding tests | [TESTING.md](TESTING.md) |
 | Dependency, interpreter, native wheel/ABI, platform or accelerator, or packaging-tool updates | [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md), then [TESTING.md](TESTING.md) |
+| Changes to `.github/workflows/` or other CI configuration | [TESTING.md](TESTING.md) "Continuous integration", then [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) and [SECURITY-REVIEW.md](SECURITY-REVIEW.md) |
 | Reviewing a code change (yours or another agent's) | [CODE-REVIEW.md](CODE-REVIEW.md) |
 | Creating or editing a GitHub issue or pull request at the user's explicit request or a supported delegation | [GitHub issues and pull requests](#github-issues-and-pull-requests) below, then the matching template in [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE/) or [`.github/pull_request_template.md`](../.github/pull_request_template.md) |
 | Changes to auth, permissions, scopes, files/storage, retrieval, tools, runtimes, approvals, secrets, logging, agent-originated actions, external content handling, or locale input handling | [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md), then [SECURITY-REVIEW.md](SECURITY-REVIEW.md) |

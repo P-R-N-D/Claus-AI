@@ -7,7 +7,7 @@ It is not a security policy (see [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTUR
 ## Status
 
 - In effect for every code change, starting at HEAD 8ec5623 (committed 2026-09-21; the repository facts in this document were verified on 2026-10-08). The procedure depends on nothing that is Planned. (Updated 2026-10-10: the Frontend boundary checks were re-checked at 14b9109; unchanged through 3fe4d1a.)
-- Tooling: none configured in this repository's files. There is no `.github/workflows` directory and no CI configuration. GitHub-side integrations, such as review bots, are configured outside the repository's files; whether one runs depends on the connected service and its settings, and its output is evidence to read (see "Independence and authority"). `.github/` holds `copilot-instructions.md`, a bridge file that points to [CONTEXT.md](CONTEXT.md), and the advisory issue forms and pull request template described in [CONTEXT.md](CONTEXT.md) "GitHub issues and pull requests"; they are writing aids, not review tooling or evidence. Adding a workflow or CI configuration is a separate, explicitly requested change. (Updated 2026-10-09.)
+- Tooling: `.github/workflows/ci.yml` is the only workflow in this repository's files. It runs the baseline backend, frontend, and Playwright checks on pull requests to `main` and pushes to `main`, on the checked lane only; [TESTING.md](TESTING.md) "Continuous integration" lists its jobs and what it does not cover. Its runs are evidence to read (see "Independence and authority" and step 8). GitHub-side integrations, such as review bots and required status checks, are configured outside the repository's files; whether one runs depends on the connected service and its settings, and its output is evidence to read. `.github/` also holds `copilot-instructions.md`, a bridge file that points to [CONTEXT.md](CONTEXT.md), and the advisory issue forms and pull request template described in [CONTEXT.md](CONTEXT.md) "GitHub issues and pull requests"; they are writing aids, not review tooling or evidence. Adding another workflow, or extending `ci.yml` beyond the checked lane, is a separate, explicitly requested change. (Updated 2026-10-10.)
 - Verification baseline: the automated tests that exist are listed in [TESTING.md](TESTING.md) under "Tests that exist today". They were not executed in this documentation pass. "Exists" and "executed" stay distinct throughout this document.
 - The checks under "Boundary-specific checks" for Realtime, Task, and Runtime cover Planned areas. They apply to a change that introduces such code; they never imply the feature exists.
 
@@ -16,7 +16,7 @@ It is not a security policy (see [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTUR
 - A review by the agent or session that wrote the change is a self-assessment. It is useful and must be labelled "self-assessment". It does not satisfy the review rule in [CONTEXT.md](CONTEXT.md). An independent review is done by a different agent, session, or person who did not author the diff and who starts from the diff and the repository, not from the author's summary.
 - The author's description is input to the scope comparison. It is never a substitute for reading the diff.
 - A review is evidence, not approval. "No blocking findings" means exactly that. It does not merge anything, and it does not grant the explicit approvals that [CONTEXT.md](CONTEXT.md) requires for migrations, model edits, package installs, lockfile changes, or infrastructure. Those come from the user and are cited in the change.
-- CI runs and review-bot comments, when used outside this repository, are evidence to read, not verdicts. A green run shows that what ran passed, not that the right checks ran. A bot finding is a lead to verify, and a bot "approval" is nothing.
+- CI runs, including those of `.github/workflows/ci.yml`, and review-bot comments are evidence to read, not verdicts. A green run shows that what ran passed, not that the right checks ran. A bot finding is a lead to verify, and a bot "approval" is nothing.
 - Findings come first in the report. A review that lists style remarks on a change with a defect has failed.
 
 ## Procedure
@@ -139,6 +139,7 @@ Confirm that the checks matching the change-scope were actually run, by the revi
 - An inspection with no command (links and paths, naming, absence of secrets or generated artifacts, Planned versus implemented wording, from [TESTING.md](TESTING.md) "Change-scope checks") is recorded as the inspection performed, what it covered, and its result.
 - Each check is reported as run (with its output), not applicable (with why the change cannot affect it), or not run (with the environment reason). Findings that depend on a check that did not run are suspected at most.
 - The author's statement that tests were run is a claim. Pasted output counts as evidence only when it includes the command and the summary and is consistent with the diff.
+- A CI run counts as a run check only for the commit it ran on and the commands its job ran ([TESTING.md](TESTING.md) "Continuous integration"). Cite the run, the commit SHA, the job, and the summary line from its log. A run on an earlier commit of the change, or a check the workflow does not run, still has to be run or reported as not run.
 - Environment-limited failures are reported as failures to verify, never as success.
 
 ### 9. Security review triggers
@@ -155,6 +156,7 @@ A change that touches any of the following also goes through [SECURITY-REVIEW.md
 - External content handling: web pages, uploaded files, retrieved text, or tool output that reaches a model or a user.
 - Logging and audit: what is written to logs, Task records, or tool run summaries.
 - i18n locale input handling: cookies, `Accept-Language`, preference values, `<html lang>` ([I18N.md](I18N.md)).
+- CI workflows: any file under `.github/workflows/`, including its trigger events, `permissions`, secrets, `runs-on` labels, and action references.
 
 The code review report states which triggers matched and whether the security review was done or is pending. Security findings use the finding format below plus the `SEC-*` IDs they map to, as [SECURITY-REVIEW.md](SECURITY-REVIEW.md) specifies.
 

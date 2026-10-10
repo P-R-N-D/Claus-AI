@@ -1,0 +1,139 @@
+name: CI
+
+# Runs the baseline checks from docs/TESTING.md on the checked lane only:
+# CPython 3.12.15 and Node 24.21.0 on GitHub-hosted Linux x86-64 runners.
+# Other platform lanes are not part of this workflow; see
+# docs/DEPENDENCY-STRATEGY.md "Platform and accelerator lanes".
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Superseded pull request runs are cancelled; every push to main keeps its own result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  backend:
+    name: Backend / CPython 3.12.15 / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Install the hashed backend lock
+        run: |
+          uv venv --managed-python --python 3.12.15
+          uv pip sync --python .venv/bin/python --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64.txt
+          uv pip check --python .venv/bin/python
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Record the interpreter
+        run: |
+          python -VV
+          python -c 'import sqlite3, sys; print(sys.executable); print("SQLite", sqlite3.sqlite_version)'
+          test "$(python -c 'import platform; print(platform.python_version())')" = 3.12.15
+      - name: Django check, tests, and migration drift
+        working-directory: backend
+        run: |
+          python manage.py check
+          python manage.py test core agent 2>&1 | tee "$RUNNER_TEMP/django-tests.log"
+          # Django exits 0 when no test is collected; require a nonzero count.
+          grep -Eq '^Ran [1-9][0-9]* tests? in ' "$RUNNER_TEMP/django-tests.log" || { echo '::error::Django ran no tests'; exit 1; }
+          python manage.py makemigrations --check --dry-run
+
+  frontend:
+    name: Frontend / Node 24 / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install npm 11.21.0 and the locked dependencies
+        run: |
+          npm install --global npm@11.21.0
+          node --version
+          test "$(npm --version)" = 11.21.0
+          npm ci
+      - name: Lint, type-check, and build
+        run: |
+          npm run lint
+          npx next typegen
+          npx tsc --noEmit
+          npm run build
+
+  e2e:
+    # Both server modes run: only next dev can serve /_next/mcp, so only the
+    # dev run checks that experimental.mcpServer stays disabled.
+    name: E2E / Playwright Chromium / ${{ matrix.server }} Next
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [production, dev]
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Install the hashed backend lock for the Playwright web server
+        working-directory: .
+        run: |
+          uv venv --managed-python --python 3.12.15
+          uv pip sync --python .venv/bin/python --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64.txt
+          uv pip check --python .venv/bin/python
+          # playwright.config.ts starts the backend with `python`.
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install npm 11.21.0, the locked dependencies, and the paired Chromium
+        run: |
+          npm install --global npm@11.21.0
+          test "$(npm --version)" = 11.21.0
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run Playwright against a fresh ${{ matrix.server }} server
+        env:
+          CI: '1'
+          PLAYWRIGHT_NEXT_SERVER: ${{ matrix.server }}
+        run: npm run test:visual
+      - name: Upload screenshots and test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-${{ matrix.server }}-attempt-${{ github.run_attempt }}
+          path: frontend/test-results/
+          if-no-files-found: warn
+          retention-days: 7

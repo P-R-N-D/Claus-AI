@@ -78,6 +78,23 @@ On Linux arm64, Playwright supports Chromium on Ubuntu 22.04, 24.04, and 26.04 a
 
 The default browser is the binary paired with `@playwright/test`. If its download is unavailable, `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/absolute/path/to/chromium` explicitly selects a separately installed browser. Record its version and the failed download; that run is supplemental UI evidence, not qualification of Playwright's paired browser. Environment-limited failures must never be reported as passing. The dated results and remaining checks are in [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md#applied-baseline-and-verification).
 
+## Continuous integration
+
+Added 2026-10-10. `.github/workflows/ci.yml` runs the backend and frontend commands of "Current scaffold checks", plus `npx next typegen` and `npx tsc --noEmit`, on every pull request to `main`, every push to `main`, and on manual dispatch. It covers the checked lane only: GitHub-hosted `ubuntu-24.04` x86-64 runners, uv 0.12.24 with CPython 3.12.15 and the hash lock, and Node 24.21.0 (from `.nvmrc`) with npm 11.21.0. It changes no test, lock, or package manifest. A workflow file is not evidence that anything ran or passed: cite the run, its commit SHA, the job, and the summary line from its log, as for any other check. A `pull_request` run tests the merge of the pull request's head into its base as they were when the run started (`refs/pull/<number>/merge`), not the head commit alone: record both the head SHA and the merge commit SHA that the checkout step logs, and treat the run as stale once the head or the base moves.
+
+| Job (check name) | What it runs |
+|---|---|
+| `Backend / CPython 3.12.15 / Linux x64` | `uv venv --managed-python --python 3.12.15`, `uv pip sync --require-hashes --only-binary :all:` of the lock, and `uv pip check`; records `python -VV`, `sys.executable`, and the SQLite version and fails on any other Python version; then, in `backend/`, `python manage.py check`, `python manage.py test core agent`, and `python manage.py makemigrations --check --dry-run`. The test step also fails when no test ran, because Django exits 0 in that case. |
+| `Frontend / Node 24 / Linux x64` | `npm ci`, `npm run lint`, `npx next typegen`, `npx tsc --noEmit`, and `npm run build`. |
+| `E2E / Playwright Chromium / production Next` | The same uv and hash-lock install as the backend job, without its interpreter record and version check; `npm ci`, `npx playwright install --with-deps chromium` (the paired browser and its system packages), then `CI=1 PLAYWRIGHT_NEXT_SERVER=production npm run test:visual`. |
+| `E2E / Playwright Chromium / dev Next` | The same with `PLAYWRIGHT_NEXT_SERVER=dev`. Only `next dev` can serve `/_next/mcp`, so this run, not the production one, is the check that `experimental.mcpServer: false` still holds. |
+
+- Both E2E jobs upload `frontend/test-results/`, which holds the saved screenshots, as a run artifact kept for 7 days, whether the tests passed or failed. Inspecting the screenshots stays a reviewer's step, as above.
+- No job depends on another, so a failure in one never turns another into a skipped check. When the four jobs first pass on `main`, all four check names can be made required status checks. That is a GitHub repository setting, not a file in this repository, and changing it needs admin access to the repository.
+- A newer run for the same pull request cancels the older one. Every push to `main` and every manual dispatch runs in its own concurrency group, so none of those runs is cancelled or dropped from the queue.
+- Not covered by CI: other operating systems, CPU architectures, and accelerators; Python 3.15 and 3.15t; the manual route checks against `runserver` and Uvicorn above; the Python Playwright browser install; accessibility and pixel-diff checks; secret scanning; and dependency alerts.
+- A green run shows that these commands passed on that commit and runner. It is not a review and not an approval ([CODE-REVIEW.md](CODE-REVIEW.md) "Independence and authority"). A change to any workflow file goes through the security review ([CODE-REVIEW.md](CODE-REVIEW.md) step 9).
+
 ## Topic/Thread and context testing
 
 When collaboration features are implemented, verify:

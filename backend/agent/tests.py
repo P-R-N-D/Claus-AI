@@ -71,5 +71,6 @@ class AsgiRoutingTests(SimpleTestCase):
             self.assertEqual(status, 404, path)
             self.assertNotIn(b"location", headers, path)
 
-        docs_status, _, _ = await asgi_get("/agent/docs")
-        self.assertEqual(docs_status, 200)
+        for path in ("/agent/docs", "/agent/redoc", "/agent/openapi.json", "/agent/docs/oauth2-redirect"):
+            status, _, _ = await asgi_get(path)
+            self.assertEqual(status, 200, path)

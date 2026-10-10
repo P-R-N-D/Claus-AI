@@ -85,9 +85,10 @@ export function HealthCard() {
       <button
         type="button"
         onClick={retryHealth}
-        disabled={checking}
+        // aria-disabled (not disabled) keeps keyboard focus on the button while a check runs; retryHealth ignores presses.
+        aria-disabled={checking}
         aria-busy={checking}
-        className="mt-5 cursor-pointer rounded-full bg-slate-950 px-5 py-2 text-sm font-semibold text-white shadow-lg transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:translate-y-0 disabled:cursor-not-allowed disabled:bg-slate-950 disabled:opacity-60 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200 dark:disabled:bg-white"
+        className="mt-5 cursor-pointer rounded-full bg-slate-950 px-5 py-2 text-sm font-semibold text-white shadow-lg transition hover:-translate-y-0.5 hover:bg-slate-800 aria-disabled:translate-y-0 aria-disabled:cursor-not-allowed aria-disabled:bg-slate-950 aria-disabled:opacity-60 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200 dark:aria-disabled:bg-white"
       >
         Retry backend check
       </button>

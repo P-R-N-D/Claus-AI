@@ -35,10 +35,12 @@ test("user and console surfaces render with both backend services", async ({ pag
 
   // Canary: Next's own repeated-slash 308 answers "//..." before the Proxy runs; the encoded form reaches the Proxy.
   const origin = new URL(test.info().project.use.baseURL ?? "http://127.0.0.1:3000").origin;
-  for (const path of ["//evil.example/", "/%2F%2Fevil.example/"]) {
+  for (const [path, target] of [["//evil.example/", "/evil.example/"], ["/%2F%2Fevil.example/", "/%2F%2Fevil.example"]]) {
     const response = await page.request.get(`${origin}${path}`, { maxRedirects: 0 });
     expect(response.status(), `${path} must redirect`).toBe(308);
-    expect(new URL(response.headers()["location"], response.url()).origin, `${path} must stay same-origin`).toBe(origin);
+    const location = response.headers()["location"];
+    expect(location, `${path} must send a Location`).toBeDefined();
+    expect(new URL(location, response.url()).href, `${path} must stay same-origin`).toBe(`${origin}${target}`);
   }
 
   const docsResponse = await page.request.get("/agent/docs", { maxRedirects: 0 });
@@ -90,16 +92,20 @@ test("user and console surfaces render with both backend services", async ({ pag
     page.waitForResponse((response) => response.url().endsWith("/core/health/") && response.status() === 200),
     page.waitForResponse((response) => response.url().endsWith("/agent/health/") && response.status() === 200),
   ]);
-  await retry.click();
+  await retry.focus();
+  await page.keyboard.press("Enter");
   await expect(retry).toBeDisabled();
   await expect(retry).toHaveAttribute("aria-busy", "true");
-  await page.screenshot({ path: testInfo.outputPath("home-retrying.png"), fullPage: true });
+  await expect(retry).toBeFocused();
+  // Viewport-only screenshot keeps the hold short (axios times out after 5 s).
+  await page.screenshot({ path: testInfo.outputPath("home-retrying.png") });
   releaseCore();
   await retried;
   await page.unroute("**/core/health/");
   await expect(page.getByRole("article", { name: "Core health" }).getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("article", { name: "Agent health" }).getByText("Connected", { exact: true })).toBeVisible();
   await expect(retry).toBeEnabled();
+  await expect(retry).toBeFocused();
 
   await page.goto(`/console/${query}`);
   await expect(page).toHaveURL(new URL(`/console${query}`, page.url()).href);

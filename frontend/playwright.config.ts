@@ -4,7 +4,7 @@ const nextServerMode = process.env.PLAYWRIGHT_NEXT_SERVER || "dev";
 if (nextServerMode !== "dev" && nextServerMode !== "production") {
   throw new Error(`PLAYWRIGHT_NEXT_SERVER must be "dev" or "production", got "${nextServerMode}"`);
 }
-// Production mode always rebuilds and never reuses a running server, so results describe this checkout.
+// Production mode always rebuilds and never reuses running servers, so results describe this checkout.
 const production = nextServerMode === "production";
 
 export default defineConfig({
@@ -34,7 +34,7 @@ export default defineConfig({
     {
       command: "python ../backend/manage.py runserver 127.0.0.1:8000 --noreload",
       url: "http://127.0.0.1:8000/core/health/",
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: !process.env.CI && !production,
       timeout: 60_000,
     },
     {

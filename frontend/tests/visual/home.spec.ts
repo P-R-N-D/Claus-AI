@@ -33,7 +33,7 @@ test("user and console surfaces render with both backend services", async ({ pag
     expect(new URL(location, response.url()).href).toBe(new URL(`${path}${query}`, response.url()).href);
   }
 
-  // Next's own repeated-slash normalization runs before the Proxy; this canary keeps the result same-origin.
+  // Canary: Next's own repeated-slash 308 answers "//..." before the Proxy runs; the encoded form reaches the Proxy.
   const origin = new URL(test.info().project.use.baseURL ?? "http://127.0.0.1:3000").origin;
   for (const path of ["//evil.example/", "/%2F%2Fevil.example/"]) {
     const response = await page.request.get(`${origin}${path}`, { maxRedirects: 0 });

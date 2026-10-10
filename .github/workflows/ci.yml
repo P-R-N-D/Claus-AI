@@ -16,9 +16,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # Superseded pull request runs are cancelled; every push to main keeps its own result.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A newer run for the same pull request cancels the older one. Every other
+  # run (a push to main, a manual dispatch) gets its own group, so none is
+  # cancelled or dropped from the queue.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -63,6 +65,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
+        shell: bash
         working-directory: frontend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,6 +100,7 @@ jobs:
         server: [production, dev]
     defaults:
       run:
+        shell: bash
         working-directory: frontend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

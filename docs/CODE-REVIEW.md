@@ -139,7 +139,7 @@ Confirm that the checks matching the change-scope were actually run, by the revi
 - An inspection with no command (links and paths, naming, absence of secrets or generated artifacts, Planned versus implemented wording, from [TESTING.md](TESTING.md) "Change-scope checks") is recorded as the inspection performed, what it covered, and its result.
 - Each check is reported as run (with its output), not applicable (with why the change cannot affect it), or not run (with the environment reason). Findings that depend on a check that did not run are suspected at most.
 - The author's statement that tests were run is a claim. Pasted output counts as evidence only when it includes the command and the summary and is consistent with the diff.
-- A CI run counts as a run check only for the commit it ran on and the commands its job ran ([TESTING.md](TESTING.md) "Continuous integration"). Cite the run, the commit SHA, the job, and the summary line from its log. A run on an earlier commit of the change, or a check the workflow does not run, still has to be run or reported as not run.
+- A CI run counts as a run check only for the commit it ran on and the commands its job ran ([TESTING.md](TESTING.md) "Continuous integration"). Cite the run, the commit SHA (for a pull request run, both the head SHA and the merge commit it tested; see [TESTING.md](TESTING.md) "Continuous integration"), the job, and the summary line from its log. A run on an earlier commit of the change, or a check the workflow does not run, still has to be run or reported as not run.
 - Environment-limited failures are reported as failures to verify, never as success.
 
 ### 9. Security review triggers

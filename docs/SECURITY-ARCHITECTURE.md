@@ -151,10 +151,10 @@ Added 2026-10-10. The workflow runs the baseline checks listed in [TESTING.md](T
 
 - Triggers: `push` and `pull_request` for `main`, and `workflow_dispatch` (lines 8-13). There is no `pull_request_target` or `workflow_run` trigger, so pull request code, including a fork's, runs with the token GitHub gives that pull request, which for a fork is read-only and comes without the repository's secrets.
 - The workflow token is limited to `contents: read` (lines 15-16). No job references a secret.
-- Every `actions/checkout` step sets `persist-credentials: false`, so the token is not left in the runner's Git configuration for later steps (lines 33-35, 68-70, 102-104).
-- Every action is pinned to a full commit SHA, with its version as a comment (lines 33, 36, 68, 71, 102, 105, 117, 134).
-- Every job runs on a GitHub-hosted `ubuntu-24.04` runner (lines 30, 62, 92); no self-hosted runner is referenced. A job installs tools from the network at run time: uv and CPython through `astral-sh/setup-uv`, the hash-locked Python packages, Node through `actions/setup-node`, npm 11.21.0 by version without a hash, the npm lock's packages, and Chromium with its system packages.
-- The E2E jobs upload `frontend/test-results/` as a run artifact kept for 7 days (lines 134-139). Logs and artifacts of runs in this public repository can be read by people outside the project, so a workflow step must not print secrets or personal data.
+- Every `actions/checkout` step sets `persist-credentials: false`, so the token is not left in the runner's Git configuration for later steps (lines 35-37, 71-73, 106-108).
+- Every action is pinned to a full commit SHA, with its version as a comment (lines 35, 38, 71, 74, 106, 109, 121, 138).
+- Every job runs on a GitHub-hosted `ubuntu-24.04` runner (lines 32, 64, 95); no self-hosted runner is referenced. A job installs tools from the network at run time: uv through `astral-sh/setup-uv`, which checks it against the action's known SHA-256, CPython through `uv venv --managed-python`, the hash-locked Python packages, Node through `actions/setup-node`, npm 11.21.0 by version without a hash, the npm lock's packages, and Chromium with its system packages.
+- The E2E jobs upload `frontend/test-results/` as a run artifact kept for 7 days (lines 138-143). Logs and artifacts of runs in this public repository can be read by people outside the project, so a workflow step must not print secrets or personal data.
 
 ## Requirements
 

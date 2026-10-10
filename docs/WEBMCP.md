@@ -7,7 +7,7 @@ The general adapter model (Human UI, WebMCP, Automation, Browser Computer Use) i
 ## Status
 
 - Subject status: Experimental and Planned. WebMCP is an external technology whose specification and browser support are still changing. Every Claus rule below is a design contract, not current behavior.
-- Implemented: nothing. At HEAD 8ec5623 (2026-10-08), and again at branch head 14b9109 (2026-10-10), there is no WebMCP code, no registered tool, no `Permissions-Policy` header, and no WebMCP test. See "Current repository status".
+- Implemented: nothing. At HEAD 8ec5623 (2026-10-08), and again at 14b9109 (2026-10-10; unchanged through 3fe4d1a), there is no WebMCP code, no registered tool, no `Permissions-Policy` header, and no WebMCP test. See "Current repository status".
 - Adoption: not decided. This document exists so a future proposal can be reviewed against a stable contract instead of against memory of the spec.
 - External facts were verified on 2026-10-08 against the sources below. Re-verify before any implementation work.
 
@@ -374,7 +374,7 @@ async function execute(input, { signal }) {
 
 ## Current repository status
 
-Facts, branch head 14b9109 (branch `codex/dependency-updates-abi3t`), 2026-10-10; first recorded at HEAD 8ec5623 on 2026-10-08:
+Facts at 14b9109 on branch `codex/dependency-updates-abi3t`, 2026-10-10, unchanged through 3fe4d1a; first recorded at HEAD 8ec5623 on 2026-10-08:
 
 - `grep -rni 'modelContext\|webmcp' frontend/src` returns nothing. No tool is registered anywhere.
 - No `Permissions-Policy` header is configured. `frontend/next.config.ts` sets `skipTrailingSlashRedirect: true`, rewrites `/core/:path(.*)` and `/agent/:path(.*)` to the backend, and sets `agentRules: false` and `experimental.mcpServer: false`. `frontend/src/proxy.ts` only issues the UI's trailing-slash 308 redirects; it sets no header other than their `Location` and registers no tool. There is no `middleware.ts` or route handler.

@@ -7,7 +7,8 @@ export function proxy(request: NextRequest) {
   if (pathname !== "/" && pathname.endsWith("/") && !isBackendPath) {
     // A native URL avoids NextURL reapplying the incoming trailing-slash flag.
     const url = new URL(request.url);
-    url.pathname = pathname.slice(0, -1);
+    // Collapse leading slashes so the Location can never become scheme-relative (//host).
+    url.pathname = pathname.slice(0, -1).replace(/^\/{2,}/, "/");
     return NextResponse.redirect(url, 308);
   }
 
@@ -15,5 +16,6 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: "/((?!_next(?:/|$)).*)",
+  // Backend prefixes go straight to the rewrites; the isBackendPath check above stays as a guard.
+  matcher: "/((?!_next(?:/|$)|core/|agent/).*)",
 };

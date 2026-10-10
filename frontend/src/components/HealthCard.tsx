@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Swal from "sweetalert2";
 import { agentApi, coreApi, type HealthResponse } from "@/lib/api";
 
@@ -12,12 +12,17 @@ const initialHealth: ServiceHealth = { state: "loading", health: null };
 export function HealthCard() {
   const [core, setCore] = useState<ServiceHealth>(initialHealth);
   const [agent, setAgent] = useState<ServiceHealth>(initialHealth);
+  const latestCheck = useRef(0);
 
-  const loadHealth = useCallback((showAlert: boolean) =>
-    Promise.allSettled([
+  const loadHealth = useCallback((showAlert: boolean) => {
+    latestCheck.current += 1;
+    const check = latestCheck.current;
+    return Promise.allSettled([
       coreApi.get<HealthResponse>("health/"),
       agentApi.get<HealthResponse>("health/"),
     ]).then(async ([coreResult, agentResult]) => {
+      // A newer check, or unmounting, supersedes this one; never let an older result overwrite it.
+      if (check !== latestCheck.current) return;
       setCore(coreResult.status === "fulfilled" ? { state: "ok", health: coreResult.value.data } : { state: "error", health: null });
       setAgent(agentResult.status === "fulfilled" ? { state: "ok", health: agentResult.value.data } : { state: "error", health: null });
 
@@ -33,13 +38,20 @@ export function HealthCard() {
           confirmButtonText: "OK",
         });
       }
-    }), []);
+    });
+  }, []);
 
   useEffect(() => {
     void loadHealth(false);
+    return () => {
+      latestCheck.current += 1;
+    };
   }, [loadHealth]);
 
+  const checking = core.state === "loading" || agent.state === "loading";
   const retryHealth = () => {
+    if (checking) return;
+    // Loading state changes only here, in the event handler, never inside loadHealth.
     setCore((current) => ({ ...current, state: "loading" }));
     setAgent((current) => ({ ...current, state: "loading" }));
     void loadHealth(true);
@@ -73,7 +85,9 @@ export function HealthCard() {
       <button
         type="button"
         onClick={retryHealth}
-        className="mt-5 cursor-pointer rounded-full bg-slate-950 px-5 py-2 text-sm font-semibold text-white shadow-lg transition hover:-translate-y-0.5 hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200"
+        disabled={checking}
+        aria-busy={checking}
+        className="mt-5 cursor-pointer rounded-full bg-slate-950 px-5 py-2 text-sm font-semibold text-white shadow-lg transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:translate-y-0 disabled:cursor-not-allowed disabled:bg-slate-950 disabled:opacity-60 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-200 dark:disabled:bg-white"
       >
         Retry backend check
       </button>

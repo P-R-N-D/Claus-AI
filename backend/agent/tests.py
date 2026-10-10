@@ -64,3 +64,12 @@ class AsgiRoutingTests(SimpleTestCase):
         )
         self.assertEqual(openapi_status, 200)
         self.assertEqual(legacy_status, 404)
+
+    async def test_agent_slash_mismatch_is_404_without_redirect(self):
+        for path in ("/agent/health", "/agent/docs/", "/agent/redoc/", "/agent/openapi.json/"):
+            status, headers, _ = await asgi_get(path)
+            self.assertEqual(status, 404, path)
+            self.assertNotIn(b"location", headers, path)
+
+        docs_status, _, _ = await asgi_get("/agent/docs")
+        self.assertEqual(docs_status, 200)

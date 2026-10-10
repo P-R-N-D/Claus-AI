@@ -9,7 +9,9 @@ the repository root:
     python -I scripts/ci/tests/test_check_test_lock.py --verbose
 """
 
+import contextlib
 import importlib.util
+import io
 import pathlib
 import re
 import shutil
@@ -57,21 +59,22 @@ def line(name, package):
 
 
 class CheckTestLockTests(unittest.TestCase):
-    def run_check(self, *edits):
+    def run_check(self, *edits, subdirectory="."):
         """Copy the four files, apply each (file, old, new) edit, and run the check on the copies.
 
-        An edit replaces the only occurrence of `old`, or appends `new` when `old` is None, and must
-        change the file, so a test whose edit no longer applies fails instead of checking the files as
-        committed.
+        An edit replaces the only occurrence of `old`, or appends `new` when `old` is None (creating the
+        file if needed), and must change the file, so a test whose edit no longer applies fails instead of
+        checking the files as committed. The copies and the check's working directory are `subdirectory`
+        of a temporary directory.
         """
         with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
+            root = pathlib.Path(directory) / subdirectory
             for name in FILES:
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(ROOT / name, root / name)
             for name, old, new in edits:
                 path = root / name
-                text = path.read_text(encoding="utf-8")
+                text = path.read_text(encoding="utf-8") if path.exists() else ""
                 if old is None:
                     text += new
                 else:
@@ -84,8 +87,8 @@ class CheckTestLockTests(unittest.TestCase):
             )
         return result.returncode, result.stdout + result.stderr
 
-    def assertFails(self, message, *edits):
-        code, output = self.run_check(*edits)
+    def assertFails(self, message, *edits, subdirectory="."):
+        code, output = self.run_check(*edits, subdirectory=subdirectory)
         self.assertEqual(code, 1, output)
         self.assertIn(message, output)
         self.assertNotIn(PASSED, output)
@@ -195,6 +198,10 @@ class CheckTestLockTests(unittest.TestCase):
                 "--python-platform x86_64-manylinux_2_31",
                 "--python-platform x86_64-manylinux_2_31 --python-platform=aarch64-manylinux_2_31",
             ),
+        )
+        self.assertFails(
+            "no 'uv pip compile' command in the header",
+            (BASE_LOCK, "#    uv pip compile backend/requirements.txt", "#    pip-compile backend/requirements.txt"),
         )
 
     def test_lock_header_with_equals_form_passes(self):
@@ -386,7 +393,7 @@ class CheckTestLockTests(unittest.TestCase):
             (BASE_INPUT, django, django.replace("<6.2", "<6.99999999999999999999")),
         ):
             with self.subTest(line=new.strip()):
-                self.assertFails("uv cannot read numbers this long", (name, old, new))
+                self.assertFails("no number may have 19 or more digits", (name, old, new))
 
     def test_byte_order_mark_passes(self):
         text = read(BASE_INPUT)
@@ -413,6 +420,26 @@ class CheckTestLockTests(unittest.TestCase):
         ):
             with self.subTest(lock=name, entry=new.strip()):
                 self.assertFails(message, (name, block, block.replace(old, new)))
+
+    def test_uv_configuration_file_fails(self):
+        # uv reads these when the README's commands run from the repository root, and each setting below
+        # changes what they resolve while the inputs and locks stay as committed.
+        for name, text in (
+            ("uv.toml", "override-dependencies = [\"boto3 ; sys_platform == 'win32'\"]\n"),
+            ("pyproject.toml", '[project]\nname = "claus"\nversion = "0"\n\n[tool.uv.pip]\nno-deps = true\n'),
+            ("pyproject.toml", "[tool.uv\n"),
+        ):
+            with self.subTest(file=name, text=text):
+                self.assertFails("this check accepts no uv configuration file", (name, None, text))
+        # uv also reads one in a parent directory.
+        self.assertFails(
+            "this check accepts no uv configuration file",
+            ("../uv.toml", None, "[pip]\nno-deps = true\n"),
+            subdirectory="repo",
+        )
+
+    def test_pyproject_without_uv_settings_passes(self):
+        self.assertPasses(("pyproject.toml", None, '[project]\nname = "claus"\nversion = "0"\n'))
 
     # The environment whose metadata the check reads.
 
@@ -590,6 +617,21 @@ class InProcessTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 metadata = Requirement(f"six; {marker}").marker
                 self.assertIsNotNone(check_test_lock.unsupported_marker(metadata, metadata=True))
+
+    def test_unreadable_inputs_fail_with_a_message(self):
+        deep = "six ; " + "(" * 2000 + 'os_name == "posix"' + ")" * 2000 + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "requirements.txt"
+            for content, message in (
+                ("six  # caf\u00e9\n".encode("latin-1"), "not UTF-8 text"),
+                (deep.encode(), "unsupported requirement line: six ; ((("),
+            ):
+                path.write_bytes(content)
+                with self.subTest(message=message), contextlib.redirect_stdout(io.StringIO()) as output:
+                    with self.assertRaises(SystemExit) as raised:
+                        check_test_lock.read_input(str(path))
+                    self.assertEqual(raised.exception.code, 1)
+                    self.assertIn(message, output.getvalue())
 
 
 if __name__ == "__main__":

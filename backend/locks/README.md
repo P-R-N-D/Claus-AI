@@ -17,7 +17,7 @@ uv pip check
 Regenerate after reviewing the direct input and upstream advisories, and apply the release-freshness rule in [DEPENDENCY-STRATEGY.md](../../docs/DEPENDENCY-STRATEGY.md#security-floors-and-release-freshness): a release younger than 7 days at selection time gets a recorded freshness and provenance review unless the project has adopted a cooldown, and no security floor is lowered to satisfy one.
 
 ```bash
-uv pip compile backend/requirements.txt \
+uv pip compile backend/requirements.txt --no-config \
   --python-version 3.12.15 \
   --python-platform x86_64-manylinux_2_31 \
   --generate-hashes --only-binary :all: \
@@ -25,7 +25,7 @@ uv pip compile backend/requirements.txt \
   --index-url https://pypi.org/simple --no-emit-index-url
 ```
 
-Add `--upgrade` when intentionally refreshing already-pinned transitive versions. Review the resulting graph and hashes, install in a fresh environment, and repeat [the checks](../../docs/TESTING.md). Never regenerate just to bypass a hash mismatch.
+`--no-config` keeps uv from reading settings in a `uv.toml` or `pyproject.toml` file, including your own user configuration, so the lock follows from the input alone; it does not affect `UV_*` environment variables, so unset any that change resolution. Add `--upgrade` when intentionally refreshing already-pinned transitive versions. Review the resulting graph and hashes, install in a fresh environment, and repeat [the checks](../../docs/TESTING.md). Never regenerate just to bypass a hash mismatch.
 
 The lock contains hashes for multiple artifacts of each pinned version. The separate `cp312-linux-x86_64.artifacts.json` records the actual 50 wheel filenames, tags, URLs and hashes selected by a verification installation with **pip 26.2.1** on CPython 3.12.15, Linux x86-64, **glibc 2.41**, plus observed OpenSSL/libpq/SQLite versions. Both uv and pip installations passed the 20 backend tests that existed at the time (the suite now has 23; see [TESTING.md](../../docs/TESTING.md)). The resolver's glibc 2.31 target is not proof that the selected glibc 2.41-host artifacts run on 2.31; qualify the actual deployment platform independently. On glibc 2.28 through 2.33, which includes that 2.31 target, wheel-tag priority makes the installer select cryptography's `manylinux_2_28` wheel (static tag-selection reasoning, not an executed install) instead of the `manylinux_2_34` wheel recorded in the manifest; its hash is also in the lock, but it is a different artifact from the one inventoried.
 
@@ -50,7 +50,7 @@ For another Python minor, free-threaded ABI, OS, CPU or libc, resolve from the i
 
 ```bash
 # In the environment created above
-uv pip compile backend/requirements.txt backend/requirements-test.txt \
+uv pip compile backend/requirements.txt backend/requirements-test.txt --no-config \
   -c backend/locks/cp312-linux-x86_64.txt \
   --python-version 3.12.15 \
   --python-platform x86_64-manylinux_2_31 \
@@ -61,4 +61,4 @@ uv pip sync --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_6
 python -I scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt backend/requirements.txt backend/requirements-test.txt
 ```
 
-Regenerate it whenever the backend lock changes, in the same change, and apply the same release-freshness rule. `scripts/ci/check_test_lock.py` (standard library plus `packaging`, which both locks pin) reads the installed packages' metadata, so the commands above install the new test lock before running it, with `python -I`. It fails when a backend lock package is missing from the test lock or has another version or hash set, when a package only in the test lock is pulled in by anything other than `requirements-test.txt` and its dependencies, or when, on CPython 3.12.15 for `x86_64-manylinux_2_31`, a requirement input and a lock compiled from it disagree: a requirement not pinned at a version it allows, a direct requirement added or dropped without regenerating, an extra or marker change that changes which packages are needed, a direct URL, path, archive file name or option line, or a backslash, character outside printable ASCII, run of 19 or more digits or marker form that packaging and uv may read differently. Any other change passes, such as a widened or removed range or a lowered minimum that still allows the pins, a marker that holds on the target, or an extra whose packages the lock already pins, so review range changes, security floors in particular, in the diff. CI runs it and its regression tests in `scripts/ci/tests/` in the pytest job; [docs/TESTING.md](../../docs/TESTING.md#current-scaffold-checks) lists every rule and what the check does not establish. No artifact manifest was recorded for the five test packages; they are pure-Python wheels.
+Regenerate it whenever the backend lock changes, in the same change, and apply the same release-freshness rule. `scripts/ci/check_test_lock.py` (standard library plus `packaging`, which both locks pin) reads the installed packages' metadata, so the commands above install the new test lock before running it, with `python -I`. It fails when a backend lock package is missing from the test lock or has another version or hash set, when a package only in the test lock is pulled in by anything other than `requirements-test.txt` and its dependencies, or when, on CPython 3.12.15 for `x86_64-manylinux_2_31`, a requirement input and a lock compiled from it disagree: a requirement not pinned at a version it allows, a direct requirement added or dropped without regenerating, an extra or marker change that changes which packages are needed, a direct URL, path, archive file name or option line, or a backslash, character outside printable ASCII, run of 19 or more digits or marker form that packaging and uv may read differently, or when the repository root or a parent directory holds a uv configuration file. Any other change passes, such as a widened or removed range or a lowered minimum that still allows the pins, a marker that holds on the target, or an extra whose packages the lock already pins, so review range changes, security floors in particular, in the diff. CI runs it and its regression tests in `scripts/ci/tests/` in the pytest job; [docs/TESTING.md](../../docs/TESTING.md#current-scaffold-checks) lists every rule and what the check does not establish. No artifact manifest was recorded for the five test packages; they are pure-Python wheels.

@@ -13,12 +13,12 @@ unless all of the following hold:
 3. Every package only in the test lock is pulled in, per uv's "# via"
    annotations, only by requirements-test.txt or by another test-only package.
 4. Each requirement input holds only named requirements, with optional extras,
-   version specifiers and markers, in printable ASCII without backslashes and
-   with no run of 19 or more digits: no direct URL, path, archive file name,
-   editable or option line. No dependency the walk in rule 6 reads from package
-   metadata has a backslash, and every marker, in an input or in that metadata,
-   uses only the forms listed at STRING_VARIABLES below, which packaging and uv
-   evaluate alike.
+   version specifiers and markers: no direct URL, path, archive file name,
+   editable or option line. Outside comments, it is printable ASCII without
+   backslashes and has no run of 19 or more digits. No dependency the walk in
+   rule 6 reads from package metadata has a backslash, and every marker, in an
+   input or in that metadata, uses only the forms listed at STRING_VARIABLES
+   below, which packaging and uv evaluate alike.
 5. For each lock and each of its inputs: every requirement whose marker holds on
    the target is pinned at a version its specifier allows and is recorded as a
    direct requirement of that input, and nothing else is recorded as one. A
@@ -30,23 +30,31 @@ unless all of the following hold:
    evaluated for the target, reaches exactly the packages that lock pins. Every
    requested extra must be one the package provides, and every dependency
    specifier must allow the pinned version.
+7. No uv configuration file that `uv pip compile` would read when run from the
+   repository root, where this check runs: a uv.toml, or a pyproject.toml with
+   a [tool.uv] table, in that directory or a parent. Such a file can change
+   what the README's commands resolve without changing the inputs.
 
 So an input change fails when, on the target, it adds or drops a direct
 requirement, changes which packages the requirements, extras and markers reach,
-or excludes a pinned version, and always when it breaks rule 4. Any other input
+or excludes a pinned version, and always when it breaks rule 4 or 7. Any other input
 change passes, such as a widened or removed version range, or a lowered
 minimum, that still allows the pin, a marker that holds on the target, or an
 extra whose packages the lock already pins; while the index offers the same
 files, regenerating then changes at most the locks' "# via" annotations. The
 check does not re-resolve: it does not check that the pins are the newest
-allowed versions, that the hashes belong to the files on the index (uv checks
-the files it downloads against them when it installs), or anything about
-another platform or Python version.
+allowed versions, that the hashes belong to the files PyPI serves for those
+versions (uv checks the files it downloads, from whatever index it uses,
+against the lock's hashes), or anything about another platform or Python
+version. Nor does it see uv's user or system configuration or UV_* environment
+variables; the README's commands pass --no-config.
 
 Usage, from the repository root, in the environment installed from the test
 lock (it reads that environment's package metadata and needs only the standard
 library and `packaging`, which both locks pin). `-I` keeps files in this
-directory or the current one from standing in for installed packages:
+directory or the current one from standing in for installed packages; it
+cannot help if code from the checkout has already run in that environment, so
+CI runs this right after the install:
     python -I scripts/ci/check_test_lock.py \
         backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt \
         backend/requirements.txt backend/requirements-test.txt
@@ -56,6 +64,7 @@ import importlib.metadata
 import os
 import re
 import sys
+import tomllib
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import InvalidVersion, Version
@@ -69,7 +78,7 @@ COMMAND = re.compile(r"^#\s+uv pip compile\s")
 # "#" starts a comment at the start of a line or after a space or tab, as in uv (pip also accepts other
 # whitespace, which uv rejects).
 COMMENT = re.compile(r"(^|[ \t]+)#.*$")
-# uv cannot read a number this long; packaging can.
+# uv cannot read a number of 2**64 - 1 or more, which packaging can; 19 digits leave a margin.
 LONG_NUMBER = re.compile(r"[0-9]{19}")
 EXTRA_NAME = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")
 # pip reads a requirement name ending in most of these as a local file, and uv 0.12.24 one ending in
@@ -258,7 +267,10 @@ def read_input(path):
                 "is supported, because packaging and uv read escapes and other characters differently)"
             )
         if LONG_NUMBER.search(text):
-            fail(f"{path}:{number}: unsupported requirement line: {text} (uv cannot read numbers this long)")
+            fail(
+                f"{path}:{number}: unsupported requirement line: {text} (no number may have 19 or more digits, "
+                "because uv cannot read numbers of 2**64 - 1 or more)"
+            )
         try:
             requirement = Requirement(text)
             reason = None if requirement.marker is None else unsupported_marker(requirement.marker)
@@ -418,6 +430,32 @@ def walk(roots, lock, lock_path):
     return set(extras), problems
 
 
+def uv_configuration():
+    """Return the uv configuration files `uv pip compile` would read when run from the current directory.
+
+    uv reads uv.toml, or the [tool.uv] table of pyproject.toml, from this directory and every parent.
+    """
+    found = []
+    directory = os.path.abspath(os.curdir)
+    while True:
+        if os.path.isfile(os.path.join(directory, "uv.toml")):
+            found.append(os.path.join(directory, "uv.toml"))
+        pyproject = os.path.join(directory, "pyproject.toml")
+        if os.path.isfile(pyproject):
+            try:
+                with open(pyproject, "rb") as handle:
+                    tool = tomllib.load(handle).get("tool")
+            except (OSError, ValueError) as error:  # ValueError covers TOMLDecodeError and UnicodeDecodeError.
+                found.append(f"{pyproject} (unreadable: {error})")
+            else:
+                if isinstance(tool, dict) and "uv" in tool:
+                    found.append(pyproject)
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return found
+        directory = parent
+
+
 def main(argv):
     if len(argv) != 5:
         sys.exit(__doc__)
@@ -429,6 +467,11 @@ def main(argv):
     problems = check_input(base_input, base_requirements, base, base_parents, base_path)
     problems += check_input(base_input, base_requirements, test, test_parents, test_path)
     problems += check_input(test_input, test_requirements, test, test_parents, test_path)
+    for path in uv_configuration():
+        problems.append(
+            f"{path} may hold uv settings that `uv pip compile` reads when run from this directory, so the locks "
+            "need not follow from the inputs alone; this check accepts no uv configuration file"
+        )
     for lock, lock_path, parents, inputs in (
         (base, base_path, base_parents, [base_input]),
         (test, test_path, test_parents, [base_input, test_input]),

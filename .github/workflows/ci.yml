@@ -148,6 +148,9 @@ jobs:
     name: Backend / pytest / CPython 3.12.15 / Linux x64
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      # uv ignores uv.toml and pyproject.toml files, which a pull request could add.
+      UV_NO_CONFIG: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -162,17 +165,19 @@ jobs:
           uv pip sync --python .venv/bin/python --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64-test.txt
           uv pip check --python .venv/bin/python
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
-      - name: Record the interpreter and pytest
-        run: |
-          python -VV
-          python -m pytest --version
-          test "$(python -c 'import platform; print(platform.python_version())')" = 3.12.15
+      # The lock check runs before any step that runs Python from the checkout, which could
+      # otherwise change the environment it reads.
       - name: Check the test lock against the backend lock and both inputs
         # -I keeps files in scripts/ci/ or the checkout root from standing in for installed packages.
         run: python -I scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt backend/requirements.txt backend/requirements-test.txt
       - name: Test the lock check against changed locks and inputs
         # Run directly, not through unittest discover, so scripts/ci/tests/ is not on the import path either.
         run: python -I scripts/ci/tests/test_check_test_lock.py --verbose
+      - name: Record the interpreter and pytest
+        run: |
+          python -VV
+          python -m pytest --version
+          test "$(python -c 'import platform; print(platform.python_version())')" = 3.12.15
       - name: Check that pytest and Django collect the same tests
         working-directory: backend
         run: python ../scripts/ci/check_test_parity.py

@@ -4,7 +4,7 @@ This document separates checks for the current runnable scaffold from future fea
 
 ## Tests that exist today
 
-The repository contains these automated tests. Their existence is a fact; whether they pass must be shown by running them and citing the output. The backend has 23 test methods (`python manage.py test core agent`). The frontend has 12 Playwright tests: one `home.spec.ts` scenario and two `proxy.spec.ts` tests, each run in four projects.
+The repository contains these automated tests. Their existence is a fact; whether they pass must be shown by running them and citing the output. The backend has 23 test methods, run by both `python manage.py test core agent` and pytest (with pytest-django), which collect the same 23 test IDs. The frontend has 12 Playwright tests (one `home.spec.ts` scenario and two `proxy.spec.ts` tests, each run in four projects) and 13 Vitest unit tests in two files.
 
 | Location | What it covers |
 |---|---|
@@ -14,6 +14,8 @@ The repository contains these automated tests. Their existence is a fact; whethe
 | `backend/agent/tests.py` | ASGI routing through `config.asgi.application`: `/core/health/`, `/agent/health/`, `/agent/openapi.json` are 200; `/api/health/` is 404. `test_agent_slash_mismatch_is_404_without_redirect`: `/agent/health`, `/agent/docs/`, `/agent/redoc/`, and `/agent/openapi.json/` return 404 with no `Location` header, while `/agent/docs`, `/agent/redoc`, `/agent/openapi.json`, and `/agent/docs/oauth2-redirect` return 200. |
 | `frontend/tests/visual/home.spec.ts` | One scenario in four Chromium projects (desktop/mobile × light/dark), through the Next.js server: `/core/health/`, `/agent/health/`, and `/agent/openapi.json` return 200 without redirects; `/console/`, `/core-ui/`, and `/agent-ui/` return a 308 to the slashless path with the query preserved; `//evil.example/` (Next's own repeated-slash 308, before the Proxy) and `/%2F%2Fevil.example/` (the Proxy's trailing-slash 308) return a 308 with a `Location` that resolves exactly to `/evil.example/` and `/%2F%2Fevil.example` on the frontend origin, kept as a canary; `/agent/docs` returns 200, while `/agent/docs/` and `/agent/health` return 404 with no `Location`; `/core/health` returns Django's 301 to `/core/health/` on the same origin with the query preserved; `POST /_next/mcp` returns 404. `/` and `/console` render, including navigation through `/console/`; both health cards show their expected JSON; during a retry activated with the keyboard while the Core request is held, Retry is `aria-disabled` with `aria-busy="true"` and keeps focus, and afterwards both cards show Connected and Retry is enabled and still focused; a pointer click on Retry then completes another check. Horizontal overflow is measured as `documentElement.scrollWidth - documentElement.clientWidth`, and a self-check injects a double-width element to prove the measurement can fail in each project. No console/page errors, failed requests, or HTTP errors. Saves `home.png`, `home-retrying.png`, and `console.png`. |
 | `frontend/tests/visual/proxy.spec.ts` | Two browserless tests, run in each of the four projects. Direct `proxy(new NextRequest(...))` calls: `//evil.example/`, `///evil.example/x/`, and `/console/?view=tasks&filter=a%2Fb` return a 308 to the request's own origin with a non-scheme-relative path and the query preserved; `/`, `/console`, and `/core/health/` are not redirected. Matcher checks through Next's version-pinned `unstable_doesMiddlewareMatch` helper (recheck when Next is upgraded): `/core/health/`, `/agent/docs/`, and `/_next/static/chunk.js` bypass the Proxy; `/core-ui/`, `/agent-ui/`, `/console/`, and `/` reach it. |
+| `frontend/tests/unit/api.test.ts` | Vitest, 5 tests. `coreApi` and `agentApi` target the same-origin `/core/` and `/agent/` prefixes with a 5000 ms timeout and are separate instances; a health request through each client, answered by a local adapter without network, goes to `/core/health/` or `/agent/health/` with the trailing slash kept. |
+| `frontend/tests/unit/HealthCard.test.tsx` | Vitest with React Testing Library in jsdom, 8 tests; `@/lib/api` and `sweetalert2` are mocked, so no request leaves the test. The card checks both endpoints on mount and shows each response; a failed service shows Disconnected without an alert on the initial check; a failed retry raises one SweetAlert2 alert naming each failed service (plural and singular wording), and a successful retry raises none; Retry is ignored while a check is in flight; a retry that fails after unmount raises no alert; and under React `StrictMode` a superseded check that settles later cannot overwrite the newest result. |
 
 No test covers authentication, authorization, scope separation, approval, Tasks, retrieval, Browser sessions, realtime, i18n, or WebMCP, because none of those features exist.
 
@@ -33,6 +35,20 @@ cd backend
 python manage.py test core agent
 python manage.py makemigrations --check --dry-run
 ```
+
+The same suite also runs under pytest. Its environment comes from the integrated test lock, `backend/locks/cp312-linux-x86_64-test.txt`: the backend lock's 50 pins with identical versions and hashes, plus five test-only packages (pytest 9.1.1, pytest-django 4.14.0, pluggy 1.6.0, iniconfig 2.3.1, and Pygments 2.21.0). It is Linux x86-64 only, like the backend lock; [backend/locks/README.md](../backend/locks/README.md) records how it is generated. `uv pip sync` removes every package that is not in the lock it installs, so syncing the backend lock again removes the test tools. pytest-django 4.14.0 declares support for Django 5.2 and 6.0, not 6.1; see the exception in [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md#compatibility-and-security-exceptions).
+
+```bash
+# From the repository root, in the environment created above
+uv pip sync --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64-test.txt
+python scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt
+
+cd backend
+python ../scripts/ci/check_test_parity.py
+python -m pytest
+```
+
+`backend/pytest.ini` sets `DJANGO_SETTINGS_MODULE`, collects `core` and `agent` with Django's `test*.py` file pattern (pytest's default would skip `tests.py`), and turns on `--strict-markers` and `--strict-config`. `check_test_lock.py` fails unless every backend lock pin appears in the test lock with the same version and hash set, and unless every other package in the test lock is pulled in only by `requirements-test.txt` or another test-only package, as uv's `# via` annotations record. `check_test_parity.py` fails unless pytest collects exactly the test IDs that Django's test runner discovers for `core agent`; it lists the IDs only one runner has. pytest exits 5 when it collects no test. With `-q` its summary also counts passed `subTest` blocks (`23 passed, 19 subtests passed` for this suite). pytest-django orders tests the way Django's runner does (`TestCase` classes first), so `python -m pytest` and `manage.py test core agent` run the 23 tests in the same order.
 
 In Windows PowerShell the environment is activated with `.venv\Scripts\Activate.ps1` instead of `source .venv/bin/activate`, and the other commands are unchanged. Native Windows cannot produce a working environment from this Linux-resolved lock until a Windows lane exists: on Windows x64 the sync installs without `tzdata`, which Django and psycopg require on Windows, so `uv pip check` and time-zone handling fail; on Windows on Arm the sync itself fails because the pinned `autobahn`, `cryptography`, and `psycopg-binary` releases have no `win_arm64` wheels. Use WSL2 (Ubuntu) instead.
 
@@ -61,10 +77,13 @@ cd frontend
 npm ci
 npx playwright install chromium
 npm run lint
+npm run test:unit
 npm run build
 CI=1 npm run test:visual
 CI=1 PLAYWRIGHT_NEXT_SERVER=production npm run test:visual
 ```
+
+`npm run test:unit` runs `vitest run` with `frontend/vitest.config.mts`: jsdom, the `@/*` path alias from `tsconfig.json`, and only `tests/unit/**/*.test.{ts,tsx}`, so Vitest never collects the Playwright files under `tests/visual`. It needs no browser and no backend, and it exits 1 when it finds no test file.
 
 Use Node 24.21.0 and npm 11.21.0. Node 24.21.0 bundles npm 11.19.0 and the `engines` pin only warns (`EBADENGINE`), so install npm 11.21.0 explicitly (`npm install --global npm@11.21.0`). Activate the backend environment in the terminal that starts Playwright: its web-server command invokes `python`.
 
@@ -80,7 +99,7 @@ The default browser is the binary paired with `@playwright/test`. If its downloa
 
 ## Continuous integration
 
-Added 2026-10-10. `.github/workflows/ci.yml` runs the backend and frontend commands of "Current scaffold checks", plus `npx next typegen` and `npx tsc --noEmit`, on every pull request to `main`, every push to `main`, and on manual dispatch. It covers the checked lane only: GitHub-hosted `ubuntu-24.04` x86-64 runners, uv 0.12.24 with CPython 3.12.15 and the hash lock, and Node 24.21.0 (from `.nvmrc`) with npm 11.21.0. It changes no test, lock, or package manifest. A workflow file is not evidence that anything ran or passed: cite the run, its commit SHA, the job, and the summary line from its log, as for any other check. A `pull_request` run tests the merge of the pull request's head into its base as they were when the run started (`refs/pull/<number>/merge`), not the head commit alone: record both the head SHA and the merge commit SHA that the checkout step logs, and treat the run as stale once the head or the base moves.
+Added 2026-10-10. `.github/workflows/ci.yml` runs the backend and frontend commands of "Current scaffold checks", plus `npx next typegen` and `npx tsc --noEmit`, on every pull request to `main`, every push to `main`, and on manual dispatch. It covers the checked lane only: GitHub-hosted `ubuntu-24.04` x86-64 runners, uv 0.12.24 with CPython 3.12.15 and the hash lock, and Node 24.21.0 (from `.nvmrc`) with npm 11.21.0. The first version of the workflow changed no test, lock, or package manifest; the pytest and Vitest jobs, added later on 2026-10-10, came with the backend test lock and the Vitest packages, and left the four original jobs unchanged. A workflow file is not evidence that anything ran or passed: cite the run, its commit SHA, the job, and the summary line from its log, as for any other check. A `pull_request` run tests the merge of the pull request's head into its base as they were when the run started (`refs/pull/<number>/merge`), not the head commit alone: record both the head SHA and the merge commit SHA that the checkout step logs, and treat the run as stale once the head or the base moves.
 
 | Job (check name) | What it runs |
 |---|---|
@@ -88,12 +107,23 @@ Added 2026-10-10. `.github/workflows/ci.yml` runs the backend and frontend comma
 | `Frontend / Node 24 / Linux x64` | `npm ci`, `npm run lint`, `npx next typegen`, `npx tsc --noEmit`, and `npm run build`. |
 | `E2E / Playwright Chromium / production Next` | The same uv and hash-lock install as the backend job, without its interpreter record and version check; `npm ci`, `npx playwright install --with-deps chromium` (the paired browser and its system packages), then `CI=1 PLAYWRIGHT_NEXT_SERVER=production npm run test:visual`. |
 | `E2E / Playwright Chromium / dev Next` | The same with `PLAYWRIGHT_NEXT_SERVER=dev`. Only `next dev` can serve `/_next/mcp`, so this run, not the production one, is the check that `experimental.mcpServer: false` still holds. |
+| `Backend / pytest / CPython 3.12.15 / Linux x64` | The backend job's install with the integrated test lock instead of the backend lock; records `python -VV` and the pytest version and fails on any other Python version; runs `scripts/ci/check_test_lock.py` against the two locks; then, in `backend/`, `scripts/ci/check_test_parity.py` and `python -m pytest`. |
+| `Frontend / Vitest / Node 24 / Linux x64` | The frontend job's npm 11.21.0 install and `npm ci`, then `npm run test:unit`. |
 
 - Both E2E jobs upload `frontend/test-results/`, which holds the saved screenshots, as a run artifact kept for 7 days, whether the tests passed or failed. Inspecting the screenshots stays a reviewer's step, as above.
-- No job depends on another, so a failure in one never turns another into a skipped check. When the four jobs first pass on `main`, all four check names can be made required status checks. That is a GitHub repository setting, not a file in this repository, and changing it needs admin access to the repository.
+- No job depends on another, so a failure in one never turns another into a skipped check. When the four original jobs first passed on `main`, their check names became eligible as required status checks; the pytest and Vitest checks become eligible once they have passed. Making a check required is a GitHub repository setting, not a file in this repository, and changing it needs admin access to the repository.
 - A newer run for the same pull request cancels the older one. Every push to `main` and every manual dispatch runs in its own concurrency group, so none of those runs is cancelled or dropped from the queue.
-- Not covered by CI: other operating systems, CPU architectures, and accelerators; Python 3.15 and 3.15t; the manual route checks against `runserver` and Uvicorn above; the Python Playwright browser install; accessibility and pixel-diff checks; secret scanning; and dependency alerts.
+- Not covered by CI: other operating systems, CPU architectures, and accelerators; Python 3.15 and 3.15t; the manual route checks against `runserver` and Uvicorn above, for which no API collection exists (see "API collection testing" below); the Python Playwright browser install; accessibility and pixel-diff checks; secret scanning; and dependency alerts.
 - A green run shows that these commands passed on that commit and runner. It is not a review and not an approval ([CODE-REVIEW.md](CODE-REVIEW.md) "Independence and authority"). A change to any workflow file goes through the security review ([CODE-REVIEW.md](CODE-REVIEW.md) step 9).
+
+## API collection testing
+
+Blocked, recorded 2026-10-10. No Postman collection, Postman CLI, or Newman is in the repository. The Postman CLI was checked as a candidate for the route checks above, in an isolated scratch install (`npm install --ignore-scripts`, a throwaway `HOME`, no login, API key, `postman init`, or cloud workspace) of `postman-cli` 1.73.0 and its `@postman/pm-bin-linux-x64` 1.73.0 binary package. Two conditions set for adopting it were not met:
+
+- External transmission. A local collection run against `127.0.0.1` with `--no-report-events` passed, but the CLI still tried to reach `events.getpostman.com` and `dl-cli.pstmn.io` (an update check). The [Postman CLI options](https://learning.postman.com/docs/postman-cli/postman-cli-options/) page (fetched 2026-10-10) says `--no-report-events` turns event reporting off for that run, and the CLI's `--help` says it stops dispatching results and analytics, yet both attempts happened with it set; no documented option stopped them. A network guard blocked both, so nothing was sent; without it they would have been.
+- Usage terms. Neither package has a `license` field or a license file, and npm shows no provenance attestation for either. The [Postman Terms of Service](https://www.postman.com/legal/terms/) license downloadable Software for use as part of the Service and in association with a Postman Account, so use without an account in a public repository's CI is not clearly permitted.
+
+Also recorded: on a global install (`npm install -g`), the package's `postinstall` appends a block to `CLAUDE.md` in the Claude Code configuration directory (`~/.claude` by default) and to `AGENTS.md` (or `AGENTS.override.md`) in the Codex one (`~/.codex`) when those directories exist, and `postman update` performs a global install; a local install skips that step. Newman was not evaluated. Until the terms are clarified and a documented setting stops these connections, API route checks stay in the Django/ASGI tests and the Playwright scenario above.
 
 ## Topic/Thread and context testing
 

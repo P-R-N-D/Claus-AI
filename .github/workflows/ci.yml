@@ -159,6 +159,8 @@ jobs:
         with:
           version: '0.12.24'
           enable-cache: false
+          # With a Python version given, setup-uv does not look for an interpreter in the checkout and run it.
+          python-version: '3.12.15'
       - name: Install the hashed backend test lock
         run: |
           uv venv --managed-python --python 3.12.15

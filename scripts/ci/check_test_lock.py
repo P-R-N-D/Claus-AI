@@ -31,9 +31,10 @@ unless all of the following hold:
    requested extra must be one the package provides, and every dependency
    specifier must allow the pinned version.
 7. No uv configuration file that `uv pip compile` would read when run from the
-   repository root, where this check runs: a uv.toml, or a pyproject.toml with
-   a [tool.uv] table, in that directory or a parent. Such a file can change
-   what the README's commands resolve without changing the inputs.
+   repository root, where this check runs, without --no-config, as the
+   committed locks were compiled: a uv.toml, or a pyproject.toml with a
+   [tool.uv] table, in that directory or a parent. Such a file can change what
+   uv resolves without changing the inputs.
 
 So an input change fails when, on the target, it adds or drops a direct
 requirement, changes which packages the requirements, extras and markers reach,
@@ -41,7 +42,8 @@ or excludes a pinned version, and always when it breaks rule 4 or 7. Any other i
 change passes, such as a widened or removed version range, or a lowered
 minimum, that still allows the pin, a marker that holds on the target, or an
 extra whose packages the lock already pins; while the index offers the same
-files, regenerating then changes at most the locks' "# via" annotations. The
+files, regenerating then changes at most the locks' "# via" annotations and,
+the first time, their header command, which gains --no-config. The
 check does not re-resolve: it does not check that the pins are the newest
 allowed versions, that the hashes belong to the files PyPI serves for those
 versions (uv checks the files it downloads, from whatever index it uses,
@@ -54,7 +56,9 @@ lock (it reads that environment's package metadata and needs only the standard
 library and `packaging`, which both locks pin). `-I` keeps files in this
 directory or the current one from standing in for installed packages; it
 cannot help if code from the checkout has already run in that environment, so
-CI runs this right after the install:
+CI runs this right after the install. It trusts the packages it runs among: a
+malicious package in the locks runs first, through its .pth file, so new pins
+and changed hashes need review:
     python -I scripts/ci/check_test_lock.py \
         backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt \
         backend/requirements.txt backend/requirements-test.txt

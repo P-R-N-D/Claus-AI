@@ -431,12 +431,13 @@ class CheckTestLockTests(unittest.TestCase):
         ):
             with self.subTest(file=name, text=text):
                 self.assertFails("this check accepts no uv configuration file", (name, None, text))
-        # uv also reads one in a parent directory.
-        self.assertFails(
-            "this check accepts no uv configuration file",
-            ("../uv.toml", None, "[pip]\nno-deps = true\n"),
-            subdirectory="repo",
-        )
+        # uv also reads one in any parent directory.
+        for name in ("../uv.toml", "../../uv.toml", "../pyproject.toml"):
+            text = ("[tool.uv.pip]" if name.endswith("pyproject.toml") else "[pip]") + "\nno-deps = true\n"
+            with self.subTest(file=name):
+                self.assertFails(
+                    "this check accepts no uv configuration file", (name, None, text), subdirectory="a/b"
+                )
 
     def test_pyproject_without_uv_settings_passes(self):
         self.assertPasses(("pyproject.toml", None, '[project]\nname = "claus"\nversion = "0"\n'))

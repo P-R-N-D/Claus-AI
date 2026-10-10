@@ -14,9 +14,9 @@ unless all of the following hold:
    annotations, only by requirements-test.txt or by another test-only package.
 4. Each requirement input holds only named requirements, with optional extras,
    version specifiers and markers: no direct URL, path, archive file name,
-   editable or option line. Every marker, in an input or in an installed
-   package's metadata, uses only the forms listed at STRING_VARIABLES below,
-   which packaging and uv evaluate alike.
+   editable or option line. Every marker, in an input or in the metadata of a
+   package the walk in rule 6 reads, uses only the forms listed at
+   STRING_VARIABLES below, which packaging and uv evaluate alike.
 5. For each lock and each of its inputs: every requirement whose marker holds on
    the target is pinned at a version its specifier allows and is recorded as a
    direct requirement of that input, and nothing else is recorded as one. A
@@ -30,13 +30,15 @@ unless all of the following hold:
 
 So an input change fails when, on the target, it adds or drops a direct
 requirement, changes which packages the requirements, extras and markers reach,
-or excludes a pinned version. Any other input change passes, such as a widened
-or removed version range, or a lowered minimum, that still allows the pin, a
-marker that holds on the target, or an extra whose packages the lock already
-pins; regenerating then changes at most the locks' "# via" annotations. The
+or excludes a pinned version, and always when it breaks rule 4. Any other input
+change passes, such as a widened or removed version range, or a lowered
+minimum, that still allows the pin, a marker that holds on the target, or an
+extra whose packages the lock already pins; while the index offers the same
+files, regenerating then changes at most the locks' "# via" annotations. The
 check does not re-resolve: it does not check that the pins are the newest
-allowed versions, that the hashes match the files on the index (uv checks that
-when it installs), or anything about another platform or Python version.
+allowed versions, that the hashes belong to the files on the index (uv checks
+the files it downloads against them when it installs), or anything about
+another platform or Python version.
 
 Usage, from the repository root, in the environment installed from the test
 lock (it reads that environment's package metadata and needs only the standard
@@ -63,7 +65,8 @@ VIA_ITEM = re.compile(r"^\s+#   (\S.*)$")
 COMMAND = re.compile(r"^#\s+uv pip compile\s")
 # pip's rule: "#" starts a comment at the start of a line or after whitespace.
 COMMENT = re.compile(r"(^|\s+)#.*$")
-# pip and uv read a requirement name ending in one of these as a local file.
+# pip reads a requirement name ending in most of these as a local file, and uv 0.12.24 one ending in
+# .whl, .zip, .tar.gz, .tgz or .tar; the check rejects them all.
 ARCHIVE = re.compile(r"\.(whl|zip|tar|tgz|tbz2?|txz|tlz|tar\.(gz|bz2|xz|lz|lzma|zst))$", re.IGNORECASE)
 
 # Marker forms that packaging, which evaluates markers here, and uv 0.12.24,

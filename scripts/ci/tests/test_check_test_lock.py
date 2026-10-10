@@ -354,7 +354,8 @@ class CheckTestLockTests(unittest.TestCase):
                 self.assertFails(message, self.with_marker(name, package, marker))
 
     def test_marker_forms_outside_the_supported_ones_fail(self):
-        # packaging and uv evaluate these differently on the target; see InProcessTests for more forms.
+        # packaging and uv give different results for these on the target, or uv rejects the marker;
+        # see InProcessTests for more forms.
         for text in (
             'requests>=2.32 ; platform_release < "6"',
             'requests>=2.32 ; python_version in "3.12.1"',
@@ -492,8 +493,9 @@ class InProcessTests(unittest.TestCase):
         self.assertEqual(problems, [])
 
     def test_only_marker_forms_packaging_and_uv_evaluate_alike_are_supported(self):
-        # Each of these was compiled with uv 0.12.24 for the target: uv and packaging disagree on the first
-        # group (as reported in review), and agree on the second.
+        # The first group is outside the supported forms; for most of them uv 0.12.24 and packaging give
+        # different results on the target, or one of them rejects the marker. Each of the second group was
+        # compiled with uv 0.12.24 for the target and agrees.
         for marker in (
             'platform_release < "5"',
             'platform_version < "5"',

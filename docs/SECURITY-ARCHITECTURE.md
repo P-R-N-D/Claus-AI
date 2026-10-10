@@ -87,7 +87,7 @@ How a standing authorization is stored, who may grant one, and how an automation
 
 ## Current implementation security facts
 
-Verified on 2026-10-08. Line numbers refer to the file named in each heading unless another path is given.
+Verified on 2026-10-08. (Updated 2026-10-10: the `/core` tests, ASGI composition, Agent surface, Secrets hygiene, and Frontend facts were re-checked at 14b9109 and are unchanged through 3fe4d1a, except the Agent surface test description, updated for 3fe4d1a.) Line numbers refer to the file named in each heading unless another path is given.
 
 ### Django control plane (`backend/config/settings.py`)
 
@@ -97,17 +97,19 @@ Verified on 2026-10-08. Line numbers refer to the file named in each heading unl
 - `DATABASES["default"]` is built by `database_config(os.environ.get("DATABASE_URL"), ...)` (lines 63-65). `STORAGES["default"]` is `core.storage.s3.S3CompatibleStorage` (line 76).
 - `CORS_ALLOWED_ORIGINS` lists `http://127.0.0.1:3000` and `http://localhost:3000` (lines 82-85).
 - `REST_FRAMEWORK` sets only renderer classes, including `BrowsableAPIRenderer` (lines 87-92). `DEFAULT_PERMISSION_CLASSES` and `DEFAULT_AUTHENTICATION_CLASSES` are unset, so DRF defaults apply: `AllowAny` permission with `SessionAuthentication` and `BasicAuthentication`. No `SECURE_*`, `CSRF_TRUSTED_ORIGINS`, `SESSION_COOKIE_*`, or `SECURE_CSP` setting is configured.
-- Routes: `admin/` and `core/` (`backend/config/urls.py:8-9`); `GET /core/health/` (`backend/core/urls.py:5`) returns four static strings (`backend/core/views.py:7-17`). Test: `test_health` in `backend/core/tests.py`.
+- Routes: `admin/` and `core/` (`backend/config/urls.py:8-9`); `GET /core/health/` (`backend/core/urls.py:5`) returns four static strings (`backend/core/views.py:7-17`). Tests in `backend/core/tests.py`: `test_health`, and `CorsPreflightTests` (2 methods): a preflight from the allowed origin `http://127.0.0.1:3000` receives `Access-Control-Allow-Origin`, `GET` in `Access-Control-Allow-Methods`, and no credentials header; one from a disallowed origin still gets 200, because django-cors-headers answers every preflight, but no CORS headers. (Updated 2026-10-10.)
 
 ### ASGI composition (`backend/config/asgi.py`)
 
 - Sets `DJANGO_SETTINGS_MODULE` (line 7), builds the Django ASGI app (line 10), then imports the agent app (line 12).
 - The outer `FastAPI` disables its own docs, redoc, and OpenAPI (line 14), mounts the agent app at `/agent` (line 15) and Django at `/` (line 16).
 - Consequence: CSRF, session, authentication, CORS, and clickjacking middleware never see `/agent/*` requests.
+- FastAPI native telemetry: FastAPI 0.142.0 and later depends on `opentelemetry-api` (1.45.1, "via fastapi", `backend/locks/cp312-linux-x86_64.txt:540-543`) and imports it whenever FastAPI is imported. Its tracing, metrics, and log defaults activate only when a global OpenTelemetry provider (an SDK) is configured; the lock contains no SDK, so telemetry is inactive today. If an SDK or an auto-instrumentation agent is added, the outer `FastAPI` (line 14) traces every request, including Django's `/core/*` and `/admin/*` because Django is mounted inside it (line 16), and records `url.path` and `url.query` with only a few signature parameters redacted. The default logs signal also records unhandled exceptions that reach FastAPI (today the agent app) as `http.server.request.exception` log records with exception messages and stack traces, and request validation failures as `fastapi.validation.failed` records; any FastAPI extra that installs `opentelemetry-sdk` (`opentelemetry`, `standard`, `standard-no-fastapi-cloud-cli`, `all`) adds the SDK and the OTLP HTTP exporter; these signals go live only once a global provider is configured (in code, by an auto-instrumentation agent, through `OTEL_PYTHON_{TRACER,METER,LOGGER}_PROVIDER`, or by `FASTAPI_OTEL_AUTO_CONFIGURE=true` with an OTLP endpoint, which needs one of those extras), and `telemetry={"logs": False}` or the `exclude` option are the controls. `FASTAPI_OTEL_AUTO_CONFIGURE=true` adds OTLP exporters configured from the environment. An `OTEL_PROPAGATORS` value naming a propagator that is not installed makes `import fastapi`, and therefore this module, fail at import (author-run, environment-limited check: `OTEL_PROPAGATORS=b3` raised `ValueError: Propagator b3 not found`). Decision: documented, not disabled in code; enabling observability requires a review against `SEC-SECRET-003`. (Updated 2026-10-10.)
 
 ### Agent surface (`backend/agent/fastapi/`)
 
-- `app.py:5-9` creates `FastAPI(title="Claus Agent", docs_url="/docs", openapi_url="/openapi.json")`, so `/agent/docs` and `/agent/openapi.json` are served; `redoc_url` is not set, so FastAPI's default `/agent/redoc` is served as well. `test_integrated_routing_contract` in `backend/agent/tests.py` asserts `/agent/openapi.json` returns 200.
+- `app.py:5-12` creates `FastAPI(title="Claus Agent", docs_url="/docs", openapi_url="/openapi.json", redirect_slashes=False)`, so `/agent/docs` and `/agent/openapi.json` are served; `redoc_url` is not set, so FastAPI's default `/agent/redoc` is served as well. `test_integrated_routing_contract` in `backend/agent/tests.py` asserts `/agent/openapi.json` returns 200.
+- `redirect_slashes=False` (line 11, explained in lines 9-10): a path that differs from a route only by its trailing slash, such as `/agent/health`, `/agent/docs/`, `/agent/redoc/`, or `/agent/openapi.json/`, returns FastAPI's 404 JSON with no `Location` header. The slash redirect it replaces was an absolute URL built from the upstream `Host` header, which behind the Next.js rewrite is `127.0.0.1:8000`, so it sent the browser from the frontend origin to the backend origin (author-run reproduction at 6b7ea90 through `next start`: `/agent/docs/?q=1` answered 307 with `Location: http://127.0.0.1:8000/agent/docs?q=1`). `test_agent_slash_mismatch_is_404_without_redirect` in `backend/agent/tests.py` asserts the 404 without `Location` for those four paths and 200 for `/agent/docs`, `/agent/redoc`, `/agent/openapi.json`, and `/agent/docs/oauth2-redirect` (Swagger UI's OAuth2 redirect page, served while `docs_url` and `openapi_url` are set; extended in 3fe4d1a). Django's `APPEND_SLASH` redirect under `/core/*` is unchanged and uses a relative `Location` (`/core/health` answers 301 to `/core/health/`). (Updated 2026-10-10.)
 - `routes/health.py:6-12`: `GET /health/` returns three static strings.
 - `dependencies.py:1` is a docstring only. No authentication, authorization, CORS, CSRF, or session handling exists on this surface.
 - `backend/agent/runtime/browser/playwright.py:6-8` returns `async_playwright()` without launching a browser. `agent/llm`, `agent/rag`, `agent/orchestration`, and `agent/tools` are docstring-only packages.
@@ -132,13 +134,16 @@ Verified on 2026-10-08. Line numbers refer to the file named in each heading unl
 ### Secrets hygiene
 
 - `.gitignore` ignores `.env` and `.env.*` except example files (lines 30-33), private key files (lines 36-43), credential-shaped JSON (lines 46-53), logs (lines 64-65), `backend/db.sqlite3` (line 26), and browser profile directories (lines 83-88).
-- `.env.example` (lines 2-13) holds empty placeholders for `DJANGO_SECRET_KEY`, `DATABASE_URL`, and the five storage variables, plus `DJANGO_DEBUG=true`.
+- `.env.example` (lines 2-13) holds empty placeholders for `DJANGO_SECRET_KEY`, `DATABASE_URL`, and the five storage variables, plus `DJANGO_DEBUG=true`. Lines 15-20 hold two empty, non-secret, test-only Playwright variables, `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` (line 18) and `PLAYWRIGHT_NEXT_SERVER` (line 20), with comments stating that Playwright does not load the file. (Updated 2026-10-10.)
 - The ignore rules only keep untracked files out of a commit. They do not apply to a file that is already tracked or that is added with `git add -f`, and they do not catch a secret written into source code, documentation, tests, or configuration, or one already in the history.
 - No Git hook, CI workflow, or secret scanner is configured in the repository's files; `.github/` holds `copilot-instructions.md` and advisory issue and pull request templates, none of which runs a check. (Updated 2026-10-09.) [SECURITY-REVIEW.md](SECURITY-REVIEW.md) step 7 defines a keyword check of a change's added lines, which a reviewer runs; nothing runs or enforces it automatically.
 
 ### Frontend
 
-- `frontend/src/lib/api.ts` creates axios instances for `/core/` and `/agent/`; `frontend/next.config.ts` rewrites both prefixes to `http://127.0.0.1:8000`. No authentication, cookie, header, middleware, Server Action, route handler, or WebMCP code exists. The single visual test checks rendering and the two health responses; it exercises nothing security-related.
+- `frontend/src/lib/api.ts` creates axios instances for `/core/` and `/agent/`. No authentication, cookie, Server Action, route handler, or WebMCP code exists, and no custom response header (security, cookie, or `Permissions-Policy`) is configured; the Proxy sets only the `Location` of its redirects. (Updated 2026-10-10.)
+- `frontend/next.config.ts`: `skipTrailingSlashRedirect: true` (line 5); rewrites of `/core/:path(.*)` and `/agent/:path(.*)` to `http://127.0.0.1:8000`, which preserve trailing slashes (lines 12-23); `agentRules: false` (line 7), so `next dev` generates no agent-rules block in `frontend/AGENTS.md`; and `experimental.mcpServer: false` (lines 8-11), so `next dev` serves no `/_next/mcp` endpoint (without the option, Next 16's `next dev` serves an unauthenticated MCP endpoint at that path; `next start` never serves it). The `dev` script in `frontend/package.json` binds `next dev` to `127.0.0.1`. (Updated 2026-10-10.)
+- `frontend/src/proxy.ts` is a Next.js 16 Proxy (the file convention that replaces `middleware.ts`). Its matcher (line 20) skips `/_next/*` and the `/core/` and `/agent/` prefixes, so UI paths and App Router metadata routes such as `/icon.svg` pass through it. A UI path that ends in `/`, other than `/`, gets a 308 to the same path without the slash, with the query preserved (lines 7-13); leading slashes in the target are collapsed so the `Location` can never be scheme-relative (`//host`) (line 11), and the in-code `/core/` and `/agent/` exemption (line 5) remains as a guard. Next's own router answers raw `//` and backslash paths with its own 308 before the Proxy runs, so that guard is defense in depth. The Proxy has no authentication, cookie, header, or locale logic. It is not an authorization layer; authorization belongs to the Django control plane (`SEC-AUTH-001`). (Updated 2026-10-10.)
+- Tests: `frontend/tests/visual/home.spec.ts` (one scenario) checks that `/core/health/`, `/agent/health/`, and `/agent/openapi.json` return 200 without a redirect; that `/console/`, `/core-ui/`, and `/agent-ui/` get a 308 that keeps the query; that `//evil.example/` and `/%2F%2Fevil.example/` get a 308 with a same-origin `Location`; that `/agent/docs/` and `/agent/health` return 404 without `Location` and `/core/health` a same-origin 301; that `POST /_next/mcp` returns 404; and that the pages have no horizontal overflow, measured against `document.documentElement.clientWidth` with a self-check that proves the measurement can fail. `frontend/tests/visual/proxy.spec.ts` (two tests, no browser) calls `proxy()` directly, including with `//evil.example/`, and checks the matcher with Next's version-pinned `unstable_doesMiddlewareMatch`. Each test runs in the four desktop/mobile, light/dark projects. They cover same-origin redirects and the disabled MCP endpoint; none exercises authentication or authorization, which does not exist. (Updated 2026-10-10.)
 
 ## Requirements
 
@@ -269,7 +274,7 @@ Failure means denial and cleanup, not a weaker default.
 Cross-cutting facts about the surfaces that exist today.
 
 - `SEC-API-001` Implemented. Health endpoints return no sensitive data; the current payloads are static strings. Evidence: `core/views.py:7-17`, `agent/fastapi/routes/health.py:6-12`.
-- `SEC-API-002` Partial. The browsable API renderer, `/agent/docs`, `/agent/openapi.json`, and FastAPI's default `/agent/redoc` are development conveniences; their exposure must be decided before any non-local deployment. All four are enabled today, the ReDoc page by default rather than by configuration.
+- `SEC-API-002` Partial. The browsable API renderer, `/agent/docs`, `/agent/openapi.json`, and FastAPI's default `/agent/redoc` are development conveniences; their exposure must be decided before any non-local deployment. All four are enabled today, the ReDoc page by default rather than by configuration. `/agent/docs/oauth2-redirect`, Swagger UI's OAuth2 redirect page, is served with `/agent/docs` and disappears with it; `backend/agent/tests.py` asserts these documentation routes are reachable, so a decision to disable them must update that test. (Updated 2026-10-10.)
 - `SEC-API-003` Partial. The CORS allowlist is limited to local dev origins and `ALLOWED_HOSTS` is local only; both must be environment-specific. The dev values are hard-coded today.
 
 Internationalization has no area of its own. Locale and preference input is validated under `SEC-INJ-001`, translation strings never carry identifiers or permissions ([I18N.md](I18N.md)), and WebMCP tool names stay stable under `SEC-AGENT-002`.
@@ -283,7 +288,7 @@ Evidence names repository files and tests that exist; "none yet" means no code o
 | SEC-AUTH-001 | Planned | none yet |
 | SEC-AUTH-002 | Partial | `settings.py:21, 23, 35, 38` (auth and session apps and middleware installed) |
 | SEC-AUTH-003 | Planned | none yet (`settings.py:87-92` sets no permission classes) |
-| SEC-AUTH-004 | Fact/Partial | `asgi.py:14-16`, `agent/fastapi/app.py:5-9` (fact only) |
+| SEC-AUTH-004 | Fact/Partial | `asgi.py:14-16`, `agent/fastapi/app.py:5-12` (fact only) |
 | SEC-SCOPE-001 | Planned | none yet |
 | SEC-SCOPE-002 | Planned | none yet |
 | SEC-SCOPE-003 | Planned | none yet |
@@ -328,8 +333,8 @@ Evidence names repository files and tests that exist; "none yet" means no code o
 | SEC-FAIL-002 | Implemented (database and storage) | `config/database.py:11-64`, `s3.py:43-70`; `test_invalid_urls_fail_instead_of_falling_back`, `test_missing_configuration_is_lazy_and_clear` |
 | SEC-FAIL-003 | Planned | none yet |
 | SEC-API-001 | Implemented | `core/views.py:7-17`, `agent/fastapi/routes/health.py:6-12`; `test_health`, `test_integrated_routing_contract` |
-| SEC-API-002 | Partial | `settings.py:87-92`, `agent/fastapi/app.py:5-9` (enabled today) |
-| SEC-API-003 | Partial | `settings.py:16, 82-85` (dev values hard-coded) |
+| SEC-API-002 | Partial | `settings.py:87-92`, `agent/fastapi/app.py:5-12` (enabled today) |
+| SEC-API-003 | Partial | `settings.py:16, 82-85` (dev values hard-coded); `CorsPreflightTests` (allowed and disallowed preflight origins) |
 
 ## Related documents
 
@@ -341,3 +346,4 @@ Evidence names repository files and tests that exist; "none yet" means no code o
 - [SECURITY-REVIEW.md](SECURITY-REVIEW.md): the review procedure that cites these IDs.
 - [CODE-REVIEW.md](CODE-REVIEW.md): the general review procedure and finding format.
 - [TESTING.md](TESTING.md): existing tests and the security-negative, boundary, and approval tests still required.
+- [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md): dependency/native-artifact remediation and maintenance planning, including `abi3t` wheel provenance and bundled-library updates; it changes no `SEC-*` definition or status.

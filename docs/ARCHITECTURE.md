@@ -7,7 +7,7 @@ This document distinguishes the current runnable scaffold from longer-term archi
 ## Current runnable scaffold
 
 - Frontend: Next.js user surface at `/` and a separate product-operations Console reserved under `/console/*` (only the `/console` index page exists today), using React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright.
-- Backend baseline: Django 6 on Python 3.12 or newer (Django 6.0 officially supports 3.12 through 3.14), Django REST Framework, django-cors-headers, FastAPI, Daphne, Uvicorn, psycopg (PostgreSQL driver), boto3 (S3-compatible storage client), and Python Playwright.
+- Backend baseline: Django 6.1, Django REST Framework 3.18, django-cors-headers, FastAPI, Daphne, Uvicorn, psycopg (PostgreSQL driver), boto3 (S3-compatible storage client), and Python Playwright. The checked lane is CPython 3.12.15 on Linux x86-64 (glibc) with a hashed lock. Other lanes have static evidence only or are unsupported: Linux arm64 with glibc (for example NVIDIA DGX Spark) and macOS 15 or later on Apple Silicon are statically resolvable from the same lock, Windows through WSL2 uses the matching Linux lane, and native Windows, including Windows on Arm, cannot produce a working environment from the lock today; see [Platform and accelerator lanes](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes). No dependency is CUDA- or accelerator-specific today; a future accelerator package stays optional, keeps a CPU path, and gets its own lane, with CUDA on Arm (DGX Spark, RTX Spark) kept distinct from Arm without CUDA (for example Qualcomm Snapdragon). Django's wider 3.12–3.14 support does not qualify every Claus runtime combination.
 - Django project: `config`.
 - Django apps: `core` for the persistent product/control plane and `agent` for AI/RAG/agent execution.
 - Routing: `/core/*` uses Django/DRF, `/agent/*` uses FastAPI, and `/admin/*` remains Django Admin.
@@ -24,11 +24,13 @@ config.asgi.application
 
 It sets Django settings and calls `get_asgi_application()` before importing Agent FastAPI. Daphne is first in `INSTALLED_APPS`, so `manage.py runserver` uses this ASGI application; Uvicorn imports the same object directly. WSGI is a Django-only fallback.
 
+The Next.js 16 rewrites forward `/core/*` and `/agent/*` to the backend with their paths unchanged, including trailing slashes, and Next's own trailing-slash redirect is off (`skipTrailingSlashRedirect`). Both health URLs retain their final slash; `/agent/openapi.json` retains its unsuffixed form. Django keeps `APPEND_SLASH`, whose redirect has a relative `Location` (`/core/health` answers 301 to `/core/health/`) and therefore stays on the frontend origin. The agent FastAPI app does not redirect slash mismatches (`redirect_slashes=False`): its slash redirects were absolute URLs built from the upstream `Host` header, which behind the rewrite is the backend origin, so a wrong-slash path such as `/agent/health` or `/agent/docs/` returns 404. `frontend/src/proxy.ts` restores the UI's permanent (308) trailing-slash redirects, such as `/console/` to `/console`, preserving query parameters and collapsing leading slashes so a `Location` cannot become scheme-relative (`//host`). Its matcher skips Next internals under `/_next/` (static assets and image optimization) and the `/core/` and `/agent/` prefixes, and an in-code backend guard remains; it has no authentication, cookie, header, or locale logic. `frontend/next.config.ts` disables Next 16's dev-only MCP endpoint (`experimental.mcpServer: false`) and its generated agent rules (`agentRules: false`), and `npm run dev` binds to 127.0.0.1. The frontend uses Tailwind 4's PostCSS integration and native Next ESLint flat configuration. Runtime pins, locks, and remaining tooling exceptions are recorded in [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md).
+
 ### Implemented foundations
 
 The scaffold implements the following. The first three have tests in the repository (`backend/core/tests.py`, `backend/core/test_database.py`, `backend/core/test_storage.py`, `backend/agent/tests.py`); the runtime boundary has none:
 
-- Health APIs: `GET /core/health/` (DRF) and `GET /agent/health/` (FastAPI), plus the ASGI routing contract above (`/agent/openapi.json` served, legacy `/api/health/` absent).
+- Health APIs: `GET /core/health/` (DRF) and `GET /agent/health/` (FastAPI), plus the ASGI routing contract above (`/agent/openapi.json` served, legacy `/api/health/` absent, wrong-slash `/agent/*` paths such as `/agent/health` answered with 404 and no redirect).
 - Database configuration: `config/database.py` builds `DATABASES["default"]` from `DATABASE_URL`. Only `postgres`/`postgresql` URLs are accepted, parsing is strict (hostname and database name required, no fragment, no duplicate or malformed query parameters), query parameters become `OPTIONS`, and invalid URLs raise `ImproperlyConfigured` instead of falling back. An unset or blank `DATABASE_URL` selects SQLite at `backend/db.sqlite3`.
 - File storage: `core/storage/s3.py` (`S3CompatibleStorage`) is the default Django storage backend. It reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_REGION`, and `OBJECT_STORAGE_BUCKET` lazily, validates the endpoint, rejects unsafe object names, saves with a conditional create so existing objects are never overwritten (a collision allocates a new name and retries), supports binary reads only, and returns presigned download URLs valid for one hour. The tests use a fake S3 client; no integration test against a real object store exists.
 - Runtime boundary: `agent/runtime/browser/playwright.py` returns the async Playwright context manager without launching a browser. The `agent/llm`, `agent/rag`, `agent/orchestration`, and `agent/tools` packages are docstring-only boundaries.
@@ -160,6 +162,8 @@ Claus is designed so correctness does not depend on the GIL:
 - Keep a GIL-enabled runtime as a compatibility fallback.
 
 Free-threading does not remove the need for process isolation, task workers, or horizontal scaling where operationally appropriate.
+
+[DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md) applies this existing direction to Python 3.15 Limited API and `abi3t` wheels. It defines compatible version selection, native artifact qualification, performance budgets, and the GIL-enabled fallback when a target combination is blocked. Neither a published wheel nor a resolver result means Claus currently supports Python 3.15/3.15t.
 
 ## Authorization and safety
 

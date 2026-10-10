@@ -10,7 +10,7 @@ export function WorkspaceShell() {
   return (
     <main className="min-h-screen bg-slate-100 px-6 py-10 text-slate-900 dark:bg-slate-950 dark:text-slate-100 sm:px-8 lg:px-10">
       <div className="mx-auto flex max-w-6xl flex-col gap-8">
-        <section className="rounded-[2rem] bg-gradient-to-br from-slate-950 via-slate-900 to-sky-950 p-8 text-white shadow-2xl shadow-slate-300/60 dark:shadow-black/40 sm:p-10">
+        <section className="rounded-[2rem] bg-linear-to-br from-slate-950 via-slate-900 to-sky-950 p-8 text-white shadow-2xl shadow-slate-300/60 dark:shadow-black/40 sm:p-10">
           <p className="text-sm font-semibold uppercase tracking-[0.35em] text-sky-300">People + AI collaboration</p>
           <h1 className="mt-5 text-5xl font-bold tracking-tight sm:text-6xl">Claus</h1>
           <p className="mt-5 max-w-2xl text-lg leading-8 text-slate-300">

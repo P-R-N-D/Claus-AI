@@ -7,7 +7,7 @@ The general adapter model (Human UI, WebMCP, Automation, Browser Computer Use) i
 ## Status
 
 - Subject status: Experimental and Planned. WebMCP is an external technology whose specification and browser support are still changing. Every Claus rule below is a design contract, not current behavior.
-- Implemented: nothing. At HEAD 8ec5623 (2026-10-08) there is no WebMCP code, no registered tool, no `Permissions-Policy` header, and no WebMCP test. See "Current repository status".
+- Implemented: nothing. At HEAD 8ec5623 (2026-10-08), and again at 14b9109 (2026-10-10; unchanged through 3fe4d1a), there is no WebMCP code, no registered tool, no `Permissions-Policy` header, and no WebMCP test. See "Current repository status".
 - Adoption: not decided. This document exists so a future proposal can be reviewed against a stable contract instead of against memory of the spec.
 - External facts were verified on 2026-10-08 against the sources below. Re-verify before any implementation work.
 
@@ -374,13 +374,14 @@ async function execute(input, { signal }) {
 
 ## Current repository status
 
-Facts, HEAD 8ec5623, 2026-10-08:
+Facts at 14b9109 on branch `codex/dependency-updates-abi3t`, 2026-10-10, unchanged through 3fe4d1a; first recorded at HEAD 8ec5623 on 2026-10-08:
 
 - `grep -rni 'modelContext\|webmcp' frontend/src` returns nothing. No tool is registered anywhere.
-- No `Permissions-Policy` header is configured. `frontend/next.config.ts` contains only rewrites for `/core/:path*` and `/agent/:path*`; there is no `middleware.ts`, `proxy.ts`, or route handler.
+- No `Permissions-Policy` header is configured. `frontend/next.config.ts` sets `skipTrailingSlashRedirect: true`, rewrites `/core/:path(.*)` and `/agent/:path(.*)` to the backend, and sets `agentRules: false` and `experimental.mcpServer: false`. `frontend/src/proxy.ts` only issues the UI's trailing-slash 308 redirects; it sets no header other than their `Location` and registers no tool. There is no `middleware.ts` or route handler.
+- By default, Next.js 16's `next dev` serves an MCP endpoint at `/_next/mcp`. It is a server-side endpoint for development tooling, unrelated to WebMCP, which registers tools in the browser page. `experimental.mcpServer: false` disables it, and `frontend/tests/visual/home.spec.ts` asserts that `POST /_next/mcp` returns 404.
 - The frontend has two pages (`/` and `/console`) and one client component that calls the two health endpoints. No application operations layer exists for tools to call.
 - Backend: the only product API routes are the two health endpoints (`/admin/`, `/agent/docs`, `/agent/openapi.json`, and FastAPI's default `/agent/redoc` also respond); the S3-compatible storage backend and `DATABASE_URL` parsing are implemented; there is no authentication, authorization, approval, idempotency, or audit for product features ([SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md)).
-- Tests: `frontend/tests/visual/home.spec.ts` is one Playwright test run by the `chromium` project (the `Desktop Chrome` device preset); it does not touch WebMCP. No backend test covers agent-originated actions.
+- Tests: `frontend/tests/visual/home.spec.ts` (one scenario) and `frontend/tests/visual/proxy.spec.ts` (two tests that need no browser) run in four Playwright projects, the `Desktop Chrome` and `Pixel 7` device presets each in light and dark; none touches WebMCP. No backend test covers agent-originated actions.
 - Adoption decision: none. Nothing in this document is scheduled.
 
 ## Verification requirements
@@ -389,7 +390,7 @@ Planned and Experimental. Required before any WebMCP code is merged; recorded he
 
 Environment:
 
-- Chrome docs: a browser at Chrome 149 or newer with an origin trial token, or the `chrome://flags/#enable-webmcp-testing` flag. Which Chromium build the frontend's `@playwright/test` dependency (lockfile 1.61.0) bundles, and whether that flag can be enabled for a Playwright-launched browser, is unverified.
+- Chrome docs: a browser at Chrome 149 or newer with an origin trial token, or the `chrome://flags/#enable-webmcp-testing` flag. The frontend's `@playwright/test` dependency (lockfile 1.64.0) is paired with Chromium 156.0.8078.4 ([DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md)); whether that build supports the flag, and whether the flag can be enabled for a Playwright-launched browser, is unverified.
 - Environment-limited failures (no WebMCP support in the test browser) must be reported as such, never as passing coverage.
 
 Tests to add, each with normal, denial, boundary, and retry cases:

@@ -284,7 +284,7 @@ Implemented today (tests exist in the repository for the first four items and we
 
 - Two pages: `/` rendering `WorkspaceShell` (`frontend/src/app/(user)/page.tsx`) and `/console`, a static placeholder (`frontend/src/app/console/page.tsx`).
 - `HealthCard` (`frontend/src/components/HealthCard.tsx`) calls `GET /core/health/` and `GET /agent/health/` through the axios instances in `frontend/src/lib/api.ts` and shows connection badges and JSON.
-- One frontend Playwright test (`frontend/tests/visual/home.spec.ts`) covering both pages.
+- One frontend Playwright scenario (`frontend/tests/visual/home.spec.ts`) covering both pages, plus two browserless Proxy tests (`frontend/tests/visual/proxy.spec.ts`), all run in four projects; [TESTING.md](TESTING.md) keeps the inventory. (Updated 2026-10-10.)
 - Backend health endpoints, ASGI composition, `DATABASE_URL` parsing, and the S3-compatible storage backend, as described in [ARCHITECTURE.md](ARCHITECTURE.md).
 - A lazy Playwright factory, `playwright_runtime()` in `backend/agent/runtime/browser/playwright.py`, that does not launch a browser. No test exercises this factory.
 

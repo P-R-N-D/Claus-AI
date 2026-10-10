@@ -43,3 +43,20 @@ Record the report's wheel filenames, tags, SHA-256 values, trusted URLs and runt
 Other platforms: this lock has been installed only on Linux x86-64. [Platform and accelerator lanes](../../docs/DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes) records static, unexecuted evidence for the rest. Linux arm64 (glibc), including NVIDIA DGX Spark and WSL2 on Windows on Arm, and macOS 15 or later on Apple Silicon are statically resolvable: every pin has a hashed wheel for them. Using this lock there is an unqualified local-development shortcut; qualifying such a platform needs its own separately named lock. Native Windows cannot produce a working environment from it: on Windows x64 it installs without `tzdata`, which Django and psycopg require on Windows, and on Windows on Arm devices such as NVIDIA RTX Spark or Qualcomm Snapdragon PCs the install fails because `autobahn`, `cryptography` and `psycopg-binary` have no `win_arm64` wheels; use WSL2 there. macOS 14 or older, Intel Macs and musl (Alpine) are not binary-installable. The graph contains no CUDA or other accelerator-specific package. Statically resolvable is not qualified; a platform counts as checked only after its own installation and application checks.
 
 For another Python minor, free-threaded ABI, OS, CPU or libc, resolve from the input into a separately named lock and run its own installation, application and artifact checks. Do not reuse this manifest as support evidence. Python 3.15/3.15t remains unqualified; see [DEPENDENCY-STRATEGY.md](../../docs/DEPENDENCY-STRATEGY.md).
+
+## Integrated test lock
+
+`cp312-linux-x86_64-test.txt` (added 2026-10-10) is the environment for running the backend tests with pytest. It resolves `../requirements.txt` and `../requirements-test.txt` together, constrained by `cp312-linux-x86_64.txt`, so it contains the backend lock's 50 pins with identical versions and hashes plus 5 test-only packages: pytest 9.1.1, pytest-django 4.14.0, pluggy 1.6.0, iniconfig 2.3.1 and Pygments 2.21.0 (packaging 26.3, which pytest also needs, is already in the backend lock). It was generated with **uv 0.12.24** for the same CPython **3.12.15** and `x86_64-manylinux_2_31` target and is Linux x86-64 only: on Windows, pytest also needs `colorama`, which is not in the lock. The backend lock is unchanged and remains the application baseline; install the test lock only where the tests run.
+
+```bash
+uv pip compile backend/requirements.txt backend/requirements-test.txt \
+  -c backend/locks/cp312-linux-x86_64.txt \
+  --python-version 3.12.15 \
+  --python-platform x86_64-manylinux_2_31 \
+  --generate-hashes --only-binary :all: \
+  --output-file backend/locks/cp312-linux-x86_64-test.txt \
+  --index-url https://pypi.org/simple --no-emit-index-url
+python scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt
+```
+
+Regenerate it whenever the backend lock changes, in the same change, and apply the same release-freshness rule. `scripts/ci/check_test_lock.py` (standard library only) fails when a backend lock package is missing from the test lock or has another version or hash set, or when a package only in the test lock is pulled in by anything other than `requirements-test.txt` and its dependencies; CI runs it in the pytest job. No artifact manifest was recorded for the five test packages; they are pure-Python wheels.

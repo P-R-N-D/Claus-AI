@@ -42,6 +42,15 @@ Do not use `--force`, `--legacy-peer-deps`, disabled certificate checks, renamed
 
 Several pins were published within days of the update: pycparser 3.11 about an hour before commit 05ad991, FastAPI 0.143.0 and Pydantic 2.14.0 on 2026-10-08, and on npm Next 16.4.0 on 2026-10-06 and `@playwright/test` 1.64.0 on 2026-10-07. This batch recorded no freshness review for them. From the next batch, a release younger than 7 days at selection time gets a recorded freshness and provenance review (publisher, available provenance or attestation, changelog, and changed install scripts or native artifacts), unless the project adopts a cooldown instead, for example uv `--exclude-newer` with per-package exemptions for security releases. npm's `min-release-age` would need a repository `.npmrc` and is a separate decision. A security release is reviewed, not delayed: never lower a security floor to satisfy a cooldown.
 
+(Added 2026-10-10.) The first batch under that rule is the set of GitHub Actions that `.github/workflows/ci.yml` pins, selected on 2026-10-10. The toolchain the workflow installs (uv 0.12.24, CPython 3.12.15, Node 24.21.0, npm 11.21.0) is the existing baseline, not a new selection. Each action runs the `dist/` bundle committed at its pinned commit, so no install script runs on the runner. Each commit was resolved from its tag with `git ls-remote`, has a `gpgsig` header and the committer `GitHub <noreply@github.com>`; the signatures were not verified here, and no release attestation was checked.
+
+| Action | Release, commit | Published | Publisher | Changes from the previous release, and why this release |
+|---|---|---|---|---|
+| `actions/checkout` | v7.0.1, `3d3c42e5` | 2026-07-17 | GitHub (`actions`) | Older than 7 days at selection; no review needed. |
+| `astral-sh/setup-uv` | v10.3.0, `1c37ad07` | 2026-10-09 | Astral (`astral-sh`) | From v10.2.0 (2026-09-21): embedded checksums for uv 0.12.18 through 0.13.0, and a `python-arch` input this workflow does not set. Kept because only v10.3.0 embeds the checksum of uv 0.12.24; v10.2.0 would check that download against the versions manifest it fetches instead. |
+| `actions/setup-node` | v7.1.0, `949feb24` | 2026-10-07 | GitHub (`actions`) | From v7.0.0 (2026-07-13): a `brace-expansion` 5.0.12 override whose commit cites GHSA-3jxr-9vmj-r5cp, `@actions/cache` 6.1.0 to 6.3.0, a new `smol-toml` dependency for `mise.toml` support, absolute `node-version-file` paths, Node version validation with manifest fetch retry, and development dependency bumps. Kept for the advisory fix. |
+| `actions/upload-artifact` | v7.0.2, `cf430e03` | 2026-10-07 | GitHub (`actions`) | From v7.0.1 (2026-04-10): `@actions/artifact` 6.2.0 to 6.3.1 and the rebuilt bundle. Kept as the current patch release; v7.0.1 is the fallback if it misbehaves. |
+
 ### Reproducibility
 
 - Keep npm's manifest and lock in the same update and verify with `npm ci` in a fresh environment. Review resolved URLs, integrity values, lifecycle scripts, and unexpected graph changes.

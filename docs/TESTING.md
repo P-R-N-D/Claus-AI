@@ -4,25 +4,28 @@ This document separates checks for the current runnable scaffold from future fea
 
 ## Tests that exist today
 
-The repository contains these automated tests. Their existence is a fact; whether they pass must be shown by running them and citing the output.
+The repository contains these automated tests. Their existence is a fact; whether they pass must be shown by running them and citing the output. The backend has 23 test methods (`python manage.py test core agent`). The frontend has 12 Playwright tests: one `home.spec.ts` scenario and two `proxy.spec.ts` tests, each run in four projects.
 
 | Location | What it covers |
 |---|---|
-| `backend/core/tests.py` | `GET /core/health/` returns 200 and the expected JSON. |
+| `backend/core/tests.py` | `GET /core/health/` returns 200 and the expected JSON. `CorsPreflightTests` (2 methods): a preflight from the allowed origin `http://127.0.0.1:3000` receives `Access-Control-Allow-Origin`, `GET` in `Access-Control-Allow-Methods`, and no credentials header; one from a disallowed origin still gets 200, because django-cors-headers answers every preflight, but no CORS headers. |
 | `backend/core/test_database.py` | `DATABASE_URL` parsing: SQLite fallback for unset/blank values, PostgreSQL URL parsing with percent-decoding and query preservation, `postgres` alias and default port, nine invalid URLs rejected with `ImproperlyConfigured`; `SECRET_KEY` placeholder fallback. |
 | `backend/core/test_storage.py` | `S3CompatibleStorage` contract against a fake S3 client: default backend wiring, save/open/exists/size/delete/url, binary-only reads, content type handling, collision retry (including `max_length` and concurrent saves), no implicit overwrite, missing-object errors, dangerous object names rejected, lazy and clear configuration errors, path-style SigV4 client, endpoint validation. Not an integration test against a real object store. |
-| `backend/agent/tests.py` | ASGI routing through `config.asgi.application`: `/core/health/`, `/agent/health/`, `/agent/openapi.json` are 200; `/api/health/` is 404. |
-| `frontend/tests/visual/home.spec.ts` | One scenario in four Chromium projects (desktop/mobile × light/dark): health/OpenAPI proxy URLs return 200 without redirects; UI trailing-slash redirects preserve query parameters and do not exempt similar non-backend prefixes; FastAPI docs retain their own 307 redirect; `/` and `/console` render, including navigation through `/console/`; both health cards show their expected JSON and retry successfully; no horizontal page overflow, console/page errors, failed requests, or HTTP errors. Saves a full-page screenshot of each surface. |
+| `backend/agent/tests.py` | ASGI routing through `config.asgi.application`: `/core/health/`, `/agent/health/`, `/agent/openapi.json` are 200; `/api/health/` is 404. `test_agent_slash_mismatch_is_404_without_redirect`: `/agent/health`, `/agent/docs/`, `/agent/redoc/`, and `/agent/openapi.json/` return 404 with no `Location` header, while `/agent/docs` returns 200. |
+| `frontend/tests/visual/home.spec.ts` | One scenario in four Chromium projects (desktop/mobile × light/dark), through the Next.js server: `/core/health/`, `/agent/health/`, and `/agent/openapi.json` return 200 without redirects; `/console/`, `/core-ui/`, and `/agent-ui/` return a 308 to the slashless path with the query preserved; `//evil.example/` (Next's own repeated-slash 308, before the Proxy) and `/%2F%2Fevil.example/` (the Proxy's trailing-slash 308) return a 308 whose `Location` stays on the frontend origin, kept as a canary; `/agent/docs` returns 200, while `/agent/docs/` and `/agent/health` return 404 with no `Location`; `/core/health` returns Django's 301 to `/core/health/` on the same origin with the query preserved; `POST /_next/mcp` returns 404. `/` and `/console` render, including navigation through `/console/`; both health cards show their expected JSON; during a retry with the Core request held, Retry is disabled with `aria-busy="true"`, and afterwards both cards show Connected and Retry is enabled again. Horizontal overflow is measured as `documentElement.scrollWidth - documentElement.clientWidth`, and a self-check injects a double-width element to prove the measurement can fail in each project. No console/page errors, failed requests, or HTTP errors. Saves `home.png`, `home-retrying.png`, and `console.png`. |
+| `frontend/tests/visual/proxy.spec.ts` | Two browserless tests, run in each of the four projects. Direct `proxy(new NextRequest(...))` calls: `//evil.example/`, `///evil.example/x/`, and `/console/?view=tasks&filter=a%2Fb` return a 308 to the request's own origin with a non-scheme-relative path and the query preserved; `/`, `/console`, and `/core/health/` are not redirected. Matcher checks through Next's version-pinned `unstable_doesMiddlewareMatch` helper (recheck when Next is upgraded): `/core/health/`, `/agent/docs/`, and `/_next/static/chunk.js` bypass the Proxy; `/core-ui/`, `/agent-ui/`, `/console/`, and `/` reach it. |
 
 No test covers authentication, authorization, scope separation, approval, Tasks, retrieval, Browser sessions, realtime, i18n, or WebMCP, because none of those features exist.
 
 ## Current scaffold checks
 
-The checked backend baseline is Django 6.1 on CPython 3.12.15, Linux x86-64. Use uv 0.12.24 and the matching hash lock; [backend/locks/README.md](../backend/locks/README.md) describes regeneration, artifact evidence, and other-platform limits.
+The checked backend baseline is Django 6.1 on CPython 3.12.15, Linux x86-64. Use uv 0.12.24 and the matching hash lock; [backend/locks/README.md](../backend/locks/README.md) describes regeneration, artifact evidence, and other-platform limits. Which other platforms the lock can serve is in [Platform and accelerator lanes](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes): Linux arm64 (glibc) and macOS 15 or later on Apple Silicon are statically resolvable but have not been run, and native Windows, x64 or Arm, cannot produce a working environment from the lock today, so on Windows run these commands in WSL2 (Ubuntu). `--managed-python` makes uv use its python-build-standalone CPython rather than a system interpreter, whose SQLite can be older than Django 6.1's 3.37.0 floor. Record `python -VV` and `sys.executable` with the results.
 
 ```bash
-uv venv --python 3.12.15
+# Linux, macOS, or WSL2 (POSIX shell), from the repository root
+uv venv --managed-python --python 3.12.15
 source .venv/bin/activate
+python -c "import sqlite3; print(sqlite3.sqlite_version)"  # must print 3.37.0 or newer
 uv pip sync --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64.txt
 python backend/manage.py check
 
@@ -31,7 +34,9 @@ python manage.py test core agent
 python manage.py makemigrations --check --dry-run
 ```
 
-The ASGI integration tests must exercise `config.asgi.application`, including `/core/health/`, `/agent/health/`, `/agent/openapi.json`, and the removed `/api/health/` route.
+In Windows PowerShell the environment is activated with `.venv\Scripts\Activate.ps1` instead of `source .venv/bin/activate`, and the other commands are unchanged. Native Windows cannot produce a working environment from this Linux-resolved lock until a Windows lane exists: on Windows x64 the sync installs without `tzdata`, which Django and psycopg require on Windows, so `uv pip check` and time-zone handling fail; on Windows on Arm the sync itself fails because the pinned `autobahn`, `cryptography`, and `psycopg-binary` releases have no `win_arm64` wheels. Use WSL2 (Ubuntu) instead.
+
+The ASGI integration tests must exercise `config.asgi.application`, including `/core/health/`, `/agent/health/`, `/agent/openapi.json`, the removed `/api/health/` route, and wrong-slash `/agent/*` paths, which must return 404 without a `Location` header.
 
 Verify both server entrypoints independently:
 
@@ -41,7 +46,7 @@ python manage.py runserver 127.0.0.1:8000 --noreload
 uvicorn config.asgi:application --host 127.0.0.1 --port 8000
 ```
 
-For each server, verify `/core/health/`, `/agent/health/`, `/agent/docs`, `/agent/openapi.json`, `/agent/redoc` (FastAPI's default, not set in code), and `/admin/`; `/api/health/` must remain absent.
+For each server, verify `/core/health/`, `/agent/health/`, `/agent/docs`, `/agent/openapi.json`, `/agent/redoc` (FastAPI's default, not set in code), and `/admin/`; `/api/health/` must remain absent, and `/agent/health` and `/agent/docs/` must return 404 without a redirect.
 
 Python Playwright package installation and the Chromium binary lifecycle are separate:
 
@@ -57,10 +62,19 @@ npm ci
 npx playwright install chromium
 npm run lint
 npm run build
-npm run test:visual
+CI=1 npm run test:visual
+CI=1 PLAYWRIGHT_NEXT_SERVER=production npm run test:visual
 ```
 
-Use Node 24.21.0 and npm 11.21.0, and activate the backend environment in the terminal that starts Playwright: its web-server command invokes `python`. Playwright starts the local servers unless they are already running outside CI. The four projects check desktop/mobile widths, light/dark rendering, retries, horizontal overflow, and network/page/console failures. Inspect the saved screenshots for clipping and visual regressions; accessibility and pixel-diff baselines remain unimplemented.
+Use Node 24.21.0 and npm 11.21.0. Node 24.21.0 bundles npm 11.19.0 and the `engines` pin only warns (`EBADENGINE`), so install npm 11.21.0 explicitly (`npm install --global npm@11.21.0`). Activate the backend environment in the terminal that starts Playwright: its web-server command invokes `python`.
+
+`PLAYWRIGHT_NEXT_SERVER` selects the Next.js server. Unset or `dev`, the default, runs `npm run dev`; `production` runs `npm run build` and then `next start` on 127.0.0.1:3000 and never reuses a running backend or Next.js server, so the result describes the current checkout (it fails if either port is already in use); any other value is an error. In dev mode outside CI, Playwright reuses a backend or `next dev` server already listening on its port, which may be serving other code. For evidence runs, set `CI=1`, which disables reuse of both servers, and record the server mode. In PowerShell, set the variables before the command, for example `$env:CI = "1"` and `$env:PLAYWRIGHT_NEXT_SERVER = "production"`, then run `npm run test:visual`. Both variables are listed empty in `.env.example` for reference; Playwright does not load that file. `npm run dev` binds to 127.0.0.1; use `npm run dev -- --hostname 0.0.0.0` only deliberately, for example to test from a phone on the local network.
+
+The four projects check desktop/mobile widths, light/dark rendering, retries, horizontal overflow (with a self-check that the measurement can fail), the redirect and 404 contracts, and network/page/console failures. Inspect the saved screenshots for clipping and visual regressions; accessibility and pixel-diff baselines remain unimplemented.
+
+`frontend/next-env.d.ts` is generated and not tracked. On a fresh clone, run `npx next typegen` (or `npm run dev` or `npm run build`) after `npm ci` and before `npx tsc --noEmit` or editor type checking.
+
+On Linux arm64, Playwright supports Chromium on Ubuntu 22.04, 24.04, and 26.04 and Debian 12 and 13; the Google Chrome channel is not available there. On native Windows on Arm, Playwright ships only x64 browsers, which run under Prism emulation ([microsoft/playwright#40202](https://github.com/microsoft/playwright/issues/40202)); such a run is emulated-browser evidence, not native Arm evidence. Native Windows also cannot produce the working backend environment that Playwright's backend web server needs (see above); WSL2 avoids both limits. None of these platforms has been run for this baseline.
 
 The default browser is the binary paired with `@playwright/test`. If its download is unavailable, `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/absolute/path/to/chromium` explicitly selects a separately installed browser. Record its version and the failed download; that run is supplemental UI evidence, not qualification of Playwright's paired browser. Environment-limited failures must never be reported as passing. The dated results and remaining checks are in [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md#applied-baseline-and-verification).
 
@@ -137,11 +151,11 @@ The architecture already requires free-threading compatibility. [DEPENDENCY-STRA
 
 When a suitable environment and dependency set are available:
 
-- Use separate environments for the qualified baseline, regular `cp315`, and free-threaded `cp315t`, with each lane's resolved lock, platform artifacts, and installer versions recorded.
+- Use separate environments for the existing CPython 3.12 lane, regular `cp315`, and free-threaded `cp315t`, with each lane's resolved lock, platform (OS, CPU, libc, and accelerator, if any), artifacts, and installer versions recorded. Each platform lane in [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes) qualifies separately.
 - Check actual supported wheel tags and binary-only installation, including `abi3t` and dual `abi3.abi3t` wheels. A cross-version resolver probe or `py3-none-any` wheel is not runtime/thread-safety evidence.
 - Verify `Py_GIL_DISABLED` and actual GIL state before and after imports, lazy initialization, and workloads; detect automatic GIL re-enablement instead of masking it with a forced-off flag.
 - Run the existing backend checks and both ASGI server entrypoints on each candidate. Exercise concurrency, cancellation, GC/shutdown, storage collisions, and context propagation; database and real object-storage/browser integrations need separate environments and evidence.
-- Compare Limited API versus version-specific artifacts on the same runtime separately from regular-versus-free-threaded runtime performance. Apply the strategy's workload, repetition, latency, throughput, and memory criteria.
+- Compare Limited API versus version-specific artifacts on the same runtime separately from regular-versus-free-threaded runtime performance. Apply each budget to the comparison defined for it in [Performance admission](DEPENDENCY-STRATEGY.md#performance-admission), with the strategy's workloads, thread counts, repetitions, median decision statistic, and absolute limits; the regular-versus-free-threaded runtime comparison has its own pass rule instead of the relative ABI budgets. A comparison with the CPython 3.12 lane is a separate interpreter-migration measurement, not an admission baseline.
 - Preserve the known-good GIL-enabled fallback and record failed or unavailable lanes. No synthetic tag check, wheel inventory, or benchmark of only health endpoints qualifies the full stack.
 
 ## Security-negative testing

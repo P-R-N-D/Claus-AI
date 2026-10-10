@@ -17,7 +17,7 @@ The primary collaboration direction is topic- and thread-based rather than chat-
 ## Current application scaffold
 
 - Frontend: Next.js user UI at `/`, product Console at `/console` (reserved as the `/console/*` surface; only the index page exists today), React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright tests.
-- Backend: Django 6.1 using one Django project (`config`) with Django apps `core` and `agent`. The checked Linux x86-64 baseline is CPython 3.12.15; other Python/ABI/platform combinations need separate qualification.
+- Backend: Django 6.1 using one Django project (`config`) with Django apps `core` and `agent`. The checked lane is CPython 3.12.15 on Linux x86-64. Other lanes, including Linux arm64, Windows on Arm, macOS, and Arm devices with or without CUDA, have static evidence only or are unsupported; see [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes) "Platform and accelerator lanes". Every other Python/ABI/platform combination needs separate qualification.
 - `/core/*`: Django REST Framework control-plane APIs; `/agent/*`: Agent FastAPI; `/admin/*`: Django Admin.
 - `config.asgi.application` composes Django and FastAPI and is served by both Daphne-backed `manage.py runserver` and direct Uvicorn.
 - `config/database.py` builds the Django database setting from `DATABASE_URL` (PostgreSQL only, strict parsing) and falls back to SQLite when it is unset or blank.
@@ -32,7 +32,7 @@ Implemented today, each with tests in the repository: the health APIs, the ASGI 
 - [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) describes the project architecture direction and current scaffold boundaries.
 - [`docs/STATE-SCHEMA.md`](STATE-SCHEMA.md) describes conceptual collaboration and runtime state shapes. It is not a database schema.
 - [`docs/TESTING.md`](TESTING.md) describes testing strategy, the checks that exist today, and the verification still required.
-- [`docs/DEPENDENCY-STRATEGY.md`](DEPENDENCY-STRATEGY.md) records the applied dependency baseline, compatibility exceptions and residual advisories, and the Python 3.15 Limited API/`abi3t` qualification and performance plan. It builds on the existing free-threading direction; the baseline update does not qualify 3.15/3.15t.
+- [`docs/DEPENDENCY-STRATEGY.md`](DEPENDENCY-STRATEGY.md) records the applied dependency baseline, compatibility exceptions and residual advisories, platform and accelerator lanes, and the Python 3.15 Limited API/`abi3t` qualification and performance plan. It builds on the existing free-threading direction; the baseline update does not qualify 3.15/3.15t.
 - [`docs/SECURITY-ARCHITECTURE.md`](SECURITY-ARCHITECTURE.md) defines trust boundaries and the `SEC-*` security requirements, with the current implementation facts. It is the only place those requirement IDs are defined.
 - [`docs/CODE-REVIEW.md`](CODE-REVIEW.md) defines how a coding agent independently reviews an actual code change and reports findings.
 - [`docs/SECURITY-REVIEW.md`](SECURITY-REVIEW.md) defines the security review procedure for changed code, reusing the `SEC-*` IDs.
@@ -50,7 +50,7 @@ Read this file first. Then read only the documents that match the work; do not r
 | Any change to repository structure, routing, or runtime boundaries | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Work that touches collaboration, Task, Artifact, Knowledge, or presentation state | [STATE-SCHEMA.md](STATE-SCHEMA.md) |
 | Before claiming anything is tested, and when adding tests | [TESTING.md](TESTING.md) |
-| Dependency, interpreter, native wheel/ABI, or packaging-tool updates | [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md), then [TESTING.md](TESTING.md) |
+| Dependency, interpreter, native wheel/ABI, platform or accelerator, or packaging-tool updates | [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md), then [TESTING.md](TESTING.md) |
 | Reviewing a code change (yours or another agent's) | [CODE-REVIEW.md](CODE-REVIEW.md) |
 | Creating or editing a GitHub issue or pull request at the user's explicit request or a supported delegation | [GitHub issues and pull requests](#github-issues-and-pull-requests) below, then the matching template in [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE/) or [`.github/pull_request_template.md`](../.github/pull_request_template.md) |
 | Changes to auth, permissions, scopes, files/storage, retrieval, tools, runtimes, approvals, secrets, logging, agent-originated actions, external content handling, or locale input handling | [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md), then [SECURITY-REVIEW.md](SECURITY-REVIEW.md) |

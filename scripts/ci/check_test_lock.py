@@ -8,12 +8,24 @@ another test-only package (read from uv's "# via" annotations). So the tests
 run against the graph that the backend lock installs, and a package that the
 backend lock dropped or never received cannot hide in the test lock.
 
-Usage, from the repository root (standard library only):
-    python scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt
+It also reads the two requirement inputs: every requirement in
+requirements.txt must be pinned in the backend lock, and every requirement in
+requirements-test.txt in the test lock, at a version its specifier allows, and
+neither lock may keep a direct requirement its input no longer lists. An input
+changed without regenerating its lock therefore fails.
+
+Usage, from the repository root, in the test lock environment (it needs only
+the standard library and `packaging`, which both locks pin):
+    python scripts/ci/check_test_lock.py \
+        backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt \
+        backend/requirements.txt backend/requirements-test.txt
 """
 
+import os
 import re
 import sys
+
+from packaging.requirements import InvalidRequirement, Requirement
 
 REQUIREMENT = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)\s*\\?$")
 HASH = re.compile(r"^\s+--hash=(sha256:[0-9a-f]{64})\s*\\?$")
@@ -81,13 +93,50 @@ def is_test_input(entry):
     return entry.startswith("-r ") and entry.endswith("requirements-test.txt")
 
 
-def main(argv):
-    if len(argv) != 3:
-        sys.exit(__doc__)
-    base_path, test_path = argv[1], argv[2]
-    base, _ = parse_lock(base_path)
-    test, test_parents = parse_lock(test_path)
+def check_inputs(path, lock, parents, lock_path):
+    """Return problems where the requirements in `path` and the lock's direct entries for it disagree."""
     problems = []
+    names = set()
+    with open(path, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            text = line.split("#", 1)[0].strip()
+            if not text:
+                continue
+            try:
+                requirement = Requirement(text)
+            except InvalidRequirement as error:
+                sys.exit(f"{path}:{number}: unsupported requirement line: {text} ({error})")
+            name = normalize(requirement.name)
+            names.add(name)
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                continue
+            if name not in lock:
+                problems.append(f"{path}:{number}: {requirement} is not pinned in {lock_path}; regenerate the lock")
+            elif not requirement.specifier.contains(lock[name][0], prereleases=True):
+                problems.append(
+                    f"{path}:{number}: {requirement} does not allow {name}=={lock[name][0]} pinned in {lock_path}; "
+                    "regenerate the lock"
+                )
+    if not names:
+        sys.exit(f"{path}: no requirements found")
+    input_name = os.path.basename(path)
+    for name in sorted(lock.keys() - names):
+        if any(entry.startswith("-r ") and os.path.basename(entry[3:]) == input_name for entry in parents[name]):
+            problems.append(
+                f"{name}=={lock[name][0]} is a direct requirement of {input_name} in {lock_path}, "
+                f"but {path} no longer lists it; regenerate the lock"
+            )
+    return problems
+
+
+def main(argv):
+    if len(argv) != 5:
+        sys.exit(__doc__)
+    base_path, test_path, base_input, test_input = argv[1:]
+    base, base_parents = parse_lock(base_path)
+    test, test_parents = parse_lock(test_path)
+    problems = check_inputs(base_input, base, base_parents, base_path)
+    problems += check_inputs(test_input, test, test_parents, test_path)
     for name, (version, hashes) in sorted(base.items()):
         if name not in test:
             problems.append(f"{name}=={version} is missing from {test_path}")
@@ -118,7 +167,8 @@ def main(argv):
         return 1
     print(
         f"All {len(base)} backend lock pins appear in the test lock with identical versions and hashes, "
-        f"and the {len(test_only)} test-only packages come only from requirements-test.txt."
+        f"the {len(test_only)} test-only packages come only from requirements-test.txt, "
+        "and both locks satisfy their requirement inputs."
     )
     return 0
 

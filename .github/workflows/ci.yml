@@ -167,8 +167,8 @@ jobs:
           python -VV
           python -m pytest --version
           test "$(python -c 'import platform; print(platform.python_version())')" = 3.12.15
-      - name: Check the test lock against the backend lock
-        run: python scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt
+      - name: Check the test lock against the backend lock and both inputs
+        run: python scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt backend/requirements.txt backend/requirements-test.txt
       - name: Check that pytest and Django collect the same tests
         working-directory: backend
         run: python ../scripts/ci/check_test_parity.py

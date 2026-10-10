@@ -56,7 +56,7 @@ uv pip compile backend/requirements.txt backend/requirements-test.txt \
   --generate-hashes --only-binary :all: \
   --output-file backend/locks/cp312-linux-x86_64-test.txt \
   --index-url https://pypi.org/simple --no-emit-index-url
-python scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt
+python scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt backend/requirements.txt backend/requirements-test.txt
 ```
 
-Regenerate it whenever the backend lock changes, in the same change, and apply the same release-freshness rule. `scripts/ci/check_test_lock.py` (standard library only) fails when a backend lock package is missing from the test lock or has another version or hash set, or when a package only in the test lock is pulled in by anything other than `requirements-test.txt` and its dependencies; CI runs it in the pytest job. No artifact manifest was recorded for the five test packages; they are pure-Python wheels.
+Regenerate it whenever the backend lock changes, in the same change, and apply the same release-freshness rule. `scripts/ci/check_test_lock.py` (standard library plus `packaging`, which both locks pin; run it in the test lock environment) fails when a backend lock package is missing from the test lock or has another version or hash set, when a package only in the test lock is pulled in by anything other than `requirements-test.txt` and its dependencies, or when either requirement input and its lock disagree (a package not pinned at an allowed version, or a direct requirement the input no longer lists); CI runs it in the pytest job. No artifact manifest was recorded for the five test packages; they are pure-Python wheels.

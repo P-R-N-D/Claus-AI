@@ -13,14 +13,17 @@ unless all of the following hold:
 3. Every package only in the test lock is pulled in, per uv's "# via"
    annotations, only by requirements-test.txt or by another test-only package.
 4. Each requirement input holds only named requirements, with optional extras,
-   version specifiers and markers: no direct URL, path, archive file name,
-   editable or option line. Every marker, in an input or in the metadata of a
-   package the walk in rule 6 reads, uses only the forms listed at
-   STRING_VARIABLES below, which packaging and uv evaluate alike.
+   version specifiers and markers, in printable ASCII without backslashes and
+   with no run of 19 or more digits: no direct URL, path, archive file name,
+   editable or option line. No dependency the walk in rule 6 reads from package
+   metadata has a backslash, and every marker, in an input or in that metadata,
+   uses only the forms listed at STRING_VARIABLES below, which packaging and uv
+   evaluate alike.
 5. For each lock and each of its inputs: every requirement whose marker holds on
    the target is pinned at a version its specifier allows and is recorded as a
    direct requirement of that input, and nothing else is recorded as one. A
-   requirement whose marker does not hold on the target counts as absent.
+   requirement whose marker does not hold on the target counts as absent. No
+   lock records a direct requirement of a file that is not one of its inputs.
 6. Every package the locks pin is installed in the running environment at the
    test lock's version, and following the installed packages' Requires-Dist
    metadata from each lock's inputs, with the requested extras and with markers
@@ -63,8 +66,12 @@ VIA_INLINE = re.compile(r"^\s+# via (\S.*)$")
 VIA_START = re.compile(r"^\s+# via$")
 VIA_ITEM = re.compile(r"^\s+#   (\S.*)$")
 COMMAND = re.compile(r"^#\s+uv pip compile\s")
-# pip's rule: "#" starts a comment at the start of a line or after whitespace.
-COMMENT = re.compile(r"(^|\s+)#.*$")
+# "#" starts a comment at the start of a line or after a space or tab, as in uv (pip also accepts other
+# whitespace, which uv rejects).
+COMMENT = re.compile(r"(^|[ \t]+)#.*$")
+# uv cannot read a number this long; packaging can.
+LONG_NUMBER = re.compile(r"[0-9]{19}")
+EXTRA_NAME = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")
 # pip reads a requirement name ending in most of these as a local file, and uv 0.12.24 one ending in
 # .whl, .zip, .tar.gz, .tgz or .tar; the check rejects them all.
 ARCHIVE = re.compile(r"\.(whl|zip|tar|tgz|tbz2?|txz|tlz|tar\.(gz|bz2|xz|lz|lzma|zst))$", re.IGNORECASE)
@@ -75,10 +82,12 @@ ARCHIVE = re.compile(r"\.(whl|zip|tar|tgz|tbz2?|txz|tlz|tar\.(gz|bz2|xz|lz|lzma|
 # comparisons of a variable on the left with a quoted value on the right, where
 # the variable is one of STRING_VARIABLES compared with == or !=, or one of
 # VERSION_VARIABLES compared with ==, !=, <, <=, > or >= to a plain release
-# such as "3.12". The two disagree on other forms, such as `in`, `~=`, `===`,
-# `platform_release`, a version with "*" or a local part, or `extra` in a
-# requirements file, so those fail. Package metadata may also use
-# `extra == "<name>"`.
+# such as "3.12" with segments of at most 18 digits. The two disagree on other
+# forms, such as `in`, `platform_release`, a version with "*" or a local part, a
+# segment uv cannot read (2**64 - 1 or more), or `extra` in a requirements file, or
+# one of them rejects the marker, so those fail. packaging also reads backslash
+# escapes in quoted values and uv does not, so a backslash fails before this
+# check. Package metadata may also use `extra == "<name>"`.
 STRING_VARIABLES = frozenset(
     {
         "implementation_name",
@@ -90,7 +99,7 @@ STRING_VARIABLES = frozenset(
     }
 )
 VERSION_VARIABLES = frozenset({"python_full_version", "python_version"})
-PLAIN_RELEASE = re.compile(r"^[0-9]+(\.[0-9]+)*$")
+PLAIN_RELEASE = re.compile(r"[0-9]{1,18}(\.[0-9]{1,18})*")
 MARKER_TOKEN = re.compile(
     r"""\s*(?:([()])|(and|or)(?![\w.])|([A-Za-z_][\w.]*)|(==|!=|<=|>=|<|>)(?!=)|"([^"]*)"|'([^']*)')"""
 )
@@ -152,9 +161,9 @@ def unsupported_marker(marker, metadata=False):
         if variable in STRING_VARIABLES:
             supported = operator in ("==", "!=")
         elif variable in VERSION_VARIABLES:
-            supported = PLAIN_RELEASE.match(value) is not None
+            supported = PLAIN_RELEASE.fullmatch(value) is not None
         else:
-            supported = metadata and variable == "extra" and operator == "=="
+            supported = metadata and variable == "extra" and operator == "==" and EXTRA_NAME.fullmatch(value)
         if not supported:
             return f"unsupported comparison {variable} {operator} {value!r}"
     return None
@@ -234,37 +243,51 @@ def parse_lock(path):
 def read_input(path):
     """Return [(line number, Requirement)] for `path`, failing on any line that is not a named requirement."""
     requirements = []
-    with open(path, encoding="utf-8") as handle:
-        for number, line in enumerate(handle, start=1):
-            text = COMMENT.sub("", line).strip()
-            if not text:
-                continue
-            try:
-                requirement = Requirement(text)
-            except InvalidRequirement as error:
-                fail(f"{path}:{number}: unsupported requirement line: {text} ({error})")
-            if requirement.url:
-                fail(
-                    f"{path}:{number}: direct URL requirements are not supported, because the locks pin "
-                    f"only index releases by version and hash: {text}"
-                )
-            if ARCHIVE.search(requirement.name):
-                fail(f"{path}:{number}: unsupported requirement line: {text} (pip and uv read it as a local file)")
+    try:
+        with open(path, encoding="utf-8-sig") as handle:
+            lines = list(handle)
+    except UnicodeDecodeError as error:
+        fail(f"{path}: not UTF-8 text ({error})")
+    for number, line in enumerate(lines, start=1):
+        text = COMMENT.sub("", line).strip(" \t\n")
+        if not text:
+            continue
+        if "\\" in text or not all(char == "\t" or " " <= char <= "~" for char in text):
+            fail(
+                f"{path}:{number}: unsupported requirement line: {text!r} (only printable ASCII without backslashes "
+                "is supported, because packaging and uv read escapes and other characters differently)"
+            )
+        if LONG_NUMBER.search(text):
+            fail(f"{path}:{number}: unsupported requirement line: {text} (uv cannot read numbers this long)")
+        try:
+            requirement = Requirement(text)
             reason = None if requirement.marker is None else unsupported_marker(requirement.marker)
-            if reason:
-                fail(
-                    f"{path}:{number}: unsupported marker in {text}: {reason}; this check accepts only the marker "
-                    "forms that packaging and uv evaluate alike"
-                )
-            requirements.append((number, requirement))
+        except (InvalidRequirement, RecursionError) as error:
+            fail(f"{path}:{number}: unsupported requirement line: {text} ({error})")
+        if requirement.url:
+            fail(
+                f"{path}:{number}: direct URL requirements are not supported, because the locks pin "
+                f"only index releases by version and hash: {text}"
+            )
+        if ARCHIVE.search(requirement.name):
+            fail(f"{path}:{number}: unsupported requirement line: {text} (pip and uv read it as a local file)")
+        if reason:
+            fail(
+                f"{path}:{number}: unsupported marker in {text}: {reason}; this check accepts only the marker "
+                "forms that packaging and uv evaluate alike"
+            )
+        requirements.append((number, requirement))
     if not requirements:
         fail(f"{path}: no requirements found")
     return requirements
 
 
-def is_direct(entry, input_name):
-    """Return whether a "# via" entry records a direct requirement of the input file named `input_name`."""
-    return entry.startswith("-r ") and os.path.basename(entry[3:]) == input_name
+def is_direct(entry, input_path):
+    """Return whether a "# via" entry records a direct requirement of the input file at `input_path`.
+
+    uv records the path as given on its command line, relative to the repository root, where this check runs.
+    """
+    return entry.startswith("-r ") and os.path.normpath(entry[3:]) == os.path.normpath(os.path.relpath(input_path))
 
 
 def check_input(path, requirements, lock, parents, lock_path):
@@ -284,13 +307,13 @@ def check_input(path, requirements, lock, parents, lock_path):
                 f"{path}:{number}: {requirement} does not allow {name}=={lock[name][0]} pinned in {lock_path}; "
                 "regenerate the lock"
             )
-        elif not any(is_direct(entry, input_name) for entry in parents[name]):
+        elif not any(is_direct(entry, path) for entry in parents[name]):
             problems.append(
                 f"{path}:{number}: {requirement} is not recorded as a direct requirement of {input_name} "
                 f"in {lock_path}; regenerate the lock"
             )
     for name in sorted(lock.keys() - names):
-        if any(is_direct(entry, input_name) for entry in parents[name]):
+        if any(is_direct(entry, path) for entry in parents[name]):
             problems.append(
                 f"{name}=={lock[name][0]} is a direct requirement of {input_name} in {lock_path}, "
                 f"but {path} does not require it on {TARGET_LABEL}; regenerate the lock"
@@ -367,6 +390,12 @@ def walk(roots, lock, lock_path):
         for extra in sorted(active - {""} - provided):
             problems.append(f"{source} does not provide the extra {extra!r}")
         for text in distribution.requires or []:
+            if "\\" in text:
+                problems.append(
+                    f"{source}: cannot evaluate the dependency {text!r} the way uv does: "
+                    "packaging reads backslash escapes and uv does not"
+                )
+                continue
             try:
                 dependency = Requirement(text)
             except InvalidRequirement as error:
@@ -400,6 +429,17 @@ def main(argv):
     problems = check_input(base_input, base_requirements, base, base_parents, base_path)
     problems += check_input(base_input, base_requirements, test, test_parents, test_path)
     problems += check_input(test_input, test_requirements, test, test_parents, test_path)
+    for lock, lock_path, parents, inputs in (
+        (base, base_path, base_parents, [base_input]),
+        (test, test_path, test_parents, [base_input, test_input]),
+    ):
+        for name in sorted(lock):
+            for entry in parents[name]:
+                if entry.startswith("-r ") and not any(is_direct(entry, path) for path in inputs):
+                    problems.append(
+                        f"{name}=={lock[name][0]} is recorded in {lock_path} as a direct requirement of "
+                        f"{entry[3:]}, which is not an input of that lock ({', '.join(inputs)})"
+                    )
     for name, (version, hashes) in sorted(base.items()):
         if name not in test:
             problems.append(f"{name}=={version} is missing from {test_path}")
@@ -417,7 +457,7 @@ def main(argv):
             problems.append(f"{name}=={test[name][0]} has no '# via' annotation in {test_path}")
             continue
         outside = [
-            entry for entry in via if not is_direct(entry, test_input_name) and normalize(entry) not in test_only
+            entry for entry in via if not is_direct(entry, test_input) and normalize(entry) not in test_only
         ]
         if outside:
             problems.append(

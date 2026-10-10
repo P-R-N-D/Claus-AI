@@ -6,7 +6,7 @@ check there with `python -I` the way CI does, so they read the metadata of the
 environment that runs them. InProcessTests call the check's functions on
 made-up inputs. Run them in the environment installed from the test lock, from
 the repository root:
-    python -I -m unittest discover --start-directory scripts/ci/tests --verbose
+    python -I scripts/ci/tests/test_check_test_lock.py --verbose
 """
 
 import importlib.util
@@ -365,6 +365,55 @@ class CheckTestLockTests(unittest.TestCase):
             with self.subTest(line=text):
                 self.assertFails(f"unsupported marker in {text}", (BASE_INPUT, None, f"{text}\n"))
 
+    def test_backslashes_and_other_characters_fail(self):
+        # packaging reads escapes in quoted marker values and uv does not, so each of these markers selects the
+        # requirement in one tool and not the other; uv also rejects whitespace other than a space or tab.
+        boto3 = line(BASE_INPUT, "boto3").rstrip()
+        for name, old, new in (
+            (BASE_INPUT, None, 'requests>=2.32 ; sys_platform != "lin\\x75x"\n'),
+            (BASE_INPUT, boto3, boto3 + ' ; sys_platform == "\\154inux"'),
+            (TEST_INPUT, None, 'requests>=2.32 ; python_version < "\\x33.12"\n'),
+            (BASE_INPUT, boto3, boto3 + "\f# S3 client"),
+            (BASE_INPUT, boto3, boto3 + "\u00a0# S3 client"),
+        ):
+            with self.subTest(line=new.strip()):
+                self.assertFails("only printable ASCII without backslashes is supported", (name, old, new))
+
+    def test_number_too_long_for_uv_fails(self):
+        django = line(BASE_INPUT, "Django").rstrip()
+        for name, old, new in (
+            (BASE_INPUT, None, 'requests>=2.32 ; python_version > "99999999999999999999"\n'),
+            (BASE_INPUT, django, django.replace("<6.2", "<6.99999999999999999999")),
+        ):
+            with self.subTest(line=new.strip()):
+                self.assertFails("uv cannot read numbers this long", (name, old, new))
+
+    def test_byte_order_mark_passes(self):
+        text = read(BASE_INPUT)
+        self.assertPasses((BASE_INPUT, text, "\ufeff" + text))
+
+    def test_direct_annotation_for_another_input_fails(self):
+        six = pin_block(BASE_LOCK, "six")
+        pytest = pin_block(TEST_LOCK, "pytest")
+        for name, block, old, new, message in (
+            (
+                BASE_LOCK,
+                six,
+                "    # via python-dateutil\n",
+                "    # via\n    #   -r backend/requirements-test.txt\n    #   python-dateutil\n",
+                f"is recorded in {BASE_LOCK} as a direct requirement of backend/requirements-test.txt",
+            ),
+            (
+                TEST_LOCK,
+                pytest,
+                "-r backend/requirements-test.txt",
+                "-r other/requirements-test.txt",
+                f"is recorded in {TEST_LOCK} as a direct requirement of other/requirements-test.txt",
+            ),
+        ):
+            with self.subTest(lock=name, entry=new.strip()):
+                self.assertFails(message, (name, block, block.replace(old, new)))
+
     # The environment whose metadata the check reads.
 
     def test_installed_version_other_than_the_locks_fails(self):
@@ -461,6 +510,7 @@ class InProcessTests(unittest.TestCase):
                     "missing",
                     "direct @ https://example.invalid/d.whl",
                     'odd; os_name in "posix"',
+                    'escaped; sys_platform == "lin\\x75x"',
                 ]
             ),
             "lib": FakeDistribution(),
@@ -476,6 +526,8 @@ class InProcessTests(unittest.TestCase):
                 "which the locks cannot pin",
                 "app==1.0: cannot evaluate the dependency 'odd; os_name in \"posix\"' the way uv does: "
                 "a comparison must be a variable, an operator, and a quoted value, in that order",
+                "app==1.0: cannot evaluate the dependency 'escaped; sys_platform == \"lin\\\\x75x\"' "
+                "the way uv does: packaging reads backslash escapes and uv does not",
                 "other==1.0 does not provide the extra 'nope'",
             ],
         )
@@ -510,6 +562,10 @@ class InProcessTests(unittest.TestCase):
             'python_version > "3.12.*"',
             'python_version != "3.12.1.*"',
             'python_version ~= "3.12"',
+            'python_version > "99999999999999999999"',
+            'python_full_version >= "3.12.15.18446744073709551616"',
+            'python_version >= "3."',
+            'python_version >= "3..12"',
             'sys_platform === "linux"',
             'sys_platform < "m"',
             'extra == ""',
@@ -522,6 +578,7 @@ class InProcessTests(unittest.TestCase):
             'platform_machine != ""',
             "python_version >= '3.12' and (os_name == \"posix\" or sys_platform == \"win32\")",
             'python_full_version < "3.12.15.0.1"',
+            'python_full_version < "999999999999999999"',
             'os.name == "posix"',
         ):
             with self.subTest(marker=marker):
@@ -529,7 +586,7 @@ class InProcessTests(unittest.TestCase):
         metadata = Requirement('six; extra == "socks" and python_version < "3.10"').marker
         self.assertIsNone(check_test_lock.unsupported_marker(metadata, metadata=True))
         self.assertIsNotNone(check_test_lock.unsupported_marker(metadata))
-        for marker in ('extra != "socks"', 'extra < "socks"'):
+        for marker in ('extra != "socks"', 'extra < "socks"', 'extra == ""', 'extra == "-x"'):
             with self.subTest(marker=marker):
                 metadata = Requirement(f"six; {marker}").marker
                 self.assertIsNotNone(check_test_lock.unsupported_marker(metadata, metadata=True))

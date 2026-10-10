@@ -171,7 +171,8 @@ jobs:
         # -I keeps files in scripts/ci/ or the checkout root from standing in for installed packages.
         run: python -I scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt backend/requirements.txt backend/requirements-test.txt
       - name: Test the lock check against changed locks and inputs
-        run: python -I -m unittest discover --start-directory scripts/ci/tests --verbose
+        # Run directly, not through unittest discover, so scripts/ci/tests/ is not on the import path either.
+        run: python -I scripts/ci/tests/test_check_test_lock.py --verbose
       - name: Check that pytest and Django collect the same tests
         working-directory: backend
         run: python ../scripts/ci/check_test_parity.py

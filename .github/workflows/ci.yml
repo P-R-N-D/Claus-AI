@@ -141,3 +141,64 @@ jobs:
           path: frontend/test-results/
           if-no-files-found: warn
           retention-days: 7
+
+  backend-pytest:
+    # The backend job's Django tests, run by pytest from the hashed test lock.
+    # A separate job leaves the backend job and its check unchanged.
+    name: Backend / pytest / CPython 3.12.15 / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Install the hashed backend test lock
+        run: |
+          uv venv --managed-python --python 3.12.15
+          uv pip sync --python .venv/bin/python --require-hashes --only-binary :all: backend/locks/cp312-linux-x86_64-test.txt
+          uv pip check --python .venv/bin/python
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Record the interpreter and pytest
+        run: |
+          python -VV
+          python -m pytest --version
+          test "$(python -c 'import platform; print(platform.python_version())')" = 3.12.15
+      - name: Check the test lock against the backend lock
+        run: python scripts/ci/check_test_lock.py backend/locks/cp312-linux-x86_64.txt backend/locks/cp312-linux-x86_64-test.txt
+      - name: Check that pytest and Django collect the same tests
+        working-directory: backend
+        run: python ../scripts/ci/check_test_parity.py
+      - name: Run the backend tests with pytest
+        working-directory: backend
+        # pytest exits 5 when it collects no test, so an empty run fails.
+        run: python -m pytest
+
+  frontend-unit:
+    name: Frontend / Vitest / Node 24 / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Install npm 11.21.0 and the locked dependencies
+        run: |
+          npm install --global npm@11.21.0
+          node --version
+          test "$(npm --version)" = 11.21.0
+          npm ci
+      - name: Run the unit tests
+        # vitest run exits 1 when it finds no test file, so an empty run fails.
+        run: npm run test:unit

@@ -90,7 +90,7 @@ npm run dev -- --port 3000
 
 `--managed-python` makes uv use its own CPython build rather than a system interpreter, whose SQLite can be older than the 3.37.0 that Django 6.1 requires. In Windows PowerShell the environment is activated with `.venv\Scripts\Activate.ps1` instead of `source .venv/bin/activate`, but native Windows cannot produce a working environment from the lock today, so use WSL2 as the table says.
 
-The `npm install --global npm@11.21.0` step is required: Node 24.21.0 bundles npm 11.19.0, and the `engines` pin in `package.json` only warns (`EBADENGINE`) instead of stopping the install. `npx next typegen` writes the untracked `frontend/next-env.d.ts`, which is recommended on a fresh clone before `tsc` or editor type checking; `npm run dev` and `npm run build` write it too.
+The `npm install --global npm@11.21.0` step is required: Node 24.21.0 bundles npm 11.19.0, and the `engines` pin in `package.json` only warns (`EBADENGINE`) instead of stopping the install. `npx next typegen` writes the untracked `frontend/next-env.d.ts`; running it on a fresh clone before `tsc` or editor type checking is recommended, and `npm run dev` and `npm run build` write the file too.
 
 `npm run test:visual` starts the backend and `next dev` itself, so no `npm run build` is needed first; outside CI it reuses servers already listening on ports 8000 and 3000. `PLAYWRIGHT_NEXT_SERVER=production npm run test:visual` rebuilds the app, runs `next start` instead, and never reuses running servers. For evidence runs, add `CI=1`, which stops Playwright from reusing running servers, and record the server mode; see [TESTING.md](TESTING.md#current-scaffold-checks).
 

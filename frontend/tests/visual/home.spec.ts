@@ -106,6 +106,14 @@ test("user and console surfaces render with both backend services", async ({ pag
   await expect(page.getByRole("article", { name: "Agent health" }).getByText("Connected", { exact: true })).toBeVisible();
   await expect(retry).toBeEnabled();
   await expect(retry).toBeFocused();
+  // Pointer activation must work too.
+  await Promise.all([
+    page.waitForResponse((response) => response.url().endsWith("/core/health/") && response.status() === 200),
+    page.waitForResponse((response) => response.url().endsWith("/agent/health/") && response.status() === 200),
+    retry.click(),
+  ]);
+  await expect(page.getByRole("article", { name: "Core health" }).getByText("Connected", { exact: true })).toBeVisible();
+  await expect(retry).toBeEnabled();
 
   await page.goto(`/console/${query}`);
   await expect(page).toHaveURL(new URL(`/console${query}`, page.url()).href);

@@ -46,6 +46,7 @@ Technical documents for AI coding agents and contributors are written in English
 - [STATE-SCHEMA.md](STATE-SCHEMA.md): conceptual state shapes (not a database schema).
 - [TESTING.md](TESTING.md): the tests that exist today and the verification still required.
 - [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md): the applied dependency update and its compatibility/security exceptions, plus Python 3.15 Limited API/`abi3t` wheel qualification, performance admission, and maintenance under the existing free-threading direction. Python 3.15 support remains unqualified.
+- [CI-MATRIX.md](CI-MATRIX.md): the compatibility model for CI lanes, covering profiles, run records, and what the validator checks. It records no support status.
 - [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md): trust boundaries and the `SEC-*` security requirements.
 - [CODE-REVIEW.md](CODE-REVIEW.md), [SECURITY-REVIEW.md](SECURITY-REVIEW.md): independent code review and security review procedures for code changes.
 - [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md), [WEBMCP.md](WEBMCP.md), [I18N.md](I18N.md): the not-yet-implemented interaction architecture, the WebMCP (experimental technology) contract, and the frontend i18n direction.

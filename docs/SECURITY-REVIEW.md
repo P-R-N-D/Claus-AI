@@ -6,7 +6,7 @@ It is not a security policy and defines no requirement: the meaning and status o
 
 ## Status
 
-- In effect for every change that matches a trigger below or a run condition under "When this review runs", from HEAD 8ec5623 (committed 2026-09-21; the repository facts in this document were verified on 2026-10-08). The procedure itself depends on nothing that is Planned. (Updated 2026-10-10: the step 1 file table was re-checked at 14b9109 (unchanged through 3fe4d1a) and now lists `frontend/src/proxy.ts`, the lockfiles, and the runtime version files. Later the same day, CI workflows were added to the triggers and to the step 1 file table. On 2026-10-11, `scripts/ci/` and `tests/compatibility/` were added to that table row.)
+- In effect for every change that matches a trigger below or a run condition under "When this review runs", from HEAD 8ec5623 (committed 2026-09-21; the repository facts in this document were verified on 2026-10-08). The procedure itself depends on nothing that is Planned. (Updated 2026-10-10: the step 1 file table was re-checked at 14b9109 (unchanged through 3fe4d1a) and now lists `frontend/src/proxy.ts`, the lockfiles, and the runtime version files. Later the same day, CI workflows were added to the triggers and to the step 1 file table. On 2026-10-11, `scripts/ci/` and `tests/compatibility/` were added to the CI trigger and to that table row.)
 - Implemented today, and therefore reviewable as behavior: the health endpoints, the ASGI composition, `DATABASE_URL` parsing with SQLite fallback, and the S3-compatible storage backend. Their security facts, with file and line evidence, are in [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) "Current implementation security facts".
 - Not implemented: authentication, authorization, scope checks, sharing, approval, audit, RAG, model calls, Tasks, runtimes beyond a lazy Playwright factory, and WebMCP. Most `SEC-*` requirements are Planned; "How Planned requirements are reviewed" below says what that means for a review.
 - WebMCP is Experimental: an external draft with no default-on browser support as of 2026-10-08 ([WEBMCP.md](WEBMCP.md)). In the AGENT area, `SEC-AGENT-001` is Planned and `SEC-AGENT-002` to `SEC-AGENT-005` are Planned/Experimental.
@@ -36,7 +36,7 @@ Triggers are the ones listed in [CODE-REVIEW.md](CODE-REVIEW.md) step 9. Area na
 | External content handling (web pages, uploaded files, retrieved text, tool output reaching a model or a user) | INJ, `SEC-RAG-002` | `SEC-SECRET-003`, `SEC-TOOL-002` |
 | Logging and audit | `SEC-SECRET-003`, `SEC-SECRET-004`, `SEC-TOOL-002` | `SEC-FILE-005` |
 | i18n locale input handling (cookies, `Accept-Language`, preference values, `<html lang>`) | `SEC-INJ-001`, `SEC-AGENT-002` | AUTH, when a preference is stored on the account |
-| CI workflows (`.github/workflows/*`: trigger events, `permissions`, secrets, `runs-on` labels, action references) | `SEC-SECRET-001` | `SEC-SECRET-003`, `SEC-TOOL-001` |
+| CI workflows (`.github/workflows/*`: trigger events, `permissions`, secrets, `runs-on` labels, action references), and the scripts and data they run and publish the output of (`scripts/ci/*`, `tests/compatibility/*`) | `SEC-SECRET-001` | `SEC-SECRET-003`, `SEC-TOOL-001` |
 
 ### How Planned requirements are reviewed
 

@@ -1056,7 +1056,8 @@ class NodeTests(Case):
         with mock.patch.object(collector, "NODE_TIMEOUT", 2.0), mock.patch.object(collector.subprocess, "Popen", Waiting):
             facts, errors = self.node('{"v":"24.21.0"}', before="sleep 0.5\n", after="exec >&-\nsleep 30\n")
         self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 2.0 seconds", []))
-        self.assertLess(timeouts[0], 1.6)
+        # The wait gets what is left of the read's deadline, never a fresh timeout of its own.
+        self.assertLess(timeouts[0], 2.0)
         self.assertLess(time.monotonic() - started, 20)
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")

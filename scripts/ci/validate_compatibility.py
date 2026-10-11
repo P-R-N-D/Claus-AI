@@ -508,9 +508,11 @@ def python_platform_target(platform):
 
 def cpython_version(version):
     """(major, minor) of a CPython version written as platform.python_version() gives it (3.12.15, 3.13.0rc1, or
-    3.14.0a1+ for a build after a release), or as major.minor; None for any other text."""
-    match = re.fullmatch(r"([0-9]+)\.([0-9]+)(?:\.[0-9]+(?:(?:a|b|rc)[0-9]+)?\+?)?", version) if isinstance(version, str) else None
-    return match.groups() if match else None
+    3.14.0a1+ for a build after a release), or as major.minor; None for any other text. No number has a leading zero."""
+    number = r"(0|[1-9][0-9]*)"
+    pattern = rf"{number}\.{number}(?:\.{number}(?:(?:a|b|rc){number})?\+?)?"
+    match = re.fullmatch(pattern, version) if isinstance(version, str) else None
+    return match.group(1, 2) if match else None
 
 
 def soabi_target(soabi):
@@ -1117,10 +1119,12 @@ def lane_matches(profile, target, status, findings):
                 findings.error("support-claim", path, f"a {status} claim declares the {what} its lane covers ({target[axis]!r})")
     parts = cpython_version(known(python["version"]))
     interpreter = (known(python["implementation"]), ".".join(parts) if parts else None, known(python["free_threaded_build"]))
+    # A version that cannot be read is named as written.
+    declared = interpreter[1] if parts else repr(known(python["version"]))
     if interpreter != LOCK_INTERPRETER:
         matches = False
         if status != "not-assessed":
-            findings.error("support-claim", "/workload/runtimes/python", f"the lane table's statuses are for the backend lock's interpreter, CPython {LOCK_INTERPRETER[1]} with the GIL; this profile declares {interpreter[0]} {interpreter[1]} (free-threaded build: {interpreter[2]}), so it records not-assessed")
+            findings.error("support-claim", "/workload/runtimes/python", f"the lane table's statuses are for the backend lock's interpreter, CPython {LOCK_INTERPRETER[1]} with the GIL; this profile declares {interpreter[0]} {declared} (free-threaded build: {interpreter[2]}), so it records not-assessed")
     return matches
 
 

@@ -659,6 +659,8 @@ class EnvironmentRuleTests(Case):
         self.assertCodes(check(vax), "abi-contradiction")
         self.assertFinding(check(vax), "abi-contradiction", "/workload/runtimes/python/soabi")
         self.assertValid(check(changed(vax, lambda d: d["workload"]["runtimes"]["python"].update(arch=unknown(), execution=unknown()))))
+        unlisted = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(arch=fact("vax", "synthetic:x"), execution=unknown(), pointer_bits=unknown()))
+        self.assertValid(check(unlisted))
         _, real = real_result()
         self.assertFinding(check(changed(real, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact("cpython-312-vax-linux-gnu", provenance="declared")))),
                            "abi-contradiction", "/workload/runtimes/python/soabi")
@@ -673,7 +675,7 @@ class EnvironmentRuleTests(Case):
                 self.assertValid(check(changed(result, lambda d: python(d).update(version=fact(version, "synthetic:x")))))
                 self.assertValid(check(changed(real, lambda d: python(d).update(version=fact(version, provenance="declared")))))
         # Text after the version is not ignored: the version is an error, and the profile loses its lane.
-        for version in ("3.12-not-python", "3.12.15garbage", "3.12x", "3.12+", "3.12rc1", "3.12.15 ", " 3.12.15", "3.12.15rc", "3.12.\u0661\u0665"):
+        for version in ("3.12-not-python", "3.12.15garbage", "3.12x", "3.12+", "3.12rc1", "3.12.15 ", " 3.12.15", "3.12.15rc", "3.12.\u0661\u0665", "3.12.1\u0665", "3.12.015", "03.12.15", "3.012"):
             with self.subTest(version=version):
                 self.assertIsNone(validator.cpython_version(version))
                 self.assertCodes(check(changed(result, lambda d: python(d).update(version=fact(version, "synthetic:x")))), "abi-contradiction")
@@ -681,6 +683,9 @@ class EnvironmentRuleTests(Case):
                 claimed = check(changed(real, lambda d: python(d).update(version=fact(version, provenance="declared"))))
                 self.assertFinding(claimed, "abi-contradiction", "/workload/runtimes/python/version")
                 self.assertFinding(claimed, "support-claim", "/workload/runtimes/python")
+        self.assertIsNone(validator.cpython_version("3.12.15\n"))
+        message = [message for _, code, _, message in check(changed(real, lambda d: python(d).update(version=fact("3.12-not-python", provenance="declared")))).errors if code == "support-claim"][0]
+        self.assertIn("declares cpython '3.12-not-python'", message)
         # The rule is for CPython, whose version the cache tag and the ABI tag repeat.
         pypy = changed(result, lambda d: python(d).update(implementation=fact("pypy", "synthetic:x"), version=fact("3.10.14-pypy", "synthetic:x"), cache_tag=unknown(), soabi=unknown()))
         self.assertNotIn("/workload/runtimes/python/version", [path for _, _, path, _ in check(pypy).items])
@@ -952,10 +957,20 @@ class StageRuleTests(Case):
         ):
             with self.subTest(label):
                 self.assertFinding(check(changed(result, change), profile), code, path)
+        other_kind = {"id": "fpga", "kind": "other", "api": "opencl", "available": fact(True, "synthetic:x"), "device": unknown(), "version": unknown(), "features": unknown()}
+        for label, change in (
+            ("another kind of backend requested", lambda d: (d["compute"]["backends"].append(other_kind), execute(d)["compute"].update(requested="fpga", effective=None))),
+            ("an unlisted backend requested", lambda d: execute(d)["compute"].update(requested="rocm", effective=None)),
+        ):
+            with self.subTest(label):
+                self.assertFinding(check(changed(result, change), profile), "backend-reference", "/stages/execute/compute/effective")
+        # A stage that failed may have failed before any backend ran.
+        failed = check(changed(result, lambda d: (execute(d).update(status="failed", reason="x"), execute(d)["compute"].update(requested="cpu", effective=None))), profile)
+        self.assertNotIn(("backend-reference", "/stages/execute/compute/effective"), [(code, path) for _, code, path, _ in failed.errors])
         # A GPU stage that records no backend is reported once, as a fallback.
         nothing = check(changed(result, lambda d: execute(d)["compute"].update(effective=None)), profile)
         self.assertNotIn(("backend-reference", "/stages/execute/compute/effective"), [(code, path) for _, code, path, _ in nothing.errors])
-        other_gpu ={"id": "cuda1", "kind": "gpu", "api": "cuda", "available": fact(True, "synthetic:x"), "device": unknown(), "version": unknown(), "features": unknown()}
+        other_gpu = {"id": "cuda1", "kind": "gpu", "api": "cuda", "available": fact(True, "synthetic:x"), "device": unknown(), "version": unknown(), "features": unknown()}
         to_other_gpu = changed(result, lambda d: (d["compute"]["backends"].append(other_gpu), execute(d)["compute"].update(effective="cuda1")))
         self.assertFinding(check(to_other_gpu), "accelerator-fallback", "/stages/execute/compute")
         npu = fixture("windows-arm64-native.result")

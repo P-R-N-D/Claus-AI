@@ -2,18 +2,25 @@
 
 The collector reads the following, and nothing else:
 
-- /proc, /sys, /etc/os-release and two files under /run.
+- /proc, /sys, /etc/os-release or /usr/lib/os-release, /run/.containerenv
+  and /run/systemd/container, and whether /.dockerenv and /run/systemd/system
+  exist.
+- The first 20 bytes of the interpreter's executable (its ELF header), when the
+  build architecture is not otherwise known.
 - The environment variables in ENV_ALLOWLIST.
 - The pull request head and base in the GitHub Actions event file.
-- The checkout's .git/HEAD.
+- The checkout's .git/HEAD, and the loose ref or packed-refs line it points to.
 - The output of `node -p`, run with an empty environment.
 
 It uses no network, never escalates privileges, and writes only the output file
 and the optional summary. It records no host name, account name, home
-directory, network address or other environment variable.
+directory, network address or other environment variable. It refuses --stage
+values, and does not write a record, that look like a token or a private key.
 
 On Linux it fills in the layers, identity and isolation facts. On other systems
-it records the OS family and the Python runtime and leaves the rest unknown.
+it records the OS family, the user and group IDs where os.geteuid exists, the
+Python and Node runtimes and the run, and leaves the layer and isolation facts
+unknown.
 
 Each value it records is marked in one of these ways:
 
@@ -38,7 +45,9 @@ detect. Every stage they do not name is not-run.
 Exit status:
 - 0: the record was written and detection passed.
 - 1: the record was written but a probe failed.
-- 2: a usage error, or the record could not be written.
+- 2: a usage error, or the record or the summary could not be written. The
+  record is written first, and the message says which one failed. A record
+  that looks like it holds a secret is not written.
 """
 
 import argparse
@@ -66,9 +75,11 @@ ENV_ALLOWLIST = frozenset({
     "GITHUB_REPOSITORY", "GITHUB_SERVER_URL", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
     "GITHUB_WORKFLOW_REF", "GITHUB_JOB", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH",
     "ImageOS", "ImageVersion", "container", "KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME",
-    "WSL_INTEROP", "PATH",
+    "WSL_INTEROP", "PATH", "_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH",
 })
-PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME", "WSL_INTEROP", "PATH", "GITHUB_EVENT_PATH"})
+# sysconfig reads these even under python -I; when one is set, its values are not recorded.
+SYSCONFIG_OVERRIDES = ("_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH")
+PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME", "WSL_INTEROP", "PATH", "GITHUB_EVENT_PATH", *SYSCONFIG_OVERRIDES})
 
 STAGES = ("detect", "install", "initialize", "execute", "correctness", "security", "performance")
 STATUSES = ("passed", "failed", "blocked", "not-run", "not-applicable")
@@ -80,13 +91,15 @@ PRINTABLE = re.compile(r"[ -~]{1,200}")
 
 ARCH_ALIASES = {
     "amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64", "i386": "x86", "i486": "x86",
-    "i586": "x86", "i686": "x86", "ia32": "x86", "armv7l": "armv7", "arm": "armv7", "loong64": "loongarch64",
-    "powerpc64le": "ppc64le",
+    "i586": "x86", "i686": "x86", "ia32": "x86", "armv7l": "armv7", "armv8l": "armv7", "arm": "armv7",
+    "loong64": "loongarch64", "powerpc64le": "ppc64le",
 }
-# (process, kernel) architecture pairs that run without emulation: 32-bit code on a 64-bit kernel of the same family.
-COMPATIBLE = frozenset({("x86", "x86_64"), ("armv7", "aarch64")})
+# (process, kernel) architecture pairs that run without emulation: 32-bit x86 code on an x86-64 kernel.
+# 32-bit Arm on aarch64 is not listed: many recent cores have no AArch32, so the pair is recorded as unknown.
+COMPATIBLE = frozenset({("x86", "x86_64")})
 # ELF e_machine values (elf.h) for the architectures in docs/CI-MATRIX.md.
 ELF_MACHINES = {3: "x86", 40: "armv7", 62: "x86_64", 183: "aarch64", 243: "riscv64", 22: "s390x", 258: "loongarch64", 21: "ppc64le"}
+KNOWN_ARCHES = frozenset(ELF_MACHINES.values())
 OS_FAMILIES = {"Linux": "linux", "Windows": "windows", "Darwin": "macos", "FreeBSD": "freebsd"}
 # Capability numbers from linux/capability.h.
 CAPABILITIES = (
@@ -100,6 +113,17 @@ CAPABILITIES = (
 SECCOMP = {"0": "disabled", "1": "strict", "2": "filter"}
 # The fixed inode of the initial user namespace (PROC_USER_INIT_INO in linux/proc_ns.h).
 USER_NS_INIT_INO = 0xEFFFFFFD
+# The fixed inode of the initial PID namespace (PROC_PID_INIT_INO).
+PID_NS_INIT_INO = 0xEFFFFFFC
+# The same shapes as SECRET_SHAPES in validate_compatibility.py; a test keeps them equal.
+SECRET_SHAPES = (
+    ("GitHub token", re.compile(r"\bgh[opsur]_[A-Za-z0-9]{30,}")),
+    ("GitHub token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
+    ("AWS access key ID", re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("Slack token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
+    ("JSON Web Token", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.")),
+)
 # DMI sys_vendor or product_name prefixes that name a hypervisor, as systemd-detect-virt reads them.
 DMI_VENDORS = (
     ("KVM", "kvm"), ("QEMU", "qemu"), ("VMware", "vmware"), ("VMW", "vmware"),
@@ -163,6 +187,10 @@ def execution_fact(arch, arch_evidence, reference):
     if arch is None:
         return unknown("the architecture is not known")
     if kernel_arch is not None:
+        if arch != kernel_arch and not {arch, kernel_arch} <= KNOWN_ARCHES:
+            return unknown(f"{arch} on a {kernel_arch} kernel is outside the documented architectures")
+        if (arch, kernel_arch) == ("armv7", "aarch64"):
+            return unknown("32-bit Arm runs natively only on aarch64 cores with AArch32, which this probe does not read; many recent cores have none")
         native = arch == kernel_arch or (arch, kernel_arch) in COMPATIBLE
         return inferred("native" if native else "emulated", arch_evidence, "file:/proc/sys/kernel/arch")
     family = arch_family(arch)
@@ -224,6 +252,16 @@ class Probe:
 
     def exists(self, absolute):
         return self.path(absolute).exists()
+
+    def missing(self, absolute):
+        """True only when the file is absent, not when it is there but cannot be read."""
+        try:
+            os.stat(self.path(absolute))
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
 
     def guard(self, name, function, fallback):
         """Run one probe; record an unexpected exception and use the fallback instead."""
@@ -385,10 +423,22 @@ class Probe:
         in_container = bool(container_evidence)
         wsl = self.wsl()
         dmi_technology, dmi_evidence = self.dmi_technology()
+        if dmi_technology == "amazon" and not hypervisor:
+            # EC2 metal instances name Amazon EC2 in DMI but run no hypervisor (as systemd-detect-virt reads them).
+            dmi_technology, dmi_evidence = None, None
+        try:
+            initial_pid_namespace = self.namespace_inode("pid") == PID_NS_INIT_INO
+        except OSError:
+            initial_pid_namespace = None
 
         # The layer that runs the kernel.
         kernel_layer = {"os": {"family": observed("linux", "python:platform.system"), "kernel": kernel_fact}}
-        if wsl == "wsl2":
+        if wsl == "wsl1":
+            reason = "WSL 1 or an unrecognized Microsoft kernel"
+            kernel_layer["kind"] = unknown(reason)
+            kernel_layer["technology"] = unknown(reason)
+            kernel_layer["os"]["kernel"] = unknown("WSL 1 runs no Linux kernel; Windows reports this release string")
+        elif wsl == "wsl2":
             kernel_layer["kind"] = inferred("wsl2", "file:/proc/sys/kernel/osrelease")
             kernel_layer["technology"] = inferred("wsl2", "file:/proc/sys/kernel/osrelease")
         elif hypervisor or dmi_technology:
@@ -396,7 +446,7 @@ class Probe:
             kernel_layer["kind"] = inferred("vm", *vm_evidence)
             kernel_layer["technology"] = inferred(dmi_technology, dmi_evidence) if dmi_technology else unknown("a hypervisor is present but neither DMI nor a VMBus names it")
         else:
-            reason = "WSL 1 or an unrecognized Microsoft kernel" if wsl == "wsl1" else "no VM or WSL signal was found; that does not show bare metal"
+            reason = "no VM or WSL signal was found; that does not show bare metal"
             kernel_layer["kind"] = unknown(reason)
             kernel_layer["technology"] = unknown(reason)
 
@@ -405,14 +455,20 @@ class Probe:
             kernel_layer["os"]["name"] = unknown(f"the distribution of the system that runs the container is {hidden}")
             kernel_layer["os"]["version"] = unknown(f"the version of the system that runs the container is {hidden}")
             kernel_layer["service_manager"] = {"name": unknown(f"the service manager outside the container is {hidden}"), "scope": unknown(hidden)}
+        elif initial_pid_namespace is not True:
+            # A container that leaves none of the signals above still has its own PID namespace,
+            # and its os-release and PID 1 are not the kernel layer's.
+            why = "this process is not in the initial PID namespace, or that cannot be read, so os-release and PID 1 may belong to a container or sandbox"
+            kernel_layer["os"]["name"] = unknown(why)
+            kernel_layer["os"]["version"] = unknown(why)
+            kernel_layer["service_manager"] = {"name": unknown(why), "scope": unknown(why)}
         else:
             kernel_layer["os"].update(self.distribution())
             kernel_layer["service_manager"] = self.service_manager()
         if kernel_arch is not None:
             layer_arch = observed(kernel_arch, "file:/proc/sys/kernel/arch")
-        elif machine and arch_family(machine) is not None and arch_family(machine) == cpu_family:
-            layer_arch = inferred(machine, machine_evidence, "file:/proc/cpuinfo#format")
         else:
+            # uname and /proc/cpuinfo both follow personality changes and qemu-user, so neither names the kernel's architecture.
             layer_arch = unknown("without /proc/sys/kernel/arch, uname cannot be told apart from an emulated or personality-changed machine name")
         kernel_layer["cpu"] = {
             "arch": layer_arch,
@@ -536,15 +592,23 @@ class Probe:
             "selinux": self.selinux(),
             "cgroup": self.cgroup(fields),
         }
+        # Containers get their own PID namespace; the initial one shows the process is not in one.
+        try:
+            initial = observed(self.namespace_inode("pid") == PID_NS_INIT_INO, "file:/proc/self/ns/pid#inode")
+        except OSError as exc:
+            initial = unknown(f"/proc/self/ns/pid cannot be read ({type(exc).__name__})")
+        out["pid_namespace"] = {"initial": initial}
         return out
 
     def apparmor(self):
         if not self.exists("/sys/module"):
             reason = "/sys/module is not available"
             return {"enabled": unknown(reason), "profile": unknown(reason)}
-        text, _ = self.read("/sys/module/apparmor/parameters/enabled", 16)
+        text, reason = self.read("/sys/module/apparmor/parameters/enabled", 16)
         if text is None:
-            return {"enabled": observed(False, "file:/sys/module/apparmor/parameters/enabled#absent"), "profile": not_applicable("AppArmor is not enabled")}
+            if self.missing("/sys/module/apparmor/parameters/enabled"):
+                return {"enabled": inferred(False, "file:/sys/module/apparmor/parameters/enabled#absent"), "profile": not_applicable("AppArmor is not in this kernel")}
+            return {"enabled": unknown(reason), "profile": unknown(reason)}
         enabled = text.strip() == "Y"
         if not enabled:
             return {"enabled": observed(False, "file:/sys/module/apparmor/parameters/enabled"), "profile": not_applicable("AppArmor is not enabled")}
@@ -609,6 +673,9 @@ class Probe:
         delegated = os.access(directory, os.W_OK) and os.access(directory / "cgroup.procs", os.W_OK) and (directory / "cgroup.subtree_control").exists()
         return {"version": version, "delegated": observed(delegated, "file:/sys/fs/cgroup/<own-cgroup>/cgroup.procs#writable")}
 
+    def sysconfig_overrides(self):
+        return [name for name in SYSCONFIG_OVERRIDES if self.env(name) is not None]
+
     def build_arch(self):
         """The architecture the interpreter was built for, with its evidence.
 
@@ -618,7 +685,7 @@ class Probe:
         multiarch = getattr(sys.implementation, "_multiarch", None)
         if isinstance(multiarch, str) and "-" in multiarch:
             return normalize_arch(multiarch.split("-", 1)[0]), "python:sys.implementation._multiarch"
-        soabi = sysconfig.get_config_var("SOABI")
+        soabi = None if self.sysconfig_overrides() else sysconfig.get_config_var("SOABI")
         match = re.fullmatch(r"[a-z]+-[0-9]+[a-z]*-([a-z0-9_]+)-linux-[a-z0-9]+", soabi or "")
         if match:
             return normalize_arch(match.group(1)), "python:sysconfig.SOABI"
@@ -635,13 +702,19 @@ class Probe:
 
     def python(self, reference):
         version = platform.python_version()
-        plat = sysconfig.get_platform()
-        soabi = sysconfig.get_config_var("SOABI")
+        overrides = self.sysconfig_overrides()
+        if overrides:
+            why = f"{', '.join(overrides)} is set, which changes what sysconfig reports"
+            plat_fact, soabi, raw_gil_disabled = unknown(why), None, None
+        else:
+            plat = sysconfig.get_platform()
+            plat_fact = observed(plat, "python:sysconfig.get_platform") if isinstance(plat, str) and SLUG.fullmatch(plat) else unknown("sysconfig.get_platform() gave an unexpected value")
+            soabi = sysconfig.get_config_var("SOABI")
+            raw_gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
         if self.system == "Linux":
             arch, arch_evidence = self.build_arch()
         else:
-            arch, arch_evidence = split_platform(plat)[1], "python:sysconfig.get_platform"
-        raw_gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+            arch, arch_evidence = split_platform(plat_fact["value"] or "")[1], "python:sysconfig.get_platform"
         if raw_gil_disabled in (0, 1):
             free_threaded = observed(bool(raw_gil_disabled), "python:sysconfig.Py_GIL_DISABLED")
         elif raw_gil_disabled is None and sys.version_info < (3, 13):
@@ -659,8 +732,8 @@ class Probe:
             "implementation": observed(sys.implementation.name, "python:sys.implementation.name"),
             "version": observed(version, "python:platform.python_version"),
             "cache_tag": observed(sys.implementation.cache_tag, "python:sys.implementation.cache_tag") if sys.implementation.cache_tag else unknown("no cache tag"),
-            "soabi": observed(soabi, "python:sysconfig.SOABI") if isinstance(soabi, str) and PRINTABLE.fullmatch(soabi) else unknown("sysconfig has no SOABI"),
-            "platform": observed(plat, "python:sysconfig.get_platform"),
+            "soabi": observed(soabi, "python:sysconfig.SOABI") if isinstance(soabi, str) and SLUG.fullmatch(soabi) else unknown(why if overrides else "sysconfig has no usable SOABI"),
+            "platform": plat_fact,
             "arch": observed(arch, arch_evidence) if arch else unknown("the interpreter's build architecture was not found"),
             "pointer_bits": observed(struct.calcsize("P") * 8, "python:struct.calcsize"),
             "free_threaded_build": free_threaded,
@@ -695,13 +768,17 @@ class Probe:
             return observed(str(value), evidence) if value is not None and re.fullmatch(pattern, str(value)) else unknown(f"node reported no usable {key}")
 
         arch = normalize_arch(values.get("a"))
+        arch_evidence = [evidence]
+        if arch == "ppc64" and sys.byteorder == "little":
+            # Node reports ppc64 for both byte orders.
+            arch, arch_evidence = "ppc64le", [evidence, "python:sys.byteorder"]
         platform_name = values.get("p")
         return {
             "version": checked("v", r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}"),
             "modules_abi": checked("m", r"[0-9]{1,5}"),
             "napi_version": checked("n", r"[0-9]{1,5}"),
             "platform": observed(platform_name, evidence) if isinstance(platform_name, str) and SLUG.fullmatch(platform_name) else unknown("node reported no usable platform"),
-            "arch": observed(arch, evidence) if arch else unknown("node reported no usable architecture"),
+            "arch": observed(arch, *arch_evidence) if arch else unknown("node reported no usable architecture"),
             "execution": execution_fact(arch, evidence, reference) if self.system == "Linux" else unknown("compared on Linux only"),
         }
 
@@ -884,6 +961,7 @@ def isolation_fallback(reason):
         "apparmor": {"enabled": unknown(reason), "profile": unknown(reason)},
         "selinux": {"mode": unknown(reason), "context": unknown(reason)},
         "cgroup": {"version": unknown(reason), "delegated": unknown(reason)},
+        "pid_namespace": {"initial": unknown(reason)},
     }
 
 
@@ -946,6 +1024,14 @@ def build_result(probe, profile_id=None, stage_args=None, now=None):
     return result
 
 
+def secret_shape(text):
+    """The label of the first secret shape that `text` matches, or None."""
+    for label, shape in SECRET_SHAPES:
+        if shape.search(text):
+            return label
+    return None
+
+
 def parse_stage_args(args):
     """Turn the --stage* options into stage objects; raise ValueError on bad input."""
     def pairs(values, option):
@@ -964,6 +1050,8 @@ def parse_stage_args(args):
         for name, value in pairs(values, option):
             if name not in stages:
                 raise ValueError(f"{option} {name}: give --stage {name}=STATUS first")
+            if secret_shape(value):
+                raise ValueError(f"{option} {name}: looks like a {secret_shape(value)}; records are published as CI artifacts")
             if option == "--stage-reason":
                 if not re.fullmatch(r"[ -~]{1,500}", value):
                     raise ValueError(f"--stage-reason {name}: printable ASCII, 1 to 500 characters")
@@ -980,7 +1068,8 @@ def parse_stage_args(args):
 
 
 def markdown_cell(value):
-    return re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value)).replace("|", "\\|").replace("`", "'")
+    """Text for one Markdown table cell: control characters become spaces, and Markdown and HTML syntax is escaped."""
+    return re.sub(r"([\\`*_~\[\]()<>!|])", r"\\\1", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value)))
 
 
 def describe(fact):
@@ -1041,16 +1130,23 @@ def main(argv=None):
 
     result = build_result(Probe(probe_node=not args.no_node), args.profile_id, stage_args)
     text = json.dumps(result, indent=2, ensure_ascii=True) + "\n"
+    if secret_shape(text):
+        print(f"error: the record holds a value that looks like a {secret_shape(text)}; it was not written", file=sys.stderr)
+        return 2
     try:
         args.output.write_text(text, encoding="utf-8")
-        if args.summary:
-            with open(args.summary, "a", encoding="utf-8") as handle:
-                handle.write("\n".join(summary_lines(result)))
     except OSError as exc:
         print(f"error: cannot write the record: {type(exc).__name__}", file=sys.stderr)
         return 2
+    if args.summary:
+        try:
+            with open(args.summary, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(summary_lines(result)))
+        except OSError as exc:
+            print(f"error: the record was written, but the summary could not be: {type(exc).__name__}", file=sys.stderr)
+            return 2
     detect = result["stages"]["detect"]["status"]
-    print(f"{args.output}: detect {detect}, overall {result['overall']}, {len(result['probe_errors'])} probe error(s)")
+    print(f"{args.output.name}: detect {detect}, overall {result['overall']}, {len(result['probe_errors'])} probe error(s)")
     for error in result["probe_errors"]:
         print(f"  probe error: {error['probe']}: {error['error']}")
     return 0 if detect == "passed" else 1

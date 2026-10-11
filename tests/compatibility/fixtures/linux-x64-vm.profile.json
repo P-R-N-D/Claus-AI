@@ -7,7 +7,7 @@
   "description": "Mirrors the shape of a GitHub-hosted runner record; used to test the link between a result and its profile.",
   "support": {
     "status": "not-assessed",
-    "lane": null,
+    "lane": "Linux x86-64 glibc",
     "reference": "docs/DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes"
   },
   "evidence_sources": [],

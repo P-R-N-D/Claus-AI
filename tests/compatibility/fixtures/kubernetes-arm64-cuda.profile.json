@@ -7,7 +7,7 @@
   "description": "A non-root pod with one NVIDIA GPU; the GPU device is allowed by an approved exception. A mixed x86-64 and aarch64 cluster has one profile per node architecture.",
   "support": {
     "status": "not-assessed",
-    "lane": null,
+    "lane": "Linux aarch64 glibc",
     "reference": "docs/DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes"
   },
   "evidence_sources": [],
@@ -18,6 +18,7 @@
     "execute",
     "correctness"
   ],
+  "accelerator_backend": "cuda",
   "environment": {
     "layers": [
       {

@@ -407,6 +407,15 @@
             "synthetic:cgroup.procs writable"
           ]
         }
+      },
+      "pid_namespace": {
+        "initial": {
+          "value": false,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/ns/pid#inode"
+          ]
+        }
       }
     },
     "runtimes": {

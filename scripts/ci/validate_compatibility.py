@@ -55,7 +55,13 @@ PREREQUISITES = {
     "security": ("detect",),
     "performance": ("correctness",),
 }
+# Every workload is detected, installed, initialized, run and checked, so only these stages can be not-applicable.
+OPTIONAL_STAGES = ("security", "performance")
+# Stages that run the workload itself, and so run on a profile's accelerator backend.
+WORKLOAD_STAGES = ("execute", "correctness", "performance")
 RAN = ("passed", "failed")
+# Evidence kinds that show what a stage did in a real run; detect may also cite the collector itself.
+STAGE_EVIDENCE = ("log:", "artifact:")
 KNOWN = ("observed", "inferred", "declared")
 
 DEFAULT_POLICY = {
@@ -102,7 +108,7 @@ KNOWN_SERVICE_MANAGERS = frozenset({"none", "systemd", "launchd", "windows-scm",
 NODE_PLATFORMS = {"linux": "linux", "win32": "windows", "darwin": "macos", "freebsd": "freebsd"}
 
 # C0 and C1 controls, DEL, and the Unicode bidirectional controls.
-CONTROL = re.compile("[\x00-\x1f\x7f-\x9f؜‎‏‪-‮⁦-⁩]")
+CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 SECRET_SHAPES = (
     ("GitHub token", re.compile(r"\bgh[opsur]_[A-Za-z0-9]{30,}")),
     ("GitHub token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
@@ -145,7 +151,7 @@ def load_json(path):
     if len(data) > MAX_DOCUMENT_BYTES:
         raise ValueError(f"larger than {MAX_DOCUMENT_BYTES} bytes")
     text = data.decode("utf-8")
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):
         raise ValueError("starts with a byte order mark")
 
     def pairs(items):
@@ -165,8 +171,12 @@ def load_json(path):
             raise ValueError(f"number out of range {text}")
         return value
 
+    def integer(text):
+        real(text)
+        return int(text)
+
     try:
-        return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=real)
+        return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=real, parse_int=integer)
     except RecursionError:
         raise ValueError("nested too deeply") from None
 
@@ -323,14 +333,14 @@ def validate_schema(instance, schema, root, path, findings):
 # Helpers for rules across fields
 
 
-def walk(document):
-    """Yield (path, value) for every value in the document, without recursion."""
+def walk(document, extensions=True):
+    """Yield (path, value) for every value in the document, without recursion; optionally skip extension contents."""
     stack = [("", document)]
     while stack:
         path, value = stack.pop()
         yield path, value
         if isinstance(value, dict):
-            stack.extend((pointer(path, key), item) for key, item in value.items())
+            stack.extend((pointer(path, key), item) for key, item in value.items() if extensions or key != "extensions")
         elif isinstance(value, list):
             stack.extend((pointer(path, index), item) for index, item in enumerate(value))
 
@@ -365,6 +375,17 @@ def runs_natively_on(arch, other):
     return arch == other or (arch, other) in COMPATIBLE
 
 
+def translated_by(arch, enclosing):
+    """Why code built for `arch` cannot run natively inside the `enclosing` layers (outermost first), or None."""
+    for index, layer in enumerate(enclosing):
+        if known(layer["cpu"]["execution"]) == "emulated":
+            return f"layer {index} is emulated, so everything inside it is translated"
+        outer = known(layer["cpu"]["arch"])
+        if runs_natively_on(arch, outer) is False:
+            return f"{arch} code on the {outer} of layer {index} is emulated"
+    return None
+
+
 def python_platform_target(platform):
     """Map sysconfig.get_platform() to (OS family, architecture); either may be None."""
     if not isinstance(platform, str):
@@ -381,6 +402,21 @@ def python_platform_target(platform):
     match = re.fullmatch(r"freebsd-[^-]+-([A-Za-z0-9_]+)", platform)
     if match:
         return "freebsd", normalize_arch(match.group(1))
+    return None, None
+
+
+def soabi_target(soabi):
+    """Map a CPython SOABI to (OS family, architecture); either may be None."""
+    if not isinstance(soabi, str):
+        return None, None
+    match = re.fullmatch(r"cpython-[0-9]+t?-([a-z0-9_]+)-linux-[a-z0-9]+", soabi)
+    if match:
+        return "linux", normalize_arch(match.group(1))
+    if re.fullmatch(r"cpython-[0-9]+t?-darwin", soabi):
+        return "macos", None
+    match = re.fullmatch(r"cp[0-9]+t?-(win32|win_amd64|win_arm64)", soabi)
+    if match:
+        return "windows", {"win32": "x86", "win_amd64": "x86_64", "win_arm64": "aarch64"}[match.group(1)]
     return None, None
 
 
@@ -405,7 +441,7 @@ def check_strings(document, findings):
 
 def check_facts(document, findings):
     profile = document["kind"] == "profile"
-    for path, value in walk(document):
+    for path, value in walk(document, extensions=False):
         if not is_fact(value):
             continue
         provenance = value["provenance"]
@@ -429,7 +465,7 @@ def check_facts(document, findings):
 
 
 def evidence_refs(document):
-    for path, value in walk(document):
+    for path, value in walk(document, extensions=False):
         if isinstance(value, dict) and isinstance(value.get("evidence"), list):
             for index, ref in enumerate(value["evidence"]):
                 yield pointer(pointer(path, "evidence"), index), ref
@@ -447,8 +483,10 @@ def check_synthetic(document, findings):
         if synthetic != prefixed:
             findings.error("synthetic-marking", "/id", "a profile id starts with synthetic- exactly when the profile is synthetic")
     else:
-        if synthetic and known(document["run"]["ci"]["system"]) == "github-actions":
-            findings.error("synthetic-marking", "/run/ci/system", "a synthetic result cannot claim a GitHub Actions run")
+        if synthetic:
+            for keys, fact in facts_of(document["run"]):
+                if known(fact) is not None:
+                    findings.error("synthetic-marking", f"/run/{'/'.join(keys)}", "a synthetic result names no run, commit or CI system")
         if synthetic and document["generated_at"] is not None:
             findings.error("synthetic-marking", "/generated_at", "a synthetic result has no collection time")
         if not synthetic and document["generated_at"] is None:
@@ -505,6 +543,10 @@ def check_layers(document, findings):
             findings.error("cpu-contradiction", f"{base}/cpu/execution", "the outermost host cannot be emulated")
         if index == 0:
             continue
+        if known(layer["cpu"]["execution"]) == "native":
+            conflict = translated_by(known(layer["cpu"]["arch"]), layers[:index])
+            if conflict:
+                findings.error("cpu-contradiction", f"{base}/cpu/execution", f"recorded as native, but {conflict}")
         parent = layers[index - 1]
         family, parent_family = known(layer["os"]["family"]), known(parent["os"]["family"])
         if kind == "container" and family and parent_family and family != parent_family:
@@ -513,15 +555,11 @@ def check_layers(document, findings):
             findings.error("os-contradiction", f"{base}/kind", f"WSL2 runs on Windows, not {parent_family}")
         if kind == "wsl2" and family and family != "linux":
             findings.error("os-contradiction", f"{base}/os/family", "WSL2 runs a Linux kernel")
-        arch, parent_arch = known(layer["cpu"]["arch"]), known(parent["cpu"]["arch"])
-        if runs_natively_on(arch, parent_arch) is False and known(layer["cpu"]["execution"]) == "native":
-            findings.error("cpu-contradiction", f"{base}/cpu/execution", f"{arch} on {parent_arch} cannot run natively; it is emulated")
 
 
 def check_workload(document, findings):
-    innermost = layers_of(document)[-1]
-    family = known(innermost["os"]["family"])
-    layer_arch = known(innermost["cpu"]["arch"])
+    layers = layers_of(document)
+    family = known(layers[-1]["os"]["family"])
     runtimes = document["workload"]["runtimes"]
     python = runtimes["python"]
     base = "/workload/runtimes/python"
@@ -530,17 +568,23 @@ def check_workload(document, findings):
     if platform_family and family and platform_family != family:
         findings.error("os-contradiction", f"{base}/platform", f"a {platform_family} Python cannot run on {family} in the innermost layer")
     python_arch = known(python["arch"])
-    # On Linux the platform tag follows uname, so a 32-bit build on a 64-bit kernel is not a contradiction.
-    if runs_natively_on(python_arch, platform_arch) is False and runs_natively_on(platform_arch, python_arch) is False:
+    if platform_family == "linux":
+        # On Linux the platform tag follows uname, so a 32-bit build on a 64-bit kernel is not a contradiction.
+        disagree = runs_natively_on(python_arch, platform_arch) is False and runs_natively_on(platform_arch, python_arch) is False
+    else:
+        # Windows and macOS tags name the build itself.
+        disagree = platform_arch in ARCH_BITS and python_arch in ARCH_BITS and platform_arch != python_arch
+    if disagree:
         findings.error("abi-contradiction", f"{base}/arch", f"the platform tag says {platform_arch}, the arch fact says {python_arch}")
     bits = known(python["pointer_bits"])
     if python_arch in ARCH_BITS and bits is not None and bits != ARCH_BITS[python_arch]:
         findings.error("abi-contradiction", f"{base}/pointer_bits", f"{python_arch} has {ARCH_BITS[python_arch]}-bit pointers, not {bits}")
 
     for name, runtime in (("python", python), ("node", runtimes["node"])):
-        arch = known(runtime["arch"])
-        if runs_natively_on(arch, layer_arch) is False and known(runtime["execution"]) == "native":
-            findings.error("cpu-contradiction", f"/workload/runtimes/{name}/execution", f"a {arch} {name} on a {layer_arch} layer is emulated, not native")
+        if known(runtime["execution"]) == "native":
+            conflict = translated_by(known(runtime["arch"]), layers)
+            if conflict:
+                findings.error("cpu-contradiction", f"/workload/runtimes/{name}/execution", f"recorded as native, but {conflict}")
 
     node_platform = known(runtimes["node"]["platform"])
     if node_platform in NODE_PLATFORMS and family and NODE_PLATFORMS[node_platform] != family:
@@ -561,6 +605,11 @@ def check_workload(document, findings):
                 free_threaded = known(python["free_threaded_build"])
                 if free_threaded is not None and free_threaded != bool(soabi.group(3)):
                     findings.error("abi-contradiction", f"{base}/free_threaded_build", "the free-threaded flag disagrees with the ABI tag's t suffix")
+            soabi_family, soabi_arch = soabi_target(known(python["soabi"]))
+            if soabi_family and family and soabi_family != family:
+                findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the innermost layer is {family}")
+            if soabi_arch in ARCH_BITS and python_arch in ARCH_BITS and soabi_arch != python_arch:
+                findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_arch}, the arch fact says {python_arch}")
         if known(python["free_threaded_build"]) is False and known(python["gil_enabled"]) is False:
             findings.error("abi-contradiction", f"{base}/gil_enabled", "a build without free threading always holds the GIL")
 
@@ -571,8 +620,8 @@ def check_compute(document, findings):
     for index, backend in enumerate(backends):
         if ids.count(backend["id"]) > 1:
             findings.error("backend-reference", f"/compute/backends/{index}/id", f"duplicate backend id {backend['id']!r}")
-        if (backend["kind"] == "cpu") != (backend["api"] == "cpu"):
-            findings.error("backend-reference", f"/compute/backends/{index}", "the cpu backend kind and the cpu API go together")
+        if backend["api"] == "cpu" and backend["kind"] != "cpu":
+            findings.error("backend-reference", f"/compute/backends/{index}", "the cpu API runs on the cpu backend kind")
 
 
 # ---------------------------------------------------------------------------
@@ -597,10 +646,16 @@ def check_stages(document, findings):
         status = stage["status"]
         if status in RAN and not stage.get("evidence"):
             findings.error("stage-fields", f"{base}/evidence", f"a {status} stage cites the log or artifact that shows it")
+        elif status in RAN and not document["synthetic"]:
+            kinds = STAGE_EVIDENCE + (("tool:",) if name == "detect" else ())
+            if not any(ref.startswith(kinds) for ref in stage["evidence"]):
+                findings.error("stage-fields", f"{base}/evidence", f"a {status} stage of a real run cites a {' or '.join(kinds)} reference")
         if status != "passed" and not stage.get("reason"):
             findings.error("stage-fields", f"{base}/reason", f"a {status} stage says why")
         if status == "not-run" and stage.get("evidence"):
             findings.error("stage-fields", f"{base}/evidence", "a stage that did not run has no result to cite; it may be failed or blocked instead")
+        if status == "not-applicable" and name not in OPTIONAL_STAGES:
+            findings.error("stage-fields", f"{base}/status", f"every workload has a {name} stage; record it as not-run or blocked with a reason")
         if status in RAN and "privilege" not in stage:
             findings.error("stage-fields", f"{base}/privilege", f"a {status} stage records whether it escalated privileges")
         for prerequisite in PREREQUISITES[name]:
@@ -624,6 +679,8 @@ def check_stages(document, findings):
             if effective is None or effective["id"] != requested["id"]:
                 ran = "nothing" if effective is None else f"{effective['id']} ({effective['kind']})"
                 findings.error("accelerator-fallback", f"{base}/compute", f"{requested['kind']} backend {requested['id']} was requested but {ran} ran; a fallback is not an accelerator pass")
+    if document["probe_errors"] and stages["detect"]["status"] == "passed":
+        findings.error("stage-fields", "/stages/detect/status", "detect cannot pass while probe_errors lists probes that failed")
     expected = overall_of(stages)
     if document["overall"] != expected:
         findings.error("overall-mismatch", "/overall", f"the stages give {expected}, not {document['overall']}")
@@ -651,6 +708,8 @@ def check_run(document, findings):
     repository, run_id, url = known(ci["repository"]), known(ci["run_id"]), known(ci["run_url"])
     if repository and run_id and url and not re.fullmatch(rf"https://[A-Za-z0-9.-]+/{re.escape(repository)}/actions/runs/{re.escape(run_id)}(/attempts/[1-9][0-9]*)?", url):
         findings.error("ci-evidence", "/run/ci/run_url", "the run URL does not point at this repository's run")
+    if known(revision["tested_sha"]) is None:
+        findings.error("ci-evidence", "/run/revision/tested_sha", "a GitHub Actions record names the commit its checkout holds")
     if known(revision["event_sha"]) is None:
         findings.error("ci-evidence", "/run/revision/event_sha", "a GitHub Actions record keeps GITHUB_SHA")
     if known(ci["event"]) in ("pull_request", "pull_request_target"):
@@ -702,9 +761,17 @@ def policy_violations(result):
     if superuser is not False:
         state = "runs as the superuser" if superuser else "is not shown to run as a non-root user"
         yield "app-non-root", None, None, "/workload/identity/superuser", f"the workload {state}", None
-    for index, layer in enumerate(layers_of(result)):
-        if known(layer["kind"]) != "container":
-            continue
+    layers = layers_of(result)
+    family = known(layers[-1]["os"]["family"])
+    containers = [index for index, layer in enumerate(layers) if known(layer["kind"]) == "container"]
+    if not containers and family in (None, "linux") and known(result["workload"]["isolation"]["pid_namespace"]["initial"]) is not True:
+        # Without a container layer and outside the initial PID namespace, an undetected container cannot be ruled out.
+        path, message = "/workload/isolation/pid_namespace/initial", "no layer is a container, but the workload is not shown to run outside one"
+        yield "engine-rootless", "layers", None, path, message, None
+        yield "no-privileged-container", "layers", None, path, message, None
+        yield "minimal-devices", "devices", None, path, message, None
+    for index in containers:
+        layer = layers[index]
         container = layer.get("container", {})
         base = f"/environment/layers/{index}/container"
         mode = known(container.get("engine_mode"))
@@ -726,7 +793,7 @@ def policy_violations(result):
         if escalation != "none":
             yield "no-privilege-escalation", "stages", name, f"/stages/{name}/privilege/escalation", f"{name} {'used ' + escalation if escalation else 'is not shown to have used no escalation'}", None
     effective = result["workload"]["isolation"]["capabilities"]["effective"]
-    if effective["provenance"] == "not-applicable":
+    if effective["provenance"] == "not-applicable" and family not in (None, "linux"):
         return
     capabilities = known(effective)
     if capabilities is None:
@@ -771,42 +838,59 @@ def check_policy(result, profile, findings):
 
 def check_support(profile, strategy_lanes, findings):
     support = profile["support"]
-    status, lane = support["status"], support["lane"]
-    if status == "checked" and profile["synthetic"]:
+    status, lane, synthetic = support["status"], support["lane"], profile["synthetic"]
+    if status == "checked" and synthetic:
         findings.error("support-claim", "/support/status", "a synthetic profile cannot claim a checked lane")
-    if status == "not-assessed":
-        if lane is not None:
-            findings.error("support-claim", "/support/lane", "a lane that docs/DEPENDENCY-STRATEGY.md lists has a status there; use it")
-        return
     if lane is None:
-        findings.error("support-claim", "/support/lane", f"a {status} claim names its docs/DEPENDENCY-STRATEGY.md lane")
+        if status != "not-assessed":
+            findings.error("support-claim", "/support/lane", f"a {status} claim names its docs/DEPENDENCY-STRATEGY.md lane")
         return
+    if status == "not-assessed" and not synthetic:
+        findings.error("support-claim", "/support/status", "a real profile of a lane that docs/DEPENDENCY-STRATEGY.md lists copies its status from there")
     if strategy_lanes is None:
         if status == "checked":
             findings.warning("support-claim-unverified", "/support/status", "checked claim not compared with docs/DEPENDENCY-STRATEGY.md; pass --dependency-strategy")
         return
     if lane not in strategy_lanes:
         findings.error("support-claim", "/support/lane", f"docs/DEPENDENCY-STRATEGY.md has no lane {lane!r}")
-    elif strategy_lanes[lane] != status:
-        findings.error("support-claim", "/support/status", f"docs/DEPENDENCY-STRATEGY.md records {lane!r} as {strategy_lanes[lane] or 'a mixed status'}, not {status}")
+    elif status != "not-assessed" and status not in strategy_lanes[lane]:
+        recorded = " or ".join(sorted(strategy_lanes[lane])) or "no status this validator reads"
+        findings.error("support-claim", "/support/status", f"docs/DEPENDENCY-STRATEGY.md records {lane!r} as {recorded}, not {status}")
+
+
+def check_accelerator(profile, findings):
+    name = profile.get("accelerator_backend")
+    if name is None:
+        return
+    backend = {backend["id"]: backend for backend in profile["compute"]["backends"]}.get(name)
+    if backend is None or backend["kind"] not in ("gpu", "npu"):
+        findings.error("backend-reference", "/accelerator_backend", f"{name!r} is not a gpu or npu backend in /compute/backends")
 
 
 def check_evidence_sources(profile, findings):
     if profile["synthetic"]:
         return
+    if not profile["evidence_sources"]:
+        findings.error("evidence-source", "/evidence_sources", "a real profile names the workflow job that records it")
     for index, source in enumerate(profile["evidence_sources"]):
         workflow = ROOT / source["workflow"]
         base = f"/evidence_sources/{index}"
         if not source["workflow"].startswith(".github/workflows/") or ".." in source["workflow"] or not workflow.is_file():
             findings.error("evidence-source", f"{base}/workflow", f"no workflow file {source['workflow']}")
             continue
-        text = workflow.read_text(encoding="utf-8")
-        if not re.search(rf"^  {re.escape(source['job'])}:[ \t]*$", text, re.MULTILINE):
+        jobs = re.search(r"^jobs:[ \t]*\n(.*?)(?=^\S|\Z)", workflow.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL)
+        if not jobs or not re.search(rf"^  {re.escape(source['job'])}:[ \t]*$", jobs.group(1), re.MULTILINE):
             findings.error("evidence-source", f"{base}/job", f"{source['workflow']} has no job {source['job']!r}")
 
 
-COMPARED_LAYER_FACTS = (("kind",), ("technology",), ("os", "family"), ("os", "name"), ("os", "version"), ("os", "kernel"), ("cpu", "arch"), ("cpu", "execution"), ("service_manager", "name"))
-COMPARED_CONTAINER_FACTS = (("engine_mode",), ("privileged",), ("devices",), ("orchestration", "name"))
+def facts_of(node, keys=()):
+    """(key path, fact) for every fact in an object, outside its extensions."""
+    if is_fact(node):
+        yield keys, node
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            if key != "extensions":
+                yield from facts_of(value, keys + (key,))
 
 
 def dig(mapping, keys):
@@ -840,27 +924,46 @@ def check_against_profile(result, profile, findings):
         findings.error("profile-mismatch", "/environment/layers", f"the profile declares {len(declared_layers)} layers, the result has {len(observed_layers)}")
     else:
         for index, (declared, observed) in enumerate(zip(declared_layers, observed_layers)):
-            for keys in COMPARED_LAYER_FACTS:
-                compare(f"/environment/layers/{index}/{'/'.join(keys)}", dig(declared, keys), dig(observed, keys))
-            for keys in COMPARED_CONTAINER_FACTS:
-                compare(f"/environment/layers/{index}/container/{'/'.join(keys)}", dig(declared, ("container",) + keys), dig(observed, ("container",) + keys))
-    for runtime in ("python", "node"):
-        for name, fact in profile["workload"]["runtimes"][runtime].items():
-            compare(f"/workload/runtimes/{runtime}/{name}", fact, result["workload"]["runtimes"][runtime][name])
-    observed_backends = {backend["id"]: backend for backend in result["compute"]["backends"]}
+            for keys, fact in facts_of(declared):
+                compare(f"/environment/layers/{index}/{'/'.join(keys)}", fact, dig(observed, keys))
+    for keys, fact in facts_of(profile["workload"]["runtimes"]):
+        compare(f"/workload/runtimes/{'/'.join(keys)}", fact, dig(result["workload"]["runtimes"], keys))
+    observed_backends = {backend["id"]: (index, backend) for index, backend in enumerate(result["compute"]["backends"])}
     for backend in profile["compute"]["backends"]:
-        other = observed_backends.get(backend["id"])
+        index, other = observed_backends.get(backend["id"], (None, None))
         if other is None:
             findings.error("profile-mismatch", "/compute/backends", f"the profile's backend {backend['id']!r} is missing from the result")
         elif (other["kind"], other["api"]) != (backend["kind"], backend["api"]):
-            findings.error("profile-mismatch", "/compute/backends", f"backend {backend['id']!r} has another kind or API than the profile declares")
+            findings.error("profile-mismatch", f"/compute/backends/{index}", f"backend {backend['id']!r} has another kind or API than the profile declares")
+        else:
+            for keys, fact in facts_of(backend):
+                compare(f"/compute/backends/{index}/{'/'.join(keys)}", fact, dig(other, keys))
+    compare("/compute/accelerator_inventory", profile["compute"]["accelerator_inventory"], result["compute"]["accelerator_inventory"])
+    accelerator = profile.get("accelerator_backend")
     for name in profile["required_stages"]:
-        if result["stages"][name]["status"] != "passed":
-            findings.error("required-stage", f"/stages/{name}/status", f"profile {profile['id']} requires {name} to pass; it is {result['stages'][name]['status']}")
+        stage = result["stages"][name]
+        if stage["status"] != "passed":
+            findings.error("required-stage", f"/stages/{name}/status", f"profile {profile['id']} requires {name} to pass; it is {stage['status']}")
+        elif accelerator is not None and name in WORKLOAD_STAGES:
+            compute = stage.get("compute") or {}
+            if compute.get("requested") != accelerator or compute.get("effective") != accelerator:
+                ran = compute.get("effective") or "no recorded backend"
+                findings.error("required-stage", f"/stages/{name}/compute", f"profile {profile['id']} requires {name} to run on {accelerator}; it ran on {ran}")
+
+
+STATUS_WORDS = (
+    ("checked", "Checked"),
+    ("statically-resolvable", "Statically resolvable"),
+    ("not-supported", "Not supported|Not binary-installable|Incomplete"),
+)
 
 
 def read_strategy_lanes(path):
-    """Map each lane in the DEPENDENCY-STRATEGY.md lane table to its backend lock status."""
+    """Map each lane in the DEPENDENCY-STRATEGY.md lane table to the set of its backend lock statuses.
+
+    A cell names one status first, or one per condition ("macOS 15 or newer: statically
+    resolvable. macOS 14 or older: not binary-installable"); a cell with neither gives an empty set.
+    """
     text = pathlib.Path(path).read_text(encoding="utf-8")
     section = re.search(r"^## Platform and accelerator lanes\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
     if not section:
@@ -874,19 +977,16 @@ def read_strategy_lanes(path):
     if not raw:
         raise ValueError("no lanes in the lane table")
 
-    def status(cell, depth=0):
+    def statuses(cell, depth=0):
         same = re.match(r"Same as (.+)$", cell)
         if same and depth < 3:
-            return status(raw.get(same.group(1).strip(), ""), depth + 1)
-        if cell.startswith("Checked"):
-            return "checked"
-        if cell.startswith("Statically resolvable"):
-            return "statically-resolvable"
-        if re.match(r"(Not supported|Not binary-installable|Incomplete)\b", cell):
-            return "not-supported"
-        return None
+            return statuses(raw.get(same.group(1).strip(), ""), depth + 1)
+        for name, words in STATUS_WORDS:
+            if re.match(rf"(?:{words})\b", cell):
+                return frozenset({name})
+        return frozenset(name for name, words in STATUS_WORDS if re.search(rf": (?:{words})\b", cell, re.IGNORECASE))
 
-    return {lane: status(cell) for lane, cell in raw.items()}
+    return {lane: statuses(cell) for lane, cell in raw.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +1011,7 @@ def validate_document(document, schema, profile=None, strategy_lanes=None, evalu
     check_compute(document, findings)
     if document["kind"] == "profile":
         check_support(document, strategy_lanes, findings)
+        check_accelerator(document, findings)
         check_evidence_sources(document, findings)
         effective_policy(document, findings)
         return findings
@@ -920,7 +1021,8 @@ def validate_document(document, schema, profile=None, strategy_lanes=None, evalu
     if profile is not None:
         check_against_profile(document, profile, findings)
     elif document["profile_id"] is not None:
-        findings.warning("profile-unchecked", "/profile_id", "the result names a profile that was not given; the default policy applies")
+        policy = "; the default policy applies" if evaluate_policy else ""
+        findings.warning("profile-unchecked", "/profile_id", f"the result names a profile that was not given{policy}")
     if evaluate_policy:
         check_policy(document, profile, findings)
     return findings
@@ -933,7 +1035,8 @@ def load_schema(path=DEFAULT_SCHEMA):
 
 
 def markdown_cell(text):
-    return CONTROL.sub(" ", str(text)).replace("|", "\\|").replace("`", "'")
+    """Text for one Markdown table cell: control characters become spaces, and Markdown and HTML syntax is escaped."""
+    return re.sub(r"([\\`*_~\[\]()<>!|])", r"\\\1", CONTROL.sub(" ", str(text)))
 
 
 def main(argv=None):
@@ -1005,8 +1108,12 @@ def main(argv=None):
             "A valid record shows that the schema, the validator and the probe worked on this runner for this commit. It is not a support claim for this or any other platform; support status is recorded only in docs/DEPENDENCY-STRATEGY.md.",
             "",
         ]
-        with open(args.summary, "a", encoding="utf-8") as handle:
-            handle.write("\n".join(lines))
+        try:
+            with open(args.summary, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines))
+        except OSError as exc:
+            print(f"error: cannot write the summary {args.summary}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
     return 1 if invalid else 0
 
 

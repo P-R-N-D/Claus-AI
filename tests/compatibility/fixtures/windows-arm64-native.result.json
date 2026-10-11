@@ -263,6 +263,13 @@
           "provenance": "not-applicable",
           "reason": "a Linux interface; not applicable on Windows"
         }
+      },
+      "pid_namespace": {
+        "initial": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        }
       }
     },
     "runtimes": {

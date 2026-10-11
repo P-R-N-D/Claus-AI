@@ -771,7 +771,8 @@
         "seccomp",
         "apparmor",
         "selinux",
-        "cgroup"
+        "cgroup",
+        "pid_namespace"
       ],
       "additionalProperties": false,
       "properties": {
@@ -841,6 +842,19 @@
               "$ref": "#/$defs/fact_cgroup_version"
             },
             "delegated": {
+              "$ref": "#/$defs/fact_boolean"
+            }
+          }
+        },
+        "pid_namespace": {
+          "description": "Containers get their own PID namespace; the initial one shows the process is not in one.",
+          "type": "object",
+          "required": [
+            "initial"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "initial": {
               "$ref": "#/$defs/fact_boolean"
             }
           }
@@ -1418,6 +1432,14 @@
             ]
           },
           "maxItems": 7
+        },
+        "accelerator_backend": {
+          "description": "The id of a gpu or npu backend in compute.backends that the execute, correctness and performance stages, when required, must run on. Absent or null for a CPU lane.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z0-9][a-z0-9._+-]{0,63}$"
         },
         "environment": {
           "$ref": "#/$defs/environment"

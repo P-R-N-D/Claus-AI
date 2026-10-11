@@ -496,7 +496,7 @@ class LinuxProbeTests(Case):
                     # loongarch32, 31-bit s390).
                     for machine, elf_class, order, expected in ((3, 1, 1, "x86"), (40, 1, 1, "armv7"), (3, 2, 1, None), (62, 2, 1, "x86_64"), (62, 1, 1, None),
                                                                 (183, 1, 1, None), (243, 2, 1, "riscv64"), (243, 1, 1, None), (258, 2, 1, "loongarch64"),
-                                                                (258, 1, 1, None), (22, 1, 2, None)):
+                                                                (258, 1, 1, None), (22, 1, 2, None), (40, 1, 2, None), (40, 2, 1, None), (21, 1, 1, None)):
                         executable.write_bytes(b"\x7fELF" + bytes([elf_class, order]) + bytes(12) + machine.to_bytes(2, "little" if order == 1 else "big"))
                         with self.subTest(machine=machine, elf_class=elf_class, order=order), mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
                                 mock.patch.object(collector.sys, "executable", str(executable)):

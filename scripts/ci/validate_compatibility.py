@@ -522,18 +522,19 @@ def soabi_target(soabi):
 
 
 def libc_of_fact(libc):
-    """The C library a libc fact names: glibc or musl when it starts with that name in any letter case and no
-    letter follows, otherwise the fact as written; None for no value."""
+    """The C library a libc fact names: glibc or musl when it starts with that name in any ASCII letter case and
+    no letter follows, otherwise the fact as written; None for no value."""
     if not isinstance(libc, str):
         return None
-    name = re.match(r"(glibc|musl)(?![a-z])", libc, re.IGNORECASE)
-    return name.group(1).lower() if name else libc
+    name = re.match(r"(?ai:glibc|musl)(?![^\W\d_])", libc)
+    return name.group(0).lower() if name else libc
 
 
 def libc_of_tag(soabi):
-    """The C library a Linux ABI tag names: glibc for gnu (gnueabihf, gnux32), musl, or the tag's own word,
-    such as android; None for a tag that names none."""
-    match = re.search(r"-linux-([a-z]+)[a-z0-9]*$", soabi) if isinstance(soabi, str) else None
+    """The C library a Linux ABI tag names: glibc for gnu (gnueabihf, gnux32), musl (musleabihf), or the tag's
+    own word, such as android; None for a tag that names none."""
+    # The word and the digits after it cannot overlap, so a long tag is searched in linear time.
+    match = re.search(r"-linux-([a-z]+)(?:[0-9][a-z0-9]*)?$", soabi) if isinstance(soabi, str) else None
     if not match:
         return None
     word = match.group(1)
@@ -760,7 +761,8 @@ def check_workload(document, findings):
         tag_libc, fact_libc = libc_of_tag(known(python["soabi"])), libc_of_fact(known(python["libc"]))
         # Two names neither of which is glibc or musl (android and bionic) are not compared.
         if tag_libc and fact_libc and tag_libc != fact_libc and {tag_libc, fact_libc} & {"glibc", "musl"}:
-            findings.error("abi-contradiction", f"{base}/libc", f"the ABI tag is for {tag_libc}, the libc fact says {known(python['libc'])!r}")
+            names = fact_libc if fact_libc in ("glibc", "musl") else "a C library other than glibc or musl (only a fact that starts with glibc or musl names them)"
+            findings.error("abi-contradiction", f"{base}/libc", f"the ABI tag is for {tag_libc}, the libc fact {known(python['libc'])!r} names {names}")
         if known(python["free_threaded_build"]) is False and known(python["gil_enabled"]) is False:
             findings.error("abi-contradiction", f"{base}/gil_enabled", "a build without free threading always holds the GIL")
 

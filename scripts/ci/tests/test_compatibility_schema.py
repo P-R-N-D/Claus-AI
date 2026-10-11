@@ -624,11 +624,15 @@ class EnvironmentRuleTests(Case):
                 self.assertValid(check(changed(result, lambda d: d["workload"]["runtimes"]["python"].update(libc=libc_fact, soabi=fact(soabi, "synthetic:x")))))
         for libc, soabi in (("glibc 2.39", "cpython-312-x86_64-linux-musl"), ("musl 1.2.5", "cpython-312-x86_64-linux-gnu"),
                             ("musl 1.2.5", "cpython-312-x86_64-linux-gnux32"), ("uclibc-ng 1.0.45", "cpython-312-x86_64-linux-gnu"),
-                            ("glibc 2.39", "cpython-312-x86_64-linux-android")):
+                            ("glibc 2.39", "cpython-312-x86_64-linux-android"), ("musl 1.2.5", "cpython-312-x86_64-linux-android"),
+                            ("bionic", "cpython-312-x86_64-linux-musl"), ("Ubuntu GLIBC 2.39", "cpython-312-x86_64-linux-gnu")):
             with self.subTest(libc=libc, soabi=soabi):
                 mixed = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(libc=fact(libc, "synthetic:x"), soabi=fact(soabi, "synthetic:x")))
                 self.assertCodes(check(mixed), "abi-contradiction")
                 self.assertFinding(check(mixed), "abi-contradiction", "/workload/runtimes/python/libc")
+                if libc == "Ubuntu GLIBC 2.39":
+                    # The message says why a fact that mentions glibc later on does not name it.
+                    self.assertIn("other than glibc or musl", [message for _, code, _, message in check(mixed).errors if code == "abi-contradiction"][0])
         # The platform part of the tag is checked even when the version is not known.
         no_version = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(version=unknown()))
         for soabi, code in (("cpython-312-aarch64-linux-gnu", "abi-contradiction"), ("cp312-win_amd64", "os-contradiction")):
@@ -1220,6 +1224,9 @@ class ProfileTests(Case):
             ("not-supported", "Linux musl (Alpine)", "musl 1.2.5", None, []),
             ("not-supported", "Linux musl (Alpine)", "Musl 1.2.5", None, []),
             ("not-supported", "Linux musl (Alpine)", "musl1.2.5", None, []),
+            ("not-supported", "Linux musl (Alpine)", "muslx 1.2.5", None, at_libc),
+            ("not-supported", "Linux musl (Alpine)", "musl\u00e9 1.2.5", None, at_libc),
+            ("not-supported", "Linux musl (Alpine)", None, "cpython-312-arm-linux-musleabihf", []),
             ("not-supported", "Linux musl (Alpine)", "glibc 2.39", None, at_libc),
             ("not-supported", "Linux musl (Alpine)", "glibc 2.39", "cpython-312-x86_64-linux-gnu", at_libc),
             ("not-assessed", "Linux x86-64 glibc", "uclibc-ng 1.0.45", None, at_libc),
@@ -1232,11 +1239,19 @@ class ProfileTests(Case):
         for libc, soabi, family in (("uclibc-ng 1.0.45", None, ("uclibc-ng 1.0.45", "/workload/runtimes/python/libc")),
                                     ("GLIBC 2.39", None, ("glibc", "/workload/runtimes/python/libc")),
                                     ("Ubuntu GLIBC 2.39", None, ("Ubuntu GLIBC 2.39", "/workload/runtimes/python/libc")),
+                                    ("glibcx 2.39", None, ("glibcx 2.39", "/workload/runtimes/python/libc")),
+                                    ("gl\u0131bc 2.39", None, ("gl\u0131bc 2.39", "/workload/runtimes/python/libc")),
+                                    (None, "cpython-312-arm-linux-musleabihf", ("musl", "/workload/runtimes/python/soabi")),
+                                    (None, "cpython-312-x86_64-linux-gnu_x", (None, None)),
                                     (None, "cpython-312-aarch64-linux-android", ("android", "/workload/runtimes/python/soabi")),
                                     (None, "cpython-312-arm-linux-gnueabihf", ("glibc", "/workload/runtimes/python/soabi"))):
             with self.subTest(libc=libc, soabi=soabi):
                 facts = {"libc": fact(libc, provenance="declared") if libc else unknown(), "soabi": fact(soabi, provenance="declared") if soabi else unknown()}
                 self.assertEqual(validator.libc_family(facts), family)
+        # A long tag is searched in linear time; overlapping repeats take seconds here.
+        started = time.perf_counter()
+        self.assertIsNone(validator.libc_of_tag("cpython-312-x86_64-linux-" + "a" * 50000 + "-"))
+        self.assertLess(time.perf_counter() - started, 1)
         # A WSL2 lane needs a WSL2 layer, and a native Windows lane none.
         wsl = fixture("windows-arm64-wsl2-podman.profile")
         self.assertValid(check(wsl))

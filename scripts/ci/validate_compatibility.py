@@ -150,7 +150,7 @@ SECRET_SHAPES = (
     ("GitHub token", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
     ("AWS access key ID", re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])")),
     ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    ("Slack token", re.compile(r"xox[abposr]-[A-Za-z0-9-]{10,}")),
+    ("Slack token", re.compile(r"(?:xox[abposr]|xapp)-[A-Za-z0-9-]{10,}")),
     # A JSON Web Token: "eyJ", at least 8 more base64url characters and ".", twice. The run that holds the first
     # "eyJ" is matched from its start, so each run is tested once and a long run does not make the search quadratic.
     ("JSON Web Token", re.compile(r"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*?eyJ[A-Za-z0-9_-]{8})[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]{8,}\.")),
@@ -866,6 +866,8 @@ def check_run(document, findings):
     for name in ("event", "repository", "run_id", "run_attempt", "run_url", "job"):
         if measured(ci[name]) is None:
             findings.error("ci-evidence", f"/run/ci/{name}", "a GitHub Actions record names its run, as observed or inferred")
+    if measured(ci["run_attempt"]) == 0:
+        findings.error("ci-evidence", "/run/ci/run_attempt", "GitHub numbers a run's attempts from 1")
     repository, run_id, url = measured(ci["repository"]), measured(ci["run_id"]), measured(ci["run_url"])
     if repository and run_id and url and not re.fullmatch(rf"https://[A-Za-z0-9.-]+/{re.escape(repository)}/actions/runs/{re.escape(run_id)}(/attempts/[1-9][0-9]*)?", url):
         findings.error("ci-evidence", "/run/ci/run_url", "the run URL does not point at this repository's run")
@@ -1335,6 +1337,18 @@ def main(argv=None):
     except (OSError, ValueError, SchemaError, RecursionError, TypeError) as exc:
         print(plain(f"error: cannot use schema {args.schema}: {exc}"), file=sys.stderr)
         return 2
+
+    def validate(document, *rest, **options):
+        # The rules across fields read the shape the default schema requires. Another schema can accept a document
+        # they cannot read: that is a usage error, not a verdict. With the default schema it would be a bug.
+        try:
+            return validate_document(document, schema, *rest, **options)
+        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            if args.schema == DEFAULT_SCHEMA:
+                raise
+            print(plain(f"error: schema {args.schema} accepts a document the rules across fields cannot read ({type(exc).__name__})"), file=sys.stderr)
+            return None
+
     strategy_lanes = None
     if args.dependency_strategy:
         try:
@@ -1349,8 +1363,8 @@ def main(argv=None):
         except (OSError, ValueError) as exc:
             print(plain(f"error: cannot read profile {args.profile}: {exc}"), file=sys.stderr)
             return 2
-        profile_findings = validate_document(profile, schema, strategy_lanes=strategy_lanes) if isinstance(profile, dict) else None
-        if not isinstance(profile, dict) or profile.get("kind") != "profile" or profile_findings.errors:
+        profile_findings = validate(profile, strategy_lanes=strategy_lanes) if isinstance(profile, dict) else None
+        if not isinstance(profile, dict) or profile.get("kind") != "profile" or profile_findings is None or profile_findings.errors:
             print(plain(f"error: {args.profile} is not a valid profile"), file=sys.stderr)
             for level, code, path, message in (profile_findings.items if profile_findings else []):
                 print(plain(f"  {level.upper()} {code} {path}: {message}"), file=sys.stderr)
@@ -1370,7 +1384,9 @@ def main(argv=None):
             findings.error("json", "/", f"not strict JSON: {exc}")
             document = None
         else:
-            findings = validate_document(document, schema, profile, strategy_lanes, not args.no_policy, args.require_real)
+            findings = validate(document, profile, strategy_lanes, not args.no_policy, args.require_real)
+            if findings is None:
+                return 2
         errors = findings.errors
         warnings = [item for item in findings.items if item[0] == "warning"]
         verdict = "invalid" if errors else "valid"

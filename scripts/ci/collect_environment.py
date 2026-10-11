@@ -10,8 +10,8 @@ The collector reads the following, and nothing else:
 - The environment variables in ENV_ALLOWLIST.
 - The pull request head and base in the GitHub Actions event file.
 - The checkout's .git/HEAD, and the loose ref or packed-refs line it points to.
-- The first 4 KiB that `node -p` writes, run with an empty environment and
-  stopped after 30 seconds.
+- The first 4 KiB that `node -p` writes, run with an empty environment (on
+  Windows, SystemRoot only) and stopped after 30 seconds.
 
 Files are read only when they are regular files, and are opened so that a FIFO
 cannot block the probe.
@@ -80,19 +80,20 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 TOOL = "tool:collect-environment"
 
 # The only environment variables the collector reads. Values of PRESENCE_ONLY
-# variables are never recorded: PATH is used only to find node, and
-# GITHUB_EVENT_PATH only to open the event file.
+# variables are never recorded: PATH is used only to find node,
+# GITHUB_EVENT_PATH only to open the event file, and SystemRoot only to start
+# node on Windows.
 ENV_ALLOWLIST = frozenset({
     "GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_SHA", "GITHUB_REF",
     "GITHUB_REPOSITORY", "GITHUB_SERVER_URL", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
     "GITHUB_WORKFLOW_REF", "GITHUB_JOB", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH",
     "ImageOS", "ImageVersion", "container", "KUBERNETES_SERVICE_HOST", "PATH",
     "_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH",
-    "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER",
+    "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER", "SystemRoot",
 })
 # sysconfig reads these even under python -I; when one is set, its values are not recorded.
 SYSCONFIG_OVERRIDES = ("_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH")
-PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "PATH", "GITHUB_EVENT_PATH", "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER", *SYSCONFIG_OVERRIDES})
+PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "PATH", "GITHUB_EVENT_PATH", "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER", "SystemRoot", *SYSCONFIG_OVERRIDES})
 
 STAGES = ("detect", "install", "initialize", "execute", "correctness", "security", "performance")
 STATUSES = ("passed", "failed", "blocked", "not-run", "not-applicable")
@@ -145,7 +146,7 @@ SECRET_SHAPES = (
     ("GitHub token", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
     ("AWS access key ID", re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])")),
     ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    ("Slack token", re.compile(r"xox[abposr]-[A-Za-z0-9-]{10,}")),
+    ("Slack token", re.compile(r"(?:xox[abposr]|xapp)-[A-Za-z0-9-]{10,}")),
     # A JSON Web Token: "eyJ", at least 8 more base64url characters and ".", twice. The run that holds the first
     # "eyJ" is matched from its start, so each run is tested once and a long run does not make the search quadratic.
     ("JSON Web Token", re.compile(r"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*?eyJ[A-Za-z0-9_-]{8})[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]{8,}\.")),
@@ -880,10 +881,12 @@ class Probe:
         executable = shutil.which("node", path=self.env("PATH") or os.defpath)
         if executable is None:
             return all_unknown("node is not on PATH")
+        # Windows needs SystemRoot to start a program that loads side-by-side assemblies; nothing else is passed.
+        system_root = self.env("SystemRoot") if os.name == "nt" else None
         try:
             # On POSIX node gets a session, and so a process group, of its own; Windows ignores the option.
             process = subprocess.Popen(
-                [executable, "-p", NODE_EXPRESSION], env={}, stdin=subprocess.DEVNULL,
+                [executable, "-p", NODE_EXPRESSION], env={"SystemRoot": system_root} if system_root else {}, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
             )
         except OSError as exc:

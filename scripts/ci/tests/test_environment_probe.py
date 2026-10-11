@@ -1184,6 +1184,22 @@ class NodeTests(Case):
         self.assertEqual(at_signal, [None])
         self.assertEqual((facts["version"]["reason"], errors), (f"node did not finish within {collector.NODE_TIMEOUT} seconds", []))
 
+    def test_node_gets_system_root_alone_on_windows(self):
+        # Windows needs SystemRoot to start some programs, so there node gets that variable; elsewhere it gets none.
+        environments = []
+
+        def popen(*args, **kwargs):
+            environments.append(kwargs["env"])
+            raise OSError("not started")
+
+        with FakeMachine(env={"PATH": "/x", "SystemRoot": "C:\\Windows"}) as machine:
+            for name in ("posix", "nt"):
+                probe = machine.probe(probe_node=True)
+                with self.subTest(os=name), mock.patch.object(collector.shutil, "which", return_value="/x/node"), \
+                        mock.patch.object(collector.subprocess, "Popen", popen), mock.patch.object(collector.os, "name", name):
+                    self.assertEqual(probe.node(("x86_64", "x86"))["version"]["reason"], "node could not be run (OSError)")
+        self.assertEqual(environments, [{}, {"SystemRoot": "C:\\Windows"}])
+
     def test_node_absent_or_skipped(self):
         with tempfile.TemporaryDirectory() as directory, FakeMachine(env={"PATH": directory}) as machine:
             self.assertEqual(machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"], "node is not on PATH")
@@ -1467,8 +1483,8 @@ class SourceTests(unittest.TestCase):
         self.assertEqual([call.func.attr for call in calls], ["Popen"])
         keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
         self.assertNotIn("shell", keywords)
-        self.assertIsInstance(keywords["env"], ast.Dict)
-        self.assertEqual(keywords["env"].keys, [])
+        # node gets an empty environment, or on Windows SystemRoot alone.
+        self.assertEqual(ast.unparse(keywords["env"]), "{'SystemRoot': system_root} if system_root else {}")
         # stderr is discarded, and stdout is read through the bounded reader in Probe.node.
         self.assertEqual(ast.unparse(keywords["stderr"]), "subprocess.DEVNULL")
 

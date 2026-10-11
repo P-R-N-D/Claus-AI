@@ -496,7 +496,7 @@ class ProvenanceTests(Case):
         self.assertCodes(check(document), "secret-like-value")
         self.assertNotIn("ABCDEFGHIJKLMNOP", validator.plain("key AKIA" + "ABCDEFGHIJKLMNOP" + "_suffix"))
         # A sample for every shape, found on its own and right after a letter, also one outside ASCII.
-        samples = ("ghp_" + "A" * 36, "github_pat_" + "a" * 30, "AKIA" + "ABCDEFGHIJKLMNOP", "-----BEGIN OPENSSH PRIVATE KEY-----", "xoxb-" + "A" * 12, "eyJ" + "A" * 10 + ".eyJ" + "B" * 10 + ".")
+        samples = ("ghp_" + "A" * 36, "github_pat_" + "a" * 30, "AKIA" + "ABCDEFGHIJKLMNOP", "-----BEGIN OPENSSH PRIVATE KEY-----", "xoxb-" + "A" * 12, "xapp-1-" + "A" * 12, "eyJ" + "A" * 10 + ".eyJ" + "B" * 10 + ".")
         for label, shape in validator.SECRET_SHAPES:
             self.assertTrue(any(shape.search(sample) for sample in samples), f"no sample for {label}")
         for sample in samples:
@@ -1470,6 +1470,7 @@ class ProfileTests(Case):
             ("pull request without its head", lambda d: revision(d).update(pr_head_sha=unknown())),
             ("pull request without its base", lambda d: revision(d).update(pr_base_sha=unknown())),
             ("no run attempt", lambda d: ci(d).update(run_attempt=unknown())),
+            ("run attempt 0", lambda d: ci(d).update(run_attempt=fact(0, "env:GITHUB_RUN_ATTEMPT"))),
             ("run URL of another run", lambda d: ci(d).update(run_url=fact("https://github.com/P-R-N-D/Claus-AI/actions/runs/101", "env:x", provenance="inferred"))),
             ("pull_request_target without the pull request", lambda d: (ci(d).update(event=fact("pull_request_target", "env:GITHUB_EVENT_NAME")),
                                                                          revision(d).update(pr_head_sha=unknown(), pr_base_sha=unknown()))),
@@ -1484,6 +1485,7 @@ class ProfileTests(Case):
                     declared = changed(result, lambda d: group(d).update({name: fact(group(d)[name]["value"], provenance="declared")}))
                     self.assertFinding(check(declared, profile), "ci-evidence", path)
         self.assertFinding(check(changed(result, lambda d: ci(d).update(job=unknown())), profile), "ci-evidence", "/run/ci/job")
+        self.assertFinding(check(changed(result, lambda d: ci(d).update(run_attempt=fact(0, "env:GITHUB_RUN_ATTEMPT"))), profile), "ci-evidence", "/run/ci/run_attempt")
         push = changed(result, lambda d: (ci(d).update(event=fact("push", "env:GITHUB_EVENT_NAME")),
                                           revision(d).update(pr_head_sha={"value": None, "provenance": "not-applicable", "reason": "push"},
                                                              pr_base_sha={"value": None, "provenance": "not-applicable", "reason": "push"})))
@@ -1616,6 +1618,21 @@ class CommandTests(Case):
                     code, output = self.run_main("--schema", schema, FIXTURES / "linux-x64-vm.result.json")
                     self.assertEqual(code, 2)
                     self.assertIn("cannot use schema", output)
+
+    def test_a_schema_that_accepts_what_the_rules_cannot_read_is_a_usage_error(self):
+        # The rules across fields read the shape the default schema requires; a looser schema is no verdict.
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            schema, document = directory / "schema.json", directory / "record.json"
+            schema.write_text(json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}), encoding="utf-8")
+            for content in ({}, {"kind": "result", "run": {}}):
+                with self.subTest(content=content):
+                    document.write_text(json.dumps(content), encoding="utf-8")
+                    for argv in (("--schema", schema, document), ("--schema", schema, "--profile", document, FIXTURES / "linux-x64-vm.result.json")):
+                        code, output = self.run_main(*argv)
+                        self.assertEqual(code, 2)
+                        self.assertIn("accepts a document the rules across fields cannot read", output)
+                        self.assertNotIn("Traceback", output)
 
     def test_summary_lists_at_most_200_findings(self):
         with tempfile.TemporaryDirectory() as directory:

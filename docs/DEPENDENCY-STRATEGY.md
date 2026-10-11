@@ -176,6 +176,8 @@ Statuses used for the backend lock, installed binary-only:
 - **Statically resolvable**: every pin has a hashed wheel for the platform, and no dependency required only on that platform is missing from the lock. Not executed.
 - **Not supported**, **not binary-installable** or **incomplete**: a required wheel or platform-only dependency is missing, so the current lock cannot produce a working environment there without a new resolution or a source build (Windows x64 installs without `tzdata`; the other cases fail to install).
 
+This table is the only record of a lane's support status. Compatibility profiles in `tests/compatibility/` copy a lane's status and name from it, and `scripts/ci/validate_compatibility.py --dependency-strategy` fails a profile that disagrees with the Lane and Backend lock columns, so renaming a lane or changing its status word changes what a profile may claim ([CI-MATRIX.md](CI-MATRIX.md#stage-status-and-support-status)). No compatibility run changes a status here; a status changes only by editing this table with its evidence.
+
 | Lane | Representative devices | Backend lock, binary-only | Frontend npm lock | Playwright browsers | Accelerator |
 |---|---|---|---|---|---|
 | Linux x86-64 glibc | Existing baseline | Checked (author-reported hashed-lock install with the pinned toolchain on glibc 2.41; supplemental fix-session hashed-lock install with uv 0.11.32 and CPython 3.12.13 on glibc 2.39; follow-up pinned-toolchain hashed-lock install with uv 0.12.24 and CPython 3.12.15 on glibc 2.39 at 53ac8c5; see [the checks above](#applied-baseline-and-verification)) | OK | Supported | CUDA optional (none used) |

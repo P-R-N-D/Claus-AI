@@ -34,6 +34,7 @@ Implemented today, each with tests in the repository: the health APIs, the ASGI 
 - [`docs/STATE-SCHEMA.md`](STATE-SCHEMA.md) describes conceptual collaboration and runtime state shapes. It is not a database schema.
 - [`docs/TESTING.md`](TESTING.md) describes testing strategy, the checks that exist today, and the verification still required.
 - [`docs/DEPENDENCY-STRATEGY.md`](DEPENDENCY-STRATEGY.md) records the applied dependency baseline, compatibility exceptions and residual advisories, platform and accelerator lanes, and the Python 3.15 Limited API/`abi3t` qualification and performance plan. It builds on the existing free-threading direction; the baseline update does not qualify 3.15/3.15t.
+- [`docs/CI-MATRIX.md`](CI-MATRIX.md) defines the compatibility model: how a lane is declared as a profile, how a run is recorded and validated (layers, privilege, runtimes, compute backends, stages), and what a passing compatibility job means. It records no support status; the lane table in DEPENDENCY-STRATEGY.md does.
 - [`docs/SECURITY-ARCHITECTURE.md`](SECURITY-ARCHITECTURE.md) defines trust boundaries and the `SEC-*` security requirements, with the current implementation facts. It is the only place those requirement IDs are defined.
 - [`docs/CODE-REVIEW.md`](CODE-REVIEW.md) defines how a coding agent independently reviews an actual code change and reports findings.
 - [`docs/SECURITY-REVIEW.md`](SECURITY-REVIEW.md) defines the security review procedure for changed code, reusing the `SEC-*` IDs.
@@ -52,6 +53,7 @@ Read this file first. Then read only the documents that match the work; do not r
 | Work that touches collaboration, Task, Artifact, Knowledge, or presentation state | [STATE-SCHEMA.md](STATE-SCHEMA.md) |
 | Before claiming anything is tested, and when adding tests | [TESTING.md](TESTING.md) |
 | Dependency, interpreter, native wheel/ABI, platform or accelerator, or packaging-tool updates | [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md), then [TESTING.md](TESTING.md) |
+| Compatibility profiles, environment records, or a new OS, CPU, runtime, container, or accelerator lane in CI | [CI-MATRIX.md](CI-MATRIX.md), then [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md) and [TESTING.md](TESTING.md) |
 | Changes to `.github/workflows/` or other CI configuration | [TESTING.md](TESTING.md) "Continuous integration", then [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) and [SECURITY-REVIEW.md](SECURITY-REVIEW.md) |
 | Reviewing a code change (yours or another agent's) | [CODE-REVIEW.md](CODE-REVIEW.md) |
 | Creating or editing a GitHub issue or pull request at the user's explicit request or a supported delegation | [GitHub issues and pull requests](#github-issues-and-pull-requests) below, then the matching template in [`.github/ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE/) or [`.github/pull_request_template.md`](../.github/pull_request_template.md) |

@@ -249,11 +249,11 @@ jobs:
         # lists every source. Never escalates privileges, and writes no record that looks like a secret.
         run: |
           mkdir -p "$RUNNER_TEMP/compatibility"
-          python -I scripts/ci/collect_environment.py --profile-id linux-x64-gha --output "$RUNNER_TEMP/compatibility/linux-x64-gha.json" --summary "$GITHUB_STEP_SUMMARY"
+          python -I scripts/ci/collect_environment.py --profile-id linux-x64-gha --output "$RUNNER_TEMP/compatibility/linux-x64-gha.result.json" --summary "$GITHUB_STEP_SUMMARY"
       - name: Check the record and the committed profile
         # Also after a probe failure, which writes a partial record and exits 1.
         if: ${{ !cancelled() }}
-        run: python -I scripts/ci/validate_compatibility.py --require-real --dependency-strategy docs/DEPENDENCY-STRATEGY.md --profile tests/compatibility/profiles/linux-x64-gha.json --summary "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/compatibility/linux-x64-gha.json" tests/compatibility/profiles/*.json
+        run: python -I scripts/ci/validate_compatibility.py --require-real --dependency-strategy docs/DEPENDENCY-STRATEGY.md --profile tests/compatibility/profiles/linux-x64-gha.json --summary "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/compatibility/linux-x64-gha.result.json" tests/compatibility/profiles/*.json
       - name: Test the validator, including records that must fail
         if: ${{ !cancelled() }}
         # Run directly, not through unittest discover, so scripts/ci/tests/ is not on the import path.
@@ -267,4 +267,5 @@ jobs:
           name: compatibility-linux-x64-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/compatibility/
           if-no-files-found: warn
-          retention-days: 7
+          # The record is a few KB and is the lane's only machine-readable evidence: keep it 90 days, GitHub's default for logs.
+          retention-days: 90

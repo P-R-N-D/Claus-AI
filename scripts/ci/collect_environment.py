@@ -14,7 +14,8 @@ The collector reads the following, and nothing else:
   Windows, SystemRoot only) and stopped after 30 seconds. node is looked for in
   the PATH directories only, so on Windows not in the current directory unless
   PATH names it, also when PATH is unset; there this needs CPython 3.12 or
-  later, and an older one finds no node.exe, so the node facts are unknown.
+  later, and with an older one node is not looked for and the node facts are
+  unknown, with that reason.
 
 Files are read only when they are regular files, and are opened so that a FIFO
 cannot block the probe.
@@ -745,11 +746,12 @@ class Probe:
             if self.missing("/sys/module/apparmor/parameters/enabled"):
                 return {"enabled": inferred(False, "file:/sys/module/apparmor/parameters/enabled#absent"), "profile": not_applicable("AppArmor is not in this kernel")}
             return {"enabled": unknown(reason), "profile": unknown(reason)}
-        # The kernel writes Y or N; anything else, such as a file that was replaced, says nothing.
-        if text.strip() not in ("Y", "N"):
+        # The kernel writes Y or N and a newline; anything else, such as a file that was replaced or a longer
+        # value cut at 16 bytes, says nothing.
+        if text not in ("Y\n", "N\n"):
             reason = "/sys/module/apparmor/parameters/enabled holds neither Y nor N"
             return {"enabled": unknown(reason), "profile": unknown(reason)}
-        if text.strip() == "N":
+        if text == "N\n":
             return {"enabled": observed(False, "file:/sys/module/apparmor/parameters/enabled"), "profile": not_applicable("AppArmor is not enabled")}
         # /proc/self/attr/current belongs to whichever major LSM comes first, so only the
         # AppArmor-specific file (Linux 5.8 and later) is read.
@@ -900,6 +902,10 @@ class Probe:
 
         if not self.probe_node:
             return all_unknown("not probed (--no-node)")
+        # Before CPython 3.12 shutil.which on Windows adds no PATHEXT extension to a name with a directory, so
+        # find_on_path could not find node.exe; the reason says so rather than that node is missing.
+        if os.name == "nt" and sys.version_info < (3, 12):
+            return all_unknown("on Windows node is looked for only with CPython 3.12 or later")
         # An unset PATH searches the default directories, but not the current directory that Windows lists first
         # in them; an empty one, as shutil.which reads it, finds nothing.
         search_path = self.env("PATH")

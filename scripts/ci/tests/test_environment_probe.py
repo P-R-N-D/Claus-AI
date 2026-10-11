@@ -743,7 +743,7 @@ class IsolationTests(Case):
         apparmor = self.isolation(unreadable)["apparmor"]
         self.assertEqual((apparmor["enabled"]["provenance"], apparmor["profile"]["provenance"]), ("unknown", "unknown"))
         # The kernel writes Y or N; any other value is not evidence either way.
-        for text in ("garbage\n", "1\n", "y\n", "\n"):
+        for text in ("garbage\n", "1\n", "y\n", "\n", " Y \n", "Y", "Y" + " " * 15 + "garbage\n", "N\nY\n"):
             with self.subTest(enabled=text):
                 apparmor = self.isolation(dict(RUNNER_FILES, **{"sys/module/apparmor/parameters/enabled": text}))["apparmor"]
                 self.assertEqual((apparmor["enabled"]["provenance"], apparmor["profile"]["provenance"]), ("unknown", "unknown"))
@@ -1259,6 +1259,14 @@ class NodeTests(Case):
                     started.clear()
                     reason = machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"]
                     self.assertEqual((started, reason), ([expected], "node could not be run (OSError)") if expected else ([], "node is not on PATH"))
+            # Before CPython 3.12 the lookup could not find node.exe there, so node is not looked for, and the reason says why.
+            with FakeMachine(env={"PATH": str(installed)}) as machine, contextlib.chdir(checkout), \
+                    mock.patch.object(collector.subprocess, "Popen", popen), mock.patch.object(collector.os, "name", "nt"):
+                started.clear()
+                probe = machine.probe(probe_node=True)
+                with mock.patch.object(collector.sys, "version_info", (3, 11, 9)):
+                    reason = probe.node(("x86_64", "x86"))["version"]["reason"]
+                self.assertEqual((started, reason), ([], "on Windows node is looked for only with CPython 3.12 or later"))
 
 
 class CommandTests(Case):

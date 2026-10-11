@@ -742,11 +742,12 @@ class IsolationTests(Case):
         unreadable.pop("sys/module/apparmor/parameters/enabled")
         apparmor = self.isolation(unreadable)["apparmor"]
         self.assertEqual((apparmor["enabled"]["provenance"], apparmor["profile"]["provenance"]), ("unknown", "unknown"))
-        # The kernel writes Y or N; any other value is not evidence either way.
+        # The kernel writes Y or N and a newline; any other value, also a padded or longer one, is not evidence either way.
         for text in ("garbage\n", "1\n", "y\n", "\n", " Y \n", "Y", "Y" + " " * 15 + "garbage\n", "N\nY\n"):
             with self.subTest(enabled=text):
                 apparmor = self.isolation(dict(RUNNER_FILES, **{"sys/module/apparmor/parameters/enabled": text}))["apparmor"]
-                self.assertEqual((apparmor["enabled"]["provenance"], apparmor["profile"]["provenance"]), ("unknown", "unknown"))
+                self.assertEqual((apparmor["enabled"]["provenance"], apparmor["profile"]["provenance"], apparmor["enabled"]["reason"]),
+                                 ("unknown", "unknown", "/sys/module/apparmor/parameters/enabled is not Y or N and a newline, as the kernel writes it"))
         no_label = dict(RUNNER_FILES)
         no_label.pop("proc/self/attr/apparmor/current")
         no_label["proc/self/attr/current"] = "unconfined\n"

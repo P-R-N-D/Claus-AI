@@ -254,7 +254,7 @@ def find_on_path(name, search_path):
     On Windows shutil.which also looks in the current directory first, which the path does not name, so
     there each directory is looked in by itself; an empty entry names no directory. That needs CPython 3.12 or
     later on Windows: an older shutil.which adds no PATHEXT extension to a name with a directory, so it finds
-    no node.exe and the node facts are unknown."""
+    no node.exe, and node() does not call it there."""
     if os.name != "nt":
         return shutil.which(name, path=search_path)
     for directory in search_path.split(os.pathsep):
@@ -749,7 +749,7 @@ class Probe:
         # The kernel writes Y or N and a newline; anything else, such as a file that was replaced or a longer
         # value cut at 16 bytes, says nothing.
         if text not in ("Y\n", "N\n"):
-            reason = "/sys/module/apparmor/parameters/enabled holds neither Y nor N"
+            reason = "/sys/module/apparmor/parameters/enabled is not Y or N and a newline, as the kernel writes it"
             return {"enabled": unknown(reason), "profile": unknown(reason)}
         if text == "N\n":
             return {"enabled": observed(False, "file:/sys/module/apparmor/parameters/enabled"), "profile": not_applicable("AppArmor is not enabled")}

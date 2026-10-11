@@ -1,0 +1,1060 @@
+"""Record the environment this process runs in as a compatibility result (docs/CI-MATRIX.md).
+
+The collector reads the following, and nothing else:
+
+- /proc, /sys, /etc/os-release and two files under /run.
+- The environment variables in ENV_ALLOWLIST.
+- The pull request head and base in the GitHub Actions event file.
+- The checkout's .git/HEAD.
+- The output of `node -p`, run with an empty environment.
+
+It uses no network, never escalates privileges, and writes only the output file
+and the optional summary. It records no host name, account name, home
+directory, network address or other environment variable.
+
+On Linux it fills in the layers, identity and isolation facts. On other systems
+it records the OS family and the Python runtime and leaves the rest unknown.
+
+Each value it records is marked in one of these ways:
+
+- observed: read on this machine. The evidence names the file, variable or call.
+- inferred: derived from evidence that is named.
+- unknown or not-applicable: with the reason.
+
+An absent or unreadable file gives an unknown value. It is not an error. An
+unexpected exception in one probe is recorded in probe_errors and fails the
+detect stage. The other probes' values stay in place, so a record can show
+which part of detection failed.
+
+Standard library only. Usage, from the repository root:
+    python -I scripts/ci/collect_environment.py --output result.json
+        [--profile-id ID] [--summary FILE] [--no-node]
+        [--stage NAME=STATUS] [--stage-reason NAME=TEXT]
+        [--stage-evidence NAME=REF] [--stage-escalation NAME=VALUE]
+
+The --stage options record what other steps of the job did in the stages after
+detect. Every stage they do not name is not-run.
+
+Exit status:
+- 0: the record was written and detection passed.
+- 1: the record was written but a probe failed.
+- 2: a usage error, or the record could not be written.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import pathlib
+import platform
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import sysconfig
+
+COLLECTOR = {"name": "collect-environment", "version": 1}
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+TOOL = "tool:collect-environment"
+
+# The only environment variables the collector reads. Values of PRESENCE_ONLY
+# variables are never recorded: PATH is used only to find node, and
+# GITHUB_EVENT_PATH only to open the event file.
+ENV_ALLOWLIST = frozenset({
+    "GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_SHA", "GITHUB_REF",
+    "GITHUB_REPOSITORY", "GITHUB_SERVER_URL", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
+    "GITHUB_WORKFLOW_REF", "GITHUB_JOB", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH",
+    "ImageOS", "ImageVersion", "container", "KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME",
+    "WSL_INTEROP", "PATH",
+})
+PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME", "WSL_INTEROP", "PATH", "GITHUB_EVENT_PATH"})
+
+STAGES = ("detect", "install", "initialize", "execute", "correctness", "security", "performance")
+STATUSES = ("passed", "failed", "blocked", "not-run", "not-applicable")
+ESCALATIONS = ("none", "sudo", "root-login", "setuid", "other")
+SLUG = re.compile(r"[a-z0-9][a-z0-9._+-]{0,63}")
+SHA = re.compile(r"[0-9a-f]{40}")
+EVIDENCE = re.compile(r"(file|env|python|cmd|event|git|tool|doc|profile|workflow|log|artifact):[!-~][ -~]{0,299}")
+PRINTABLE = re.compile(r"[ -~]{1,200}")
+
+ARCH_ALIASES = {
+    "amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64", "i386": "x86", "i486": "x86",
+    "i586": "x86", "i686": "x86", "ia32": "x86", "armv7l": "armv7", "arm": "armv7", "loong64": "loongarch64",
+    "powerpc64le": "ppc64le",
+}
+# (process, kernel) architecture pairs that run without emulation: 32-bit code on a 64-bit kernel of the same family.
+COMPATIBLE = frozenset({("x86", "x86_64"), ("armv7", "aarch64")})
+# ELF e_machine values (elf.h) for the architectures in docs/CI-MATRIX.md.
+ELF_MACHINES = {3: "x86", 40: "armv7", 62: "x86_64", 183: "aarch64", 243: "riscv64", 22: "s390x", 258: "loongarch64", 21: "ppc64le"}
+OS_FAMILIES = {"Linux": "linux", "Windows": "windows", "Darwin": "macos", "FreeBSD": "freebsd"}
+# Capability numbers from linux/capability.h.
+CAPABILITIES = (
+    "chown", "dac_override", "dac_read_search", "fowner", "fsetid", "kill", "setgid", "setuid",
+    "setpcap", "linux_immutable", "net_bind_service", "net_broadcast", "net_admin", "net_raw",
+    "ipc_lock", "ipc_owner", "sys_module", "sys_rawio", "sys_chroot", "sys_ptrace", "sys_pacct",
+    "sys_admin", "sys_boot", "sys_nice", "sys_resource", "sys_time", "sys_tty_config", "mknod",
+    "lease", "audit_write", "audit_control", "setfcap", "mac_override", "mac_admin", "syslog",
+    "wake_alarm", "block_suspend", "audit_read", "perfmon", "bpf", "checkpoint_restore",
+)
+SECCOMP = {"0": "disabled", "1": "strict", "2": "filter"}
+# The fixed inode of the initial user namespace (PROC_USER_INIT_INO in linux/proc_ns.h).
+USER_NS_INIT_INO = 0xEFFFFFFD
+# DMI sys_vendor or product_name prefixes that name a hypervisor, as systemd-detect-virt reads them.
+DMI_VENDORS = (
+    ("KVM", "kvm"), ("QEMU", "qemu"), ("VMware", "vmware"), ("VMW", "vmware"),
+    ("innotek GmbH", "virtualbox"), ("VirtualBox", "virtualbox"), ("Xen", "xen"),
+    ("Parallels", "parallels"), ("Amazon EC2", "amazon"), ("Google Compute Engine", "google"),
+    ("Apple Virtualization", "apple-virtualization"), ("Firecracker", "firecracker"),
+)
+CONTAINER_TECHNOLOGIES = {"docker": "docker", "podman": "podman", "lxc": "lxc", "lxc-libvirt": "lxc", "systemd-nspawn": "systemd-nspawn", "oci": None}
+NODE_EXPRESSION = "JSON.stringify({v:process.versions.node,m:process.versions.modules,n:process.versions.napi||null,a:process.arch,p:process.platform})"
+
+
+def observed(value, *evidence):
+    return {"value": value, "provenance": "observed", "evidence": list(evidence)}
+
+
+def inferred(value, *evidence):
+    return {"value": value, "provenance": "inferred", "evidence": list(evidence)}
+
+
+def declared(value, *evidence):
+    fact = {"value": value, "provenance": "declared"}
+    if evidence:
+        fact["evidence"] = list(evidence)
+    return fact
+
+
+def unknown(reason, *evidence):
+    fact = {"value": None, "provenance": "unknown", "reason": reason}
+    if evidence:
+        fact["evidence"] = list(evidence)
+    return fact
+
+
+def not_applicable(reason):
+    return {"value": None, "provenance": "not-applicable", "reason": reason}
+
+
+def normalize_arch(name):
+    name = (name or "").strip().lower()
+    return ARCH_ALIASES.get(name, name) if SLUG.fullmatch(name or "-") else None
+
+
+def arch_family(arch):
+    if arch in ("x86_64", "x86"):
+        return "x86"
+    if arch in ("aarch64", "armv7"):
+        return "arm"
+    return None
+
+
+def execution_fact(arch, arch_evidence, reference):
+    """native or emulated, relative to the kernel that runs the process.
+
+    `reference` is (kernel architecture, /proc/cpuinfo format). /proc/sys/kernel/arch
+    (Linux 6.1 and later) is read from the kernel, so user-mode emulation such as
+    qemu-user, which rewrites uname, does not change it. Without it, only a
+    /proc/cpuinfo of another architecture family shows emulation: qemu-user
+    synthesises an Arm /proc/cpuinfo, so a match does not show native execution.
+    """
+    kernel_arch, cpu_family = reference
+    if arch is None:
+        return unknown("the architecture is not known")
+    if kernel_arch is not None:
+        native = arch == kernel_arch or (arch, kernel_arch) in COMPATIBLE
+        return inferred("native" if native else "emulated", arch_evidence, "file:/proc/sys/kernel/arch")
+    family = arch_family(arch)
+    if family is not None and cpu_family is not None and family != cpu_family:
+        return inferred("emulated", arch_evidence, "file:/proc/cpuinfo#format")
+    return unknown("/proc/sys/kernel/arch is not available, and /proc/cpuinfo alone cannot rule out user-mode emulation")
+
+
+class ProbeError(Exception):
+    pass
+
+
+class Probe:
+    """Reads one system. `root`, `env` and `git_dir` exist so tests can point it at a made-up one."""
+
+    def __init__(self, root="/", env=None, git_dir=None, system=None, probe_node=True):
+        self.root = pathlib.Path(root)
+        self._env = os.environ if env is None else env
+        self.git_dir = pathlib.Path(git_dir) if git_dir else ROOT / ".git"
+        self.system = system or platform.system()
+        self.probe_node = probe_node
+        self.errors = []
+
+    # -- inputs ------------------------------------------------------------
+
+    def env(self, name):
+        if name not in ENV_ALLOWLIST:
+            raise ProbeError(f"{name} is not in ENV_ALLOWLIST")
+        return self._env.get(name)
+
+    def env_value(self, name, pattern):
+        """An allowlisted variable as a fact, if its value has the expected form."""
+        if name in PRESENCE_ONLY:
+            raise ProbeError(f"{name} may only be tested for presence")
+        value = self.env(name)
+        if value is None or value == "":
+            return unknown(f"{name} is not set")
+        if not re.fullmatch(pattern, value):
+            return unknown(f"{name} does not have the expected form", f"env:{name}")
+        return observed(value, f"env:{name}")
+
+    def path(self, absolute):
+        return self.root / absolute.lstrip("/")
+
+    def read(self, absolute, limit=65536):
+        """Return (text, None), or (None, reason) when the file is absent or unreadable."""
+        try:
+            with open(self.path(absolute), "rb") as handle:
+                data = handle.read(limit)
+        except FileNotFoundError:
+            return None, f"{absolute} is absent"
+        except PermissionError:
+            return None, f"{absolute} is not readable by this user"
+        except IsADirectoryError:
+            return None, f"{absolute} is a directory"
+        except OSError as exc:
+            return None, f"{absolute} could not be read ({type(exc).__name__})"
+        return data.decode("utf-8", "replace"), None
+
+    def exists(self, absolute):
+        return self.path(absolute).exists()
+
+    def guard(self, name, function, fallback):
+        """Run one probe; record an unexpected exception and use the fallback instead."""
+        try:
+            return function()
+        except Exception as exc:  # noqa: BLE001 - every probe failure is recorded, not raised
+            self.errors.append({"probe": name, "error": f"{type(exc).__name__} raised by the {name} probe"})
+            return fallback(f"the {name} probe failed ({type(exc).__name__})")
+
+    # -- Linux signals -----------------------------------------------------
+
+    def cpuinfo(self):
+        """Return (family, hypervisor flag) from the first block of /proc/cpuinfo; None when unreadable."""
+        text, _ = self.read("/proc/cpuinfo", 262144)
+        if text is None:
+            return None, None
+        keys = {}
+        for line in text.split("\n\n", 1)[0].splitlines():
+            if ":" in line:
+                key, _, value = line.partition(":")
+                keys.setdefault(key.strip(), value.strip())
+        if "CPU implementer" in keys:
+            return "arm", None
+        if "flags" in keys and keys.get("vendor_id") != "IBM/S390":
+            return "x86", "hypervisor" in keys["flags"].split()
+        return None, None
+
+    def kernel_arch(self):
+        text, _ = self.read("/proc/sys/kernel/arch", 64)
+        return normalize_arch(text) if text is not None else None
+
+    def cpu_reference(self):
+        """(kernel architecture, /proc/cpuinfo format) that execution facts are compared with."""
+        return self.kernel_arch(), self.cpuinfo()[0]
+
+    def os_release(self):
+        for name in ("/etc/os-release", "/usr/lib/os-release"):
+            text, _ = self.read(name)
+            if text is not None:
+                values = {}
+                for line in text.splitlines():
+                    key, sep, value = line.partition("=")
+                    if sep and re.fullmatch(r"[A-Z_]+", key):
+                        values[key] = value.strip().strip("'\"")
+                return values, f"file:{name}"
+        return None, None
+
+    def dmi_technology(self):
+        for name in ("sys_vendor", "product_name"):
+            text, _ = self.read(f"/sys/class/dmi/id/{name}", 256)
+            if text is None:
+                continue
+            text = text.strip()
+            for prefix, technology in DMI_VENDORS:
+                if text.startswith(prefix):
+                    return technology, f"file:/sys/class/dmi/id/{name}"
+            if name == "product_name" and text == "Virtual Machine":
+                vendor, _ = self.read("/sys/class/dmi/id/sys_vendor", 256)
+                if vendor is not None and vendor.strip() == "Microsoft Corporation":
+                    return "hyper-v", "file:/sys/class/dmi/id/sys_vendor"
+        # Hyper-V guests, Azure among them, have a VMBus even when DMI names no hypervisor.
+        vmbus = self.path("/sys/bus/vmbus/devices")
+        if vmbus.is_dir() and any(vmbus.iterdir()):
+            return "hyper-v", "file:/sys/bus/vmbus/devices"
+        return None, None
+
+    def wsl(self):
+        text, _ = self.read("/proc/sys/kernel/osrelease", 256)
+        if text is None or "microsoft" not in text.lower():
+            return None
+        return "wsl2" if "wsl2" in text.lower() else "wsl1"
+
+    def container_signals(self):
+        """Return (technology or None, evidence list, /run/.containerenv values)."""
+        evidence, technology, containerenv = [], None, {}
+        if self.exists("/.dockerenv"):
+            evidence.append("file:/.dockerenv")
+            technology = "docker"
+        text, _ = self.read("/run/.containerenv", 4096)
+        if text is not None:
+            evidence.append("file:/run/.containerenv")
+            technology = "podman"
+            for line in text.splitlines():
+                key, _, value = line.partition("=")
+                if key in ("engine", "rootless"):
+                    containerenv[key] = value.strip().strip('"')
+        for source, value in (("env:container", self.env("container")), ("file:/run/systemd/container", (self.read("/run/systemd/container", 256)[0] or "").strip())):
+            if value:
+                evidence.append(source)
+                technology = technology or CONTAINER_TECHNOLOGIES.get(value)
+        cgroup, _ = self.read("/proc/self/cgroup", 16384)
+        if cgroup and re.search(r"/(docker|libpod|kubepods|lxc)[/.-]", cgroup):
+            evidence.append("file:/proc/self/cgroup#path")
+        if self.env("KUBERNETES_SERVICE_HOST") is not None:
+            evidence.append("env:KUBERNETES_SERVICE_HOST")
+        return technology, evidence, containerenv
+
+    def status_fields(self):
+        text, reason = self.read("/proc/self/status")
+        if text is None:
+            return {}, reason
+        fields = {}
+        for line in text.splitlines():
+            key, _, value = line.partition(":")
+            fields[key] = value.strip()
+        return fields, None
+
+    def lsm_list(self):
+        """The active Linux security modules, or None when securityfs does not list them."""
+        text, _ = self.read("/sys/kernel/security/lsm", 1024)
+        if text is None:
+            return None
+        return [name for name in text.strip().split(",") if name]
+
+    def mount_types(self):
+        """{mount point: file system type} from /proc/self/mountinfo; the last mount on a point wins."""
+        text, reason = self.read("/proc/self/mountinfo", 1 << 20)
+        if text is None:
+            return None, reason
+        mounts = {}
+        for line in text.splitlines():
+            left, sep, right = line.partition(" - ")
+            fields, tail = left.split(), right.split()
+            if sep and len(fields) >= 5 and tail:
+                mounts[fields[4]] = tail[0]
+        return mounts, None
+
+    def namespace_inode(self, name):
+        return os.stat(self.path(f"/proc/self/ns/{name}")).st_ino
+
+    # -- sections ----------------------------------------------------------
+
+    def layers(self):
+        if self.system != "Linux":
+            family = OS_FAMILIES.get(self.system)
+            reason = f"this probe reads Linux interfaces only; this system is {self.system or 'unidentified'}"
+            return [{
+                "kind": unknown(reason),
+                "technology": unknown(reason),
+                "os": {
+                    "family": observed(family, "python:platform.system") if family else unknown(reason),
+                    "name": unknown(reason),
+                    "version": unknown(reason),
+                    "kernel": unknown(reason),
+                },
+                "cpu": {"arch": unknown(reason), "execution": unknown(reason)},
+                "service_manager": {"name": unknown(reason), "scope": unknown(reason)},
+            }]
+
+        cpu_family, hypervisor = self.cpuinfo()
+        kernel_arch = self.kernel_arch()
+        machine = normalize_arch(platform.machine())
+        release = platform.release()
+        kernel_fact = observed(release, "python:platform.release") if PRINTABLE.fullmatch(release or "") else unknown("the kernel release is empty or has unexpected characters")
+        machine_evidence = "python:platform.machine"
+        user_execution = execution_fact(machine, machine_evidence, (kernel_arch, cpu_family))
+
+        container_technology, container_evidence, containerenv = self.container_signals()
+        in_container = bool(container_evidence)
+        wsl = self.wsl()
+        dmi_technology, dmi_evidence = self.dmi_technology()
+
+        # The layer that runs the kernel.
+        kernel_layer = {"os": {"family": observed("linux", "python:platform.system"), "kernel": kernel_fact}}
+        if wsl == "wsl2":
+            kernel_layer["kind"] = inferred("wsl2", "file:/proc/sys/kernel/osrelease")
+            kernel_layer["technology"] = inferred("wsl2", "file:/proc/sys/kernel/osrelease")
+        elif hypervisor or dmi_technology:
+            vm_evidence = [e for e in (("file:/proc/cpuinfo#flags:hypervisor" if hypervisor else None), dmi_evidence) if e]
+            kernel_layer["kind"] = inferred("vm", *vm_evidence)
+            kernel_layer["technology"] = inferred(dmi_technology, dmi_evidence) if dmi_technology else unknown("a hypervisor is present but neither DMI nor a VMBus names it")
+        else:
+            reason = "WSL 1 or an unrecognized Microsoft kernel" if wsl == "wsl1" else "no VM or WSL signal was found; that does not show bare metal"
+            kernel_layer["kind"] = unknown(reason)
+            kernel_layer["technology"] = unknown(reason)
+
+        hidden = "not visible from inside the container"
+        if in_container:
+            kernel_layer["os"]["name"] = unknown(f"the distribution of the system that runs the container is {hidden}")
+            kernel_layer["os"]["version"] = unknown(f"the version of the system that runs the container is {hidden}")
+            kernel_layer["service_manager"] = {"name": unknown(f"the service manager outside the container is {hidden}"), "scope": unknown(hidden)}
+        else:
+            kernel_layer["os"].update(self.distribution())
+            kernel_layer["service_manager"] = self.service_manager()
+        if kernel_arch is not None:
+            layer_arch = observed(kernel_arch, "file:/proc/sys/kernel/arch")
+        elif machine and arch_family(machine) is not None and arch_family(machine) == cpu_family:
+            layer_arch = inferred(machine, machine_evidence, "file:/proc/cpuinfo#format")
+        else:
+            layer_arch = unknown("without /proc/sys/kernel/arch, uname cannot be told apart from an emulated or personality-changed machine name")
+        kernel_layer["cpu"] = {
+            "arch": layer_arch,
+            "execution": unknown("whether the layer below emulates this CPU is not visible from inside it"),
+        }
+        kernel_layer = order_layer(kernel_layer)
+
+        layers = []
+        if known_kind(kernel_layer) in ("vm", "wsl2"):
+            host_reason = "a guest cannot see the physical host"
+            host_family = inferred("windows", "file:/proc/sys/kernel/osrelease") if wsl == "wsl2" else unknown(host_reason)
+            layers.append(order_layer({
+                "kind": inferred("host", *kernel_layer["kind"]["evidence"]),
+                "technology": not_applicable("the outermost host runs on hardware"),
+                "os": {"family": host_family, "name": unknown(host_reason), "version": unknown(host_reason), "kernel": unknown(host_reason)},
+                "cpu": {"arch": unknown(host_reason), "execution": unknown(host_reason)},
+                "service_manager": {"name": unknown(host_reason), "scope": unknown(host_reason)},
+            }))
+        layers.append(kernel_layer)
+
+        if in_container:
+            container = {"kind": inferred("container", *container_evidence)}
+            container["technology"] = inferred(container_technology, *container_evidence) if container_technology else unknown("the container signals do not name the engine", *container_evidence)
+            container["os"] = dict(self.distribution(), family=observed("linux", "python:platform.system"), kernel=not_applicable("a container shares the kernel of the layer below"))
+            container["cpu"] = {
+                "arch": observed(machine, machine_evidence) if machine else unknown("platform.machine() is empty"),
+                "execution": user_execution,
+            }
+            container["service_manager"] = self.service_manager()
+            rootless = containerenv.get("rootless")
+            if rootless in ("0", "1"):
+                engine_mode = observed("rootless" if rootless == "1" else "rootful", "file:/run/.containerenv#rootless")
+            else:
+                engine_mode = unknown("the engine does not tell this container whether it runs rootless")
+            orchestration_name = inferred("kubernetes", "env:KUBERNETES_SERVICE_HOST") if self.env("KUBERNETES_SERVICE_HOST") is not None else unknown("no orchestrator signal; that does not show there is none")
+            container["container"] = {
+                "engine_mode": engine_mode,
+                "privileged": unknown("no reliable signal from inside the container"),
+                "devices": unknown("the devices an engine passes in are not recorded inside the container"),
+                "orchestration": {
+                    "name": orchestration_name,
+                    "version": unknown("not visible from inside the container"),
+                    "scope": unknown("not visible from inside the container"),
+                },
+            }
+            layers.append(order_layer(container))
+        return layers
+
+    def distribution(self):
+        values, evidence = self.os_release()
+        if values is None:
+            return {"name": unknown("no os-release file"), "version": unknown("no os-release file")}
+        name = values.get("ID", "").lower()
+        version = values.get("VERSION_ID", "")
+        return {
+            "name": observed(name, f"{evidence}#ID") if SLUG.fullmatch(name) else unknown("os-release has no usable ID", evidence),
+            "version": observed(version, f"{evidence}#VERSION_ID") if PRINTABLE.fullmatch(version) else unknown("os-release has no usable VERSION_ID", evidence),
+        }
+
+    def service_manager(self):
+        if self.exists("/run/systemd/system"):
+            pid1, _ = self.read("/proc/1/comm", 64)
+            scope = observed("system", "file:/proc/1/comm") if pid1 is not None and pid1.strip() == "systemd" else unknown("PID 1 of this namespace is not systemd or cannot be read")
+            return {"name": observed("systemd", "file:/run/systemd/system"), "scope": scope}
+        reason = "systemd is not running as the service manager here; other managers are not probed"
+        return {"name": unknown(reason, "file:/run/systemd/system"), "scope": unknown(reason)}
+
+    def identity(self):
+        if self.system == "Linux":
+            fields, reason = self.status_fields()
+            if "Uid" not in fields or "Gid" not in fields:
+                return identity_fallback(reason or "/proc/self/status has no Uid or Gid line")
+            uid, gid = int(fields["Uid"].split()[1]), int(fields["Gid"].split()[1])
+            source = ("file:/proc/self/status#Uid", "file:/proc/self/status#Gid")
+        elif hasattr(os, "geteuid"):
+            uid, gid = os.geteuid(), os.getegid()
+            source = ("python:os.geteuid", "python:os.getegid")
+        else:
+            return identity_fallback("this probe reads POSIX user IDs only")
+        identity = {
+            "superuser": observed(uid == 0, source[0]),
+            "uid": observed(uid, source[0]),
+            "gid": observed(gid, source[1]),
+        }
+        if self.system != "Linux":
+            reason = "user namespaces are a Linux interface"
+            identity["user_namespace"] = {"initial": unknown(reason), "uid_map": unknown(reason)}
+            return identity
+        text, reason = self.read("/proc/self/uid_map")
+        if text is None:
+            uid_map = unknown(reason)
+        else:
+            rows = [[int(part) for part in line.split()] for line in text.splitlines() if line.strip()]
+            if not rows or any(len(row) != 3 or not all(0 <= part <= 4294967295 for part in row) for row in rows):
+                raise ValueError("unexpected /proc/self/uid_map format")
+            uid_map = observed(rows, "file:/proc/self/uid_map")
+        # A full identity map does not show the initial namespace: a nested one can have it too.
+        try:
+            initial = observed(self.namespace_inode("user") == USER_NS_INIT_INO, "file:/proc/self/ns/user#inode")
+        except OSError as exc:
+            initial = unknown(f"/proc/self/ns/user cannot be read ({type(exc).__name__})")
+        identity["user_namespace"] = {"initial": initial, "uid_map": uid_map}
+        return identity
+
+    def isolation(self):
+        if self.system != "Linux":
+            return isolation_fallback("this probe reads Linux interfaces only")
+        fields, reason = self.status_fields()
+        status = "file:/proc/self/status"
+
+        def field(name, convert):
+            if name not in fields:
+                return unknown(reason or f"/proc/self/status has no {name} line")
+            return observed(convert(fields[name]), f"{status}#{name}")
+
+        out = {
+            "no_new_privs": field("NoNewPrivs", lambda v: {"0": False, "1": True}[v]),
+            "capabilities": {"effective": field("CapEff", decode_capabilities), "bounding": field("CapBnd", decode_capabilities)},
+            "seccomp": field("Seccomp", lambda v: SECCOMP[v]),
+            "apparmor": self.apparmor(),
+            "selinux": self.selinux(),
+            "cgroup": self.cgroup(fields),
+        }
+        return out
+
+    def apparmor(self):
+        if not self.exists("/sys/module"):
+            reason = "/sys/module is not available"
+            return {"enabled": unknown(reason), "profile": unknown(reason)}
+        text, _ = self.read("/sys/module/apparmor/parameters/enabled", 16)
+        if text is None:
+            return {"enabled": observed(False, "file:/sys/module/apparmor/parameters/enabled#absent"), "profile": not_applicable("AppArmor is not enabled")}
+        enabled = text.strip() == "Y"
+        if not enabled:
+            return {"enabled": observed(False, "file:/sys/module/apparmor/parameters/enabled"), "profile": not_applicable("AppArmor is not enabled")}
+        # /proc/self/attr/current belongs to whichever major LSM comes first, so only the
+        # AppArmor-specific file (Linux 5.8 and later) is read.
+        label, _ = self.read("/proc/self/attr/apparmor/current", 512)
+        if label is not None and PRINTABLE.fullmatch(label.strip("\n\x00 ")):
+            return {"enabled": observed(True, "file:/sys/module/apparmor/parameters/enabled"), "profile": observed(label.strip("\n\x00 "), "file:/proc/self/attr/apparmor/current")}
+        return {"enabled": observed(True, "file:/sys/module/apparmor/parameters/enabled"), "profile": unknown("the AppArmor label of this process cannot be read")}
+
+    def selinux(self):
+        lsms = self.lsm_list()
+        text, _ = self.read("/sys/fs/selinux/enforce", 16)
+        if text is not None and text.strip() in ("0", "1"):
+            mode = observed("enforcing" if text.strip() == "1" else "permissive", "file:/sys/fs/selinux/enforce")
+            # /proc/self/attr/current is SELinux's only when no other major LSM is listed before it.
+            if lsms is not None and "selinux" in lsms and not {"apparmor", "smack", "tomoyo"} & set(lsms[:lsms.index("selinux")]):
+                label, _ = self.read("/proc/self/attr/current", 512)
+                if label is not None and PRINTABLE.fullmatch(label.strip("\n\x00 ")):
+                    return {"mode": mode, "context": observed(label.strip("\n\x00 "), "file:/proc/self/attr/current", "file:/sys/kernel/security/lsm")}
+            return {"mode": mode, "context": unknown("the SELinux context of this process cannot be read or attributed")}
+        if lsms is not None and "selinux" not in lsms:
+            return {"mode": inferred("disabled", "file:/sys/kernel/security/lsm"), "context": not_applicable("SELinux is not an active security module")}
+        if lsms is not None:
+            why = "SELinux is an active security module but selinuxfs is not mounted here"
+            return {"mode": unknown(why), "context": unknown(why)}
+        filesystems, reason = self.read("/proc/filesystems", 16384)
+        if filesystems is not None and not re.search(r"\bselinuxfs\b", filesystems):
+            return {"mode": inferred("disabled", "file:/proc/filesystems#selinuxfs-absent"), "context": not_applicable("SELinux is not in this kernel")}
+        why = "the kernel supports SELinux but neither securityfs nor selinuxfs is mounted here" if filesystems is not None else reason
+        return {"mode": unknown(why), "context": unknown(why)}
+
+    def cgroup(self, status):
+        """The cgroup version from the file system mounted at /sys/fs/cgroup, and delegation for v2."""
+        mounts, reason = self.mount_types()
+        if mounts is None:
+            return {"version": unknown(reason), "delegated": unknown(reason)}
+        evidence = "file:/proc/self/mountinfo#/sys/fs/cgroup"
+        top = mounts.get("/sys/fs/cgroup")
+        if top == "cgroup2":
+            version = observed("v2", evidence)
+        elif top == "tmpfs" and any(fstype == "cgroup" for point, fstype in mounts.items() if point.startswith("/sys/fs/cgroup/")):
+            hybrid = any(fstype == "cgroup2" for point, fstype in mounts.items() if point.startswith("/sys/fs/cgroup/"))
+            version = observed("hybrid" if hybrid else "v1", evidence)
+        else:
+            why = "nothing is mounted at /sys/fs/cgroup" if top is None else "/sys/fs/cgroup has an unexpected file system"
+            return {"version": unknown(why, evidence), "delegated": unknown(why)}
+        if version["value"] != "v2":
+            return {"version": version, "delegated": unknown("delegation is read for cgroup v2 only")}
+        uid = status.get("Uid", "").split()
+        if len(uid) < 2 or uid[1] == "0" or status.get("CapEff", "0").strip("0"):
+            return {"version": version, "delegated": unknown("write access says nothing about delegation for a process with root or capabilities")}
+        text, reason = self.read("/proc/self/cgroup", 16384)
+        unified = [line[3:] for line in (text or "").splitlines() if line.startswith("0::")]
+        if not unified:
+            return {"version": version, "delegated": unknown(reason or "/proc/self/cgroup has no cgroup v2 line")}
+        relative = unified[0].lstrip("/")
+        directory = self.path("/sys/fs/cgroup") / relative
+        if ".." in relative.split("/") or not directory.is_dir():
+            return {"version": version, "delegated": unknown("this process's cgroup directory is not visible here")}
+        # access(2) reports permission bits only; nothing is written to find out.
+        delegated = os.access(directory, os.W_OK) and os.access(directory / "cgroup.procs", os.W_OK) and (directory / "cgroup.subtree_control").exists()
+        return {"version": version, "delegated": observed(delegated, "file:/sys/fs/cgroup/<own-cgroup>/cgroup.procs#writable")}
+
+    def build_arch(self):
+        """The architecture the interpreter was built for, with its evidence.
+
+        On Linux sysconfig.get_platform() follows uname, which emulation and
+        personality changes rewrite, so the build triplet is read instead.
+        """
+        multiarch = getattr(sys.implementation, "_multiarch", None)
+        if isinstance(multiarch, str) and "-" in multiarch:
+            return normalize_arch(multiarch.split("-", 1)[0]), "python:sys.implementation._multiarch"
+        soabi = sysconfig.get_config_var("SOABI")
+        match = re.fullmatch(r"[a-z]+-[0-9]+[a-z]*-([a-z0-9_]+)-linux-[a-z0-9]+", soabi or "")
+        if match:
+            return normalize_arch(match.group(1)), "python:sysconfig.SOABI"
+        try:
+            with open(os.path.realpath(sys.executable or "/nonexistent"), "rb") as handle:
+                header = handle.read(20)
+        except OSError:
+            return None, None
+        if len(header) == 20 and header[:4] == b"\x7fELF" and header[5] in (1, 2):
+            machine = int.from_bytes(header[18:20], "little" if header[5] == 1 else "big")
+            if machine in ELF_MACHINES:
+                return ELF_MACHINES[machine], "file:sys.executable#e_machine"
+        return None, None
+
+    def python(self, reference):
+        version = platform.python_version()
+        plat = sysconfig.get_platform()
+        soabi = sysconfig.get_config_var("SOABI")
+        if self.system == "Linux":
+            arch, arch_evidence = self.build_arch()
+        else:
+            arch, arch_evidence = split_platform(plat)[1], "python:sysconfig.get_platform"
+        raw_gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+        if raw_gil_disabled in (0, 1):
+            free_threaded = observed(bool(raw_gil_disabled), "python:sysconfig.Py_GIL_DISABLED")
+        elif raw_gil_disabled is None and sys.version_info < (3, 13):
+            free_threaded = inferred(False, "python:sys.version_info")
+        else:
+            free_threaded = unknown("sysconfig gives no usable Py_GIL_DISABLED")
+        if hasattr(sys, "_is_gil_enabled"):
+            gil = observed(sys._is_gil_enabled(), "python:sys._is_gil_enabled")
+        elif free_threaded["value"] is False:
+            gil = inferred(True, *free_threaded["evidence"])
+        else:
+            gil = unknown("sys._is_gil_enabled is missing")
+        libc, libc_version = platform.libc_ver()
+        return {
+            "implementation": observed(sys.implementation.name, "python:sys.implementation.name"),
+            "version": observed(version, "python:platform.python_version"),
+            "cache_tag": observed(sys.implementation.cache_tag, "python:sys.implementation.cache_tag") if sys.implementation.cache_tag else unknown("no cache tag"),
+            "soabi": observed(soabi, "python:sysconfig.SOABI") if isinstance(soabi, str) and PRINTABLE.fullmatch(soabi) else unknown("sysconfig has no SOABI"),
+            "platform": observed(plat, "python:sysconfig.get_platform"),
+            "arch": observed(arch, arch_evidence) if arch else unknown("the interpreter's build architecture was not found"),
+            "pointer_bits": observed(struct.calcsize("P") * 8, "python:struct.calcsize"),
+            "free_threaded_build": free_threaded,
+            "gil_enabled": gil,
+            "libc": observed(f"{libc} {libc_version}", "python:platform.libc_ver") if libc and libc_version else unknown("platform.libc_ver() found no C library version"),
+            "execution": execution_fact(arch, arch_evidence, reference) if self.system == "Linux" else unknown("compared on Linux only"),
+        }
+
+    def node(self, reference):
+        def all_unknown(reason):
+            return {name: unknown(reason) for name in ("version", "modules_abi", "napi_version", "platform", "arch", "execution")}
+
+        if not self.probe_node:
+            return all_unknown("not probed (--no-node)")
+        executable = shutil.which("node", path=self.env("PATH") or os.defpath)
+        if executable is None:
+            return all_unknown("node is not on PATH")
+        try:
+            completed = subprocess.run(
+                [executable, "-p", NODE_EXPRESSION], env={}, stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return all_unknown(f"node could not be run ({type(exc).__name__})")
+        if completed.returncode != 0:
+            return all_unknown(f"node exited with status {completed.returncode}")
+        values = json.loads(completed.stdout[:4096].decode("utf-8"))
+        evidence = "cmd:node -p process.versions,process.arch,process.platform"
+
+        def checked(key, pattern):
+            value = values.get(key)
+            return observed(str(value), evidence) if value is not None and re.fullmatch(pattern, str(value)) else unknown(f"node reported no usable {key}")
+
+        arch = normalize_arch(values.get("a"))
+        platform_name = values.get("p")
+        return {
+            "version": checked("v", r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}"),
+            "modules_abi": checked("m", r"[0-9]{1,5}"),
+            "napi_version": checked("n", r"[0-9]{1,5}"),
+            "platform": observed(platform_name, evidence) if isinstance(platform_name, str) and SLUG.fullmatch(platform_name) else unknown("node reported no usable platform"),
+            "arch": observed(arch, evidence) if arch else unknown("node reported no usable architecture"),
+            "execution": execution_fact(arch, evidence, reference) if self.system == "Linux" else unknown("compared on Linux only"),
+        }
+
+    def run(self):
+        system = self.env("GITHUB_ACTIONS") == "true"
+        na = "not running in GitHub Actions"
+
+        def gha(name, pattern):
+            return self.env_value(name, pattern) if system else not_applicable(na)
+
+        ci = {
+            "system": observed("github-actions", "env:GITHUB_ACTIONS") if system else inferred("local", "env:GITHUB_ACTIONS"),
+            "event": gha("GITHUB_EVENT_NAME", r"[a-z_]{1,64}"),
+            "repository": gha("GITHUB_REPOSITORY", r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}"),
+            "ref": gha("GITHUB_REF", r"refs/[A-Za-z0-9._/+-]{1,190}"),
+            "run_id": gha("GITHUB_RUN_ID", r"[0-9]{1,20}"),
+            "run_attempt": gha("GITHUB_RUN_ATTEMPT", r"[0-9]{1,4}"),
+            "run_url": not_applicable(na),
+            "workflow_ref": gha("GITHUB_WORKFLOW_REF", r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]{1,150}@refs/[A-Za-z0-9._/+-]{1,150}"),
+            "job": gha("GITHUB_JOB", r"[A-Za-z0-9_-]{1,100}"),
+            "runner_environment": gha("RUNNER_ENVIRONMENT", r"github-hosted|self-hosted"),
+            "runner_os": gha("RUNNER_OS", r"[A-Za-z0-9]{1,40}"),
+            "runner_arch": gha("RUNNER_ARCH", r"[A-Za-z0-9]{1,40}"),
+            "image_os": gha("ImageOS", r"[A-Za-z0-9._-]{1,40}"),
+            "image_version": gha("ImageVersion", r"[A-Za-z0-9._-]{1,40}"),
+        }
+        if ci["run_attempt"]["value"] is not None:
+            ci["run_attempt"]["value"] = int(ci["run_attempt"]["value"])
+        if system:
+            # The documented form; the attempt is in run_attempt.
+            server = self.env_value("GITHUB_SERVER_URL", r"https://[A-Za-z0-9.-]{1,100}")
+            parts = (server["value"], ci["repository"]["value"], ci["run_id"]["value"])
+            if all(part is not None for part in parts):
+                ci["run_url"] = inferred(f"{parts[0]}/{parts[1]}/actions/runs/{parts[2]}", "env:GITHUB_SERVER_URL", "env:GITHUB_REPOSITORY", "env:GITHUB_RUN_ID")
+            else:
+                ci["run_url"] = unknown("a run URL needs GITHUB_SERVER_URL, GITHUB_REPOSITORY and GITHUB_RUN_ID")
+        revision = {
+            "tested_sha": self.checkout_sha(),
+            "event_sha": gha("GITHUB_SHA", r"[0-9a-f]{40}"),
+        }
+        revision.update(self.pull_request(ci["event"]["value"]) if system else {"pr_head_sha": not_applicable(na), "pr_base_sha": not_applicable(na)})
+        return {"ci": ci, "revision": revision}
+
+    def pull_request(self, event):
+        if event is None:
+            return {"pr_head_sha": unknown("the event is not known"), "pr_base_sha": unknown("the event is not known")}
+        if event not in ("pull_request", "pull_request_target"):
+            reason = f"the {event} event has no pull request"
+            return {"pr_head_sha": not_applicable(reason), "pr_base_sha": not_applicable(reason)}
+        path = self.env("GITHUB_EVENT_PATH")
+        if not path:
+            return {"pr_head_sha": unknown("GITHUB_EVENT_PATH is not set"), "pr_base_sha": unknown("GITHUB_EVENT_PATH is not set")}
+        try:
+            with open(path, "rb") as handle:
+                payload = json.loads(handle.read(8 * 1024 * 1024).decode("utf-8"))
+        except (OSError, ValueError) as exc:
+            reason = f"the event file could not be read ({type(exc).__name__})"
+            return {"pr_head_sha": unknown(reason), "pr_base_sha": unknown(reason)}
+        # Only the two commit IDs are taken: the payload also holds logins, e-mail addresses and titles.
+        pull = payload.get("pull_request") if isinstance(payload, dict) else None
+        out = {}
+        for side in ("head", "base"):
+            sha = pull.get(side, {}).get("sha") if isinstance(pull, dict) and isinstance(pull.get(side), dict) else None
+            key = f"pr_{side}_sha"
+            out[key] = observed(sha, f"event:pull_request.{side}.sha") if isinstance(sha, str) and SHA.fullmatch(sha) else unknown(f"the event payload has no pull_request.{side}.sha")
+        return out
+
+    def checkout_sha(self):
+        head, reason = self.read_git("HEAD")
+        if head is None:
+            return unknown(reason)
+        head = head.strip()
+        if SHA.fullmatch(head):
+            return observed(head, "git:.git/HEAD")
+        ref = head[len("ref: "):] if head.startswith("ref: ") else None
+        if ref is None or not re.fullmatch(r"refs/[A-Za-z0-9._/+-]{1,190}", ref) or ".." in ref:
+            return unknown(".git/HEAD has an unexpected form")
+        loose, _ = self.read_git(ref)
+        if loose is not None and SHA.fullmatch(loose.strip()):
+            return observed(loose.strip(), f"git:.git/{ref}")
+        packed, _ = self.read_git("packed-refs")
+        for line in (packed or "").splitlines():
+            sha, _, name = line.partition(" ")
+            if name == ref and SHA.fullmatch(sha):
+                return observed(sha, "git:.git/packed-refs")
+        return unknown(f"{ref} is not resolved in .git")
+
+    def read_git(self, name):
+        try:
+            if not self.git_dir.is_dir():
+                return None, ".git is not a directory (no checkout, or a worktree)"
+            with open(self.git_dir / name, "rb") as handle:
+                return handle.read(1 << 20).decode("utf-8", "replace"), None
+        except OSError as exc:
+            return None, f".git/{name} could not be read ({type(exc).__name__})"
+
+    def compute(self):
+        return {
+            "backends": [{
+                "id": "cpu",
+                "kind": "cpu",
+                "api": "cpu",
+                "available": observed(True, TOOL),
+                "device": unknown("the CPU model is not recorded"),
+                "version": not_applicable("a CPU has no backend version"),
+                "features": unknown("CPU features are not recorded"),
+            }],
+            "accelerator_inventory": unknown("this collector does not look for GPUs or NPUs; a missing entry does not show there is none"),
+        }
+
+    def collect(self):
+        """Return the result document without stages; see build_result()."""
+        reason_layers = lambda reason: [layer_fallback(reason)]  # noqa: E731
+        reference = self.guard("cpu", lambda: self.cpu_reference() if self.system == "Linux" else (None, None), lambda reason: (None, None))
+        return {
+            "run": self.guard("run", self.run, run_fallback),
+            "environment": {"layers": self.guard("layers", self.layers, reason_layers)},
+            "workload": {
+                "identity": self.guard("identity", self.identity, identity_fallback),
+                "isolation": self.guard("isolation", self.isolation, isolation_fallback),
+                "runtimes": {
+                    "python": self.guard("python", lambda: self.python(reference), python_fallback),
+                    "node": self.guard("node", lambda: self.node(reference), node_fallback),
+                },
+            },
+            "compute": self.compute(),
+        }
+
+
+def known_kind(layer):
+    fact = layer.get("kind", {})
+    return fact.get("value") if fact.get("provenance") in ("observed", "inferred", "declared") else None
+
+
+LAYER_ORDER = ("label", "kind", "technology", "os", "cpu", "service_manager", "container", "extensions")
+
+
+def order_layer(layer):
+    layer["os"] = {key: layer["os"][key] for key in ("family", "name", "version", "kernel")}
+    return {key: layer[key] for key in LAYER_ORDER if key in layer}
+
+
+def split_platform(plat):
+    if plat.startswith("linux-"):
+        return "linux", normalize_arch(plat[len("linux-"):])
+    windows = {"win32": "x86", "win-amd64": "x86_64", "win-arm64": "aarch64", "win-arm32": "armv7"}
+    if plat in windows:
+        return "windows", windows[plat]
+    match = re.fullmatch(r"macosx-[0-9.]+-([A-Za-z0-9_]+)", plat)
+    if match and match.group(1) not in ("universal2", "intel", "fat", "fat3", "fat64"):
+        return "macos", normalize_arch(match.group(1))
+    return None, None
+
+
+def decode_capabilities(mask):
+    bits = int(mask, 16)
+    names = [f"cap_{name}" for index, name in enumerate(CAPABILITIES) if bits >> index & 1]
+    names += [f"cap_{index}" for index in range(len(CAPABILITIES), 64) if bits >> index & 1]
+    return names
+
+
+def layer_fallback(reason):
+    return {
+        "kind": unknown(reason), "technology": unknown(reason),
+        "os": {"family": unknown(reason), "name": unknown(reason), "version": unknown(reason), "kernel": unknown(reason)},
+        "cpu": {"arch": unknown(reason), "execution": unknown(reason)},
+        "service_manager": {"name": unknown(reason), "scope": unknown(reason)},
+    }
+
+
+def identity_fallback(reason):
+    return {"superuser": unknown(reason), "uid": unknown(reason), "gid": unknown(reason), "user_namespace": {"initial": unknown(reason), "uid_map": unknown(reason)}}
+
+
+def isolation_fallback(reason):
+    return {
+        "no_new_privs": unknown(reason),
+        "capabilities": {"effective": unknown(reason), "bounding": unknown(reason)},
+        "seccomp": unknown(reason),
+        "apparmor": {"enabled": unknown(reason), "profile": unknown(reason)},
+        "selinux": {"mode": unknown(reason), "context": unknown(reason)},
+        "cgroup": {"version": unknown(reason), "delegated": unknown(reason)},
+    }
+
+
+def python_fallback(reason):
+    names = ("implementation", "version", "cache_tag", "soabi", "platform", "arch", "pointer_bits", "free_threaded_build", "gil_enabled", "libc", "execution")
+    return {name: unknown(reason) for name in names}
+
+
+def node_fallback(reason):
+    return {name: unknown(reason) for name in ("version", "modules_abi", "napi_version", "platform", "arch", "execution")}
+
+
+def run_fallback(reason):
+    names = ("system", "event", "repository", "ref", "run_id", "run_attempt", "run_url", "workflow_ref", "job", "runner_environment", "runner_os", "runner_arch", "image_os", "image_version")
+    return {
+        "ci": {name: unknown(reason) for name in names},
+        "revision": {name: unknown(reason) for name in ("tested_sha", "event_sha", "pr_head_sha", "pr_base_sha")},
+    }
+
+
+def overall_of(stages):
+    statuses = [stages[name]["status"] for name in STAGES]
+    if "failed" in statuses:
+        return "failed"
+    if "passed" in statuses and all(status in ("passed", "not-applicable") for status in statuses):
+        return "passed"
+    return "incomplete"
+
+
+def build_result(probe, profile_id=None, stage_args=None, now=None):
+    """Collect, then add the stages: detect from the probes, the others from stage_args."""
+    sections = probe.collect()
+    if probe.errors:
+        names = ", ".join(error["probe"] for error in probe.errors)
+        detect = {"status": "failed", "reason": f"probe(s) raised unexpected errors: {names}; see probe_errors", "evidence": [f"{TOOL}#probe_errors"]}
+    else:
+        detect = {"status": "passed", "evidence": [TOOL]}
+    detect["privilege"] = {"escalation": declared("none", TOOL)}
+    stages = {"detect": detect}
+    for name in STAGES[1:]:
+        stages[name] = {"status": "not-run", "reason": "not run by the job that wrote this record"}
+    for name, stage in (stage_args or {}).items():
+        stages[name] = stage
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    result = {
+        "schema_version": 1,
+        "kind": "result",
+        "synthetic": False,
+        "profile_id": profile_id,
+        "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "collector": dict(COLLECTOR),
+        "run": sections["run"],
+        "environment": sections["environment"],
+        "workload": sections["workload"],
+        "compute": sections["compute"],
+        "stages": stages,
+        "overall": overall_of(stages),
+        "probe_errors": probe.errors,
+    }
+    return result
+
+
+def parse_stage_args(args):
+    """Turn the --stage* options into stage objects; raise ValueError on bad input."""
+    def pairs(values, option):
+        for value in values or []:
+            name, sep, rest = value.partition("=")
+            if not sep or name not in STAGES[1:]:
+                raise ValueError(f"{option} takes NAME=VALUE with NAME one of {', '.join(STAGES[1:])}")
+            yield name, rest
+
+    stages = {}
+    for name, status in pairs(args.stage, "--stage"):
+        if status not in STATUSES:
+            raise ValueError(f"--stage {name}: status must be one of {', '.join(STATUSES)}")
+        stages[name] = {"status": status}
+    for option, values in (("--stage-reason", args.stage_reason), ("--stage-evidence", args.stage_evidence), ("--stage-escalation", args.stage_escalation)):
+        for name, value in pairs(values, option):
+            if name not in stages:
+                raise ValueError(f"{option} {name}: give --stage {name}=STATUS first")
+            if option == "--stage-reason":
+                if not re.fullmatch(r"[ -~]{1,500}", value):
+                    raise ValueError(f"--stage-reason {name}: printable ASCII, 1 to 500 characters")
+                stages[name]["reason"] = value
+            elif option == "--stage-evidence":
+                if not EVIDENCE.fullmatch(value):
+                    raise ValueError(f"--stage-evidence {name}: KIND:LOCATION with a known kind")
+                stages[name].setdefault("evidence", []).append(value)
+            else:
+                if value not in ESCALATIONS:
+                    raise ValueError(f"--stage-escalation {name}: one of {', '.join(ESCALATIONS)}")
+                stages[name]["privilege"] = {"escalation": declared(value)}
+    return stages
+
+
+def markdown_cell(value):
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value)).replace("|", "\\|").replace("`", "'")
+
+
+def describe(fact):
+    if fact.get("provenance") in ("unknown", "not-applicable"):
+        return fact["provenance"]
+    value = fact["value"]
+    if isinstance(value, list):
+        value = f"{len(value)} item(s)"
+    return f"{value} ({fact['provenance']})"
+
+
+def summary_lines(result):
+    ci, revision = result["run"]["ci"], result["run"]["revision"]
+    rows = [
+        ("Profile", result["profile_id"] or "none"),
+        ("Event", describe(ci["event"])),
+        ("Run", describe(ci["run_url"])),
+        ("Tested commit (checkout)", describe(revision["tested_sha"])),
+        ("GITHUB_SHA", describe(revision["event_sha"])),
+        ("Pull request head / base", f"{describe(revision['pr_head_sha'])} / {describe(revision['pr_base_sha'])}"),
+    ]
+    for index, layer in enumerate(result["environment"]["layers"]):
+        os_facts = layer["os"]
+        rows.append((f"Layer {index}", f"{describe(layer['kind'])}; {describe(layer['technology'])}; {describe(os_facts['family'])} {describe(os_facts['name'])} {describe(os_facts['version'])}; kernel {describe(os_facts['kernel'])}; {describe(layer['cpu']['arch'])}, {describe(layer['cpu']['execution'])}"))
+    identity, isolation = result["workload"]["identity"], result["workload"]["isolation"]
+    rows += [
+        ("Workload user", f"uid {describe(identity['uid'])}, superuser {describe(identity['superuser'])}, initial user namespace {describe(identity['user_namespace']['initial'])}"),
+        ("Isolation", f"no_new_privs {describe(isolation['no_new_privs'])}, seccomp {describe(isolation['seccomp'])}, effective capabilities {describe(isolation['capabilities']['effective'])}, AppArmor {describe(isolation['apparmor']['enabled'])}, SELinux {describe(isolation['selinux']['mode'])}, cgroup {describe(isolation['cgroup']['version'])}"),
+    ]
+    for name, runtime in result["workload"]["runtimes"].items():
+        rows.append((name.capitalize(), ", ".join(f"{key} {describe(fact)}" for key, fact in runtime.items())))
+    rows.append(("Stages", ", ".join(f"{name} {stage['status']}" for name, stage in result["stages"].items())))
+    rows.append(("Overall", result["overall"]))
+    rows.append(("Probe errors", "; ".join(f"{error['probe']}: {error['error']}" for error in result["probe_errors"]) or "none"))
+    lines = ["### Compatibility record", "", "| Field | Value |", "|---|---|"]
+    lines += [f"| {markdown_cell(name)} | {markdown_cell(value)} |" for name, value in rows]
+    lines += ["", "Recorded by scripts/ci/collect_environment.py. Overall is incomplete while stages after detect are not run; see docs/CI-MATRIX.md.", ""]
+    return lines
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser.add_argument("--output", required=True, type=pathlib.Path, help="where to write the result JSON")
+    parser.add_argument("--profile-id", help="id of the profile this lane declares")
+    parser.add_argument("--summary", type=pathlib.Path, help="append a Markdown summary to this file")
+    parser.add_argument("--no-node", action="store_true", help="do not run node")
+    parser.add_argument("--stage", action="append", metavar="NAME=STATUS")
+    parser.add_argument("--stage-reason", action="append", metavar="NAME=TEXT")
+    parser.add_argument("--stage-evidence", action="append", metavar="NAME=REF")
+    parser.add_argument("--stage-escalation", action="append", metavar="NAME=VALUE")
+    args = parser.parse_args(argv)
+    if args.profile_id is not None and not SLUG.fullmatch(args.profile_id):
+        parser.error("--profile-id must be a lower-case identifier")
+    try:
+        stage_args = parse_stage_args(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    result = build_result(Probe(probe_node=not args.no_node), args.profile_id, stage_args)
+    text = json.dumps(result, indent=2, ensure_ascii=True) + "\n"
+    try:
+        args.output.write_text(text, encoding="utf-8")
+        if args.summary:
+            with open(args.summary, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(summary_lines(result)))
+    except OSError as exc:
+        print(f"error: cannot write the record: {type(exc).__name__}", file=sys.stderr)
+        return 2
+    detect = result["stages"]["detect"]["status"]
+    print(f"{args.output}: detect {detect}, overall {result['overall']}, {len(result['probe_errors'])} probe error(s)")
+    for error in result["probe_errors"]:
+        print(f"  probe error: {error['probe']}: {error['error']}")
+    return 0 if detect == "passed" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

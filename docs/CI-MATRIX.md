@@ -103,7 +103,7 @@ These facts are independent, and none is derived from another:
 | Privileged container | `container.privileged` | |
 | Capabilities | `isolation.capabilities.effective`, `permitted`, `bounding` | A permitted capability can be made effective again, so the policy reads both sets. |
 | No new privileges, seccomp, AppArmor, SELinux | `isolation.*` | AppArmor's label is read from `/proc/self/attr/apparmor/current` only; SELinux's context only when SELinux is the first major security module listed. |
-| cgroup version and delegation | `isolation.cgroup` | The version is the file system mounted at `/sys/fs/cgroup`; delegation is read for cgroup v2 from write permission on the process's own cgroup, and only when none of its real, effective, or saved user IDs is 0 and it holds no effective or permitted capability, because `access(2)` checks the real user ID. |
+| cgroup version and delegation | `isolation.cgroup` | The version is the file system mounted at `/sys/fs/cgroup`; delegation is read for cgroup v2 from write permission on the process's own cgroup directory, its `cgroup.procs`, and its `cgroup.subtree_control` (without the last, no controller can be enabled below it), and only when none of its real, effective, or saved user IDs is 0 and it holds no effective or permitted capability, because `access(2)` checks the real user ID. |
 | Devices | `container.devices` | Devices the engine passes in. |
 | Provisioning and runtime privilege | `stages.<stage>.privilege.escalation` | `none`, `sudo`, `root-login`, `setuid`, or `other`, per stage. An `install` that used `sudo` and an `execute` that used `none` are recorded as such. |
 
@@ -186,7 +186,7 @@ Each finding has a stable code. Errors make the document invalid; warnings do no
 | `layer-structure` | error | Layer order or container facts that break the nesting rules. |
 | `os-contradiction` | error | A container with another OS family than its parent, WSL2 off Windows or not Linux, or a runtime or ABI tag built for another OS than the innermost layer. |
 | `cpu-contradiction` | error | Emulated execution declared native: a layer, Python, or Node recorded as native inside an emulated layer, or whose architecture cannot run natively on an enclosing layer; or an emulated outermost host. |
-| `abi-contradiction` | error | A Python platform tag, architecture, pointer size, cache tag, SOABI (its version, `t` suffix, and architecture), free-threading flag, or GIL state that disagree. On Linux the platform tag follows the kernel, so a 32-bit build on a 64-bit kernel of its family agrees with it; on Windows and macOS the tag names the build. |
+| `abi-contradiction` | error | A Python platform tag, architecture, pointer size, cache tag, SOABI (its version, `t` suffix, architecture, and C library, which must match the libc fact), free-threading flag, or GIL state that disagree. On Linux the platform tag follows the kernel, so a 32-bit build on a 64-bit kernel of its family agrees with it; on Windows and macOS the tag names the build. |
 | `identity-contradiction` | error | `superuser` that disagrees with uid 0 on Linux, macOS, or FreeBSD, or an initial user namespace without the identity map. |
 | `backend-reference` | error | Duplicate backend IDs, a backend with the `cpu` API whose kind is not `cpu`, a stage naming a backend that is not listed, a backend used by a stage that did not run, a passing stage on a backend not recorded as available, or a profile's `accelerator_backend` that is not one of its `gpu` or `npu` backends. |
 | `accelerator-fallback` | error | A GPU or NPU stage that passed on another backend. |
@@ -206,7 +206,7 @@ Each finding has a stable code. Errors make the document invalid; warnings do no
 | `required-stage` | error | A stage the profile requires that did not pass, or, under a profile with an `accelerator_backend`, a required `execute`, `correctness`, or `performance` stage that did not run on it. |
 | `profile-unchecked` | warning | A result naming a profile that was not given; the default policy applies unless `--no-policy` is given. |
 
-The validator prints each finding on one line, with control characters replaced and `##[`, which the GitHub Actions runner reads as a workflow command anywhere in a line, written as `## [`; a line it prints starts with a file name or with its own text, never with a value from a record. Its `--summary` escapes Markdown in every table cell.
+The validator prints each finding on one line, with control characters replaced and `##[`, which the GitHub Actions runner reads as a workflow command anywhere in a line, written as `## [`, and `::`, which starts a workflow command at the start of a line, written as `: :`; a line it prints starts with a file name or with its own text, never with a value from a record, and a file name that starts with `::` cannot start a command either. Its `--summary` escapes Markdown in every table cell.
 
 ### Detection failures and validation failures
 

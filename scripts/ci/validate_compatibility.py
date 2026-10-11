@@ -699,6 +699,11 @@ def check_workload(document, findings):
             findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the innermost layer is {family}")
         if soabi_arch in ARCH_BITS and python_arch in ARCH_BITS and soabi_arch != python_arch:
             findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_arch}, the arch fact says {python_arch}")
+        tag_libc = re.search(r"-linux-(gnu|musl)[a-z0-9]*$", known(python["soabi"]) or "")
+        libc = known(python["libc"])
+        libc_name = re.match(r"(glibc|musl)\b", libc) if isinstance(libc, str) else None
+        if tag_libc and libc_name and {"gnu": "glibc", "musl": "musl"}[tag_libc.group(1)] != libc_name.group(1):
+            findings.error("abi-contradiction", f"{base}/libc", f"the ABI tag is for {tag_libc.group(1)}, the libc fact says {libc!r}")
         if known(python["free_threaded_build"]) is False and known(python["gil_enabled"]) is False:
             findings.error("abi-contradiction", f"{base}/gil_enabled", "a build without free threading always holds the GIL")
 
@@ -1224,10 +1229,11 @@ def load_schema(path=DEFAULT_SCHEMA):
 
 
 def plain(text):
-    """Text for a terminal line: control characters and lone surrogates become spaces, and "##[", which the
-    GitHub Actions runner reads as a workflow command anywhere in a line, becomes "## [".
+    """Text for a terminal line: control characters and lone surrogates become spaces, "##[", which the
+    GitHub Actions runner reads as a workflow command anywhere in a line, becomes "## [", and "::", which
+    starts a workflow command at the start of a line (as a file name can), becomes ": :".
     """
-    return CONTROL.sub(" ", str(text)).replace("##[", "## [")
+    return CONTROL.sub(" ", str(text)).replace("##[", "## [").replace("::", ": :")
 
 
 def markdown_cell(text):

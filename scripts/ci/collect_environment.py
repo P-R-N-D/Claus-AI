@@ -774,8 +774,9 @@ class Probe:
         directory = self.path("/sys/fs/cgroup") / relative
         if ".." in relative.split("/") or not directory.is_dir():
             return {"version": version, "delegated": unknown("this process's cgroup directory is not visible here")}
-        # access(2) reports permission bits only; nothing is written to find out.
-        delegated = os.access(directory, os.W_OK) and os.access(directory / "cgroup.procs", os.W_OK) and (directory / "cgroup.subtree_control").exists()
+        # access(2) reports permission bits only; nothing is written to find out. Without write access to
+        # cgroup.subtree_control a process cannot enable controllers for its children, so that is not delegation.
+        delegated = os.access(directory, os.W_OK) and os.access(directory / "cgroup.procs", os.W_OK) and os.access(directory / "cgroup.subtree_control", os.W_OK)
         return {"version": version, "delegated": observed(delegated, "file:/sys/fs/cgroup/<own-cgroup>/cgroup.procs#writable")}
 
     def sysconfig_overrides(self):

@@ -551,6 +551,7 @@ class EnvironmentRuleTests(Case):
             ("ABI tag of another architecture", lambda d: python(d).update(soabi=fact("cpython-312-aarch64-linux-gnu", "synthetic:x")), "abi-contradiction"),
             ("Windows ABI tag on Linux", lambda d: python(d).update(soabi=fact("cp312-win_amd64", "synthetic:x")), "os-contradiction"),
             ("no GIL on a GIL build", lambda d: python(d).update(gil_enabled=fact(False, "synthetic:x")), "abi-contradiction"),
+            ("glibc with a musl ABI tag", lambda d: python(d).update(soabi=fact("cpython-312-x86_64-linux-musl", "synthetic:x")), "abi-contradiction"),
             ("aarch64 Node declared native on x86_64", lambda d: node(d).update(arch=fact("aarch64", "synthetic:x")), "cpu-contradiction"),
         ):
             with self.subTest(label):
@@ -561,9 +562,16 @@ class EnvironmentRuleTests(Case):
         other = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact("cpython-312-aarch64-linux-gnu", "synthetic:x")))
         self.assertCodes(check(other), "abi-contradiction")
         self.assertFinding(check(other), "abi-contradiction", "/workload/runtimes/python/soabi")
-        for soabi in ("cpython-312-x86_64-linux-musl", "cpython-312-x86_64-linux-gnu"):
-            with self.subTest(soabi):
-                self.assertValid(check(changed(result, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact(soabi, "synthetic:x")))))
+        # The C library in the tag must agree with the libc fact when both are known.
+        for libc, soabi in ((None, "cpython-312-x86_64-linux-musl"), ("glibc 2.39", "cpython-312-x86_64-linux-gnu"), ("musl 1.2.5", "cpython-312-x86_64-linux-musl")):
+            with self.subTest(libc=libc, soabi=soabi):
+                libc_fact = unknown() if libc is None else fact(libc, "synthetic:x")
+                self.assertValid(check(changed(result, lambda d: d["workload"]["runtimes"]["python"].update(libc=libc_fact, soabi=fact(soabi, "synthetic:x")))))
+        for libc, soabi in (("glibc 2.39", "cpython-312-x86_64-linux-musl"), ("musl 1.2.5", "cpython-312-x86_64-linux-gnu")):
+            with self.subTest(libc=libc, soabi=soabi):
+                mixed = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(libc=fact(libc, "synthetic:x"), soabi=fact(soabi, "synthetic:x")))
+                self.assertCodes(check(mixed), "abi-contradiction")
+                self.assertFinding(check(mixed), "abi-contradiction", "/workload/runtimes/python/libc")
         # The platform part of the tag is checked even when the version is not known.
         no_version = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(version=unknown()))
         for soabi, code in (("cpython-312-aarch64-linux-gnu", "abi-contradiction"), ("cp312-win_amd64", "os-contradiction")):
@@ -1411,6 +1419,14 @@ class CommandTests(Case):
                     code, output = self.run_main(*argv)
                     self.assertEqual(code, 2)
                     self.assertFalse([line for line in output.splitlines() if line.lstrip().startswith("::")], output)
+            # A relative file name is printed as given, so one that starts with "::" would start the line.
+            name = "::warning title=forged::x.json"
+            (pathlib.Path(directory) / name).write_bytes((FIXTURES / "linux-x64-vm.result.json").read_bytes())
+            with contextlib.chdir(directory):
+                code, output = self.run_main(name)
+            self.assertEqual(code, 0)
+            self.assertIn("valid result", output)
+            self.assertFalse([line for line in output.splitlines() if line.lstrip().startswith("::")], output)
 
     def test_an_unusable_schema_is_a_usage_error(self):
         with tempfile.TemporaryDirectory() as directory:

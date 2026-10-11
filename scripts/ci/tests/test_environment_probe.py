@@ -663,6 +663,9 @@ class IsolationTests(Case):
             self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), True)
         with mock.patch.object(collector.os, "access", return_value=False):
             self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), False)
+        # The directory and cgroup.procs are writable, but without cgroup.subtree_control no controller can be enabled below.
+        with mock.patch.object(collector.os, "access", side_effect=lambda path, mode: not str(path).endswith("cgroup.subtree_control")):
+            self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), False)
         # access(2) checks the real user ID, so root in any of the IDs, or a capability, says nothing about delegation.
         for label, text in (("root", status(uid=0, cap_eff=FULL)), ("real root", status(real_uid=0)), ("saved root", status(saved_uid=0)),
                             ("permitted capability", status(cap_prm="0000000000000001"))):

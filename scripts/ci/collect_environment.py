@@ -11,7 +11,8 @@ The collector reads the following, and nothing else:
 - The pull request head and base in the GitHub Actions event file.
 - The checkout's .git/HEAD, and the loose ref or packed-refs line it points to.
 - The first 4 KiB that `node -p` writes, run with an empty environment (on
-  Windows, SystemRoot only) and stopped after 30 seconds.
+  Windows, SystemRoot only) and stopped after 30 seconds. node is looked for in
+  the PATH directories only, so on Windows not in the current directory.
 
 Files are read only when they are regular files, and are opened so that a FIFO
 cannot block the probe.
@@ -242,6 +243,20 @@ class ProbeError(Exception):
 
 class NotRegularFile(OSError):
     pass
+
+
+def find_on_path(name, search_path):
+    """The program `name` in the directories of `search_path`, or None.
+
+    On Windows shutil.which also looks in the current directory first, which the path does not name, so
+    there each directory is looked in by itself; an empty entry names no directory."""
+    if os.name != "nt":
+        return shutil.which(name, path=search_path)
+    for directory in search_path.split(os.pathsep):
+        found = shutil.which(os.path.join(directory, name)) if directory else None
+        if found:
+            return found
+    return None
 
 
 def read_regular(path, limit):
@@ -726,8 +741,11 @@ class Probe:
             if self.missing("/sys/module/apparmor/parameters/enabled"):
                 return {"enabled": inferred(False, "file:/sys/module/apparmor/parameters/enabled#absent"), "profile": not_applicable("AppArmor is not in this kernel")}
             return {"enabled": unknown(reason), "profile": unknown(reason)}
-        enabled = text.strip() == "Y"
-        if not enabled:
+        # The kernel writes Y or N; anything else, such as a file that was replaced, says nothing.
+        if text.strip() not in ("Y", "N"):
+            reason = "/sys/module/apparmor/parameters/enabled holds neither Y nor N"
+            return {"enabled": unknown(reason), "profile": unknown(reason)}
+        if text.strip() == "N":
             return {"enabled": observed(False, "file:/sys/module/apparmor/parameters/enabled"), "profile": not_applicable("AppArmor is not enabled")}
         # /proc/self/attr/current belongs to whichever major LSM comes first, so only the
         # AppArmor-specific file (Linux 5.8 and later) is read.
@@ -880,7 +898,7 @@ class Probe:
             return all_unknown("not probed (--no-node)")
         # An unset PATH searches the default directories; an empty one, as shutil.which reads it, finds nothing.
         search_path = self.env("PATH")
-        executable = shutil.which("node", path=os.defpath if search_path is None else search_path)
+        executable = find_on_path("node", os.defpath if search_path is None else search_path)
         if executable is None:
             return all_unknown("node is not on PATH")
         # Windows needs SystemRoot to start a program that loads side-by-side assemblies; nothing else is passed.

@@ -742,6 +742,11 @@ class IsolationTests(Case):
         unreadable.pop("sys/module/apparmor/parameters/enabled")
         apparmor = self.isolation(unreadable)["apparmor"]
         self.assertEqual((apparmor["enabled"]["provenance"], apparmor["profile"]["provenance"]), ("unknown", "unknown"))
+        # The kernel writes Y or N; any other value is not evidence either way.
+        for text in ("garbage\n", "1\n", "y\n", "\n"):
+            with self.subTest(enabled=text):
+                apparmor = self.isolation(dict(RUNNER_FILES, **{"sys/module/apparmor/parameters/enabled": text}))["apparmor"]
+                self.assertEqual((apparmor["enabled"]["provenance"], apparmor["profile"]["provenance"]), ("unknown", "unknown"))
         no_label = dict(RUNNER_FILES)
         no_label.pop("proc/self/attr/apparmor/current")
         no_label["proc/self/attr/current"] = "unconfined\n"
@@ -1217,6 +1222,37 @@ class NodeTests(Case):
             with FakeMachine(env=env) as machine, mock.patch.object(collector.shutil, "which", which):
                 self.assertEqual(machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"], "node is not on PATH")
         self.assertEqual(searched, [os.defpath, "", "/x"])
+
+    def test_node_is_not_looked_for_in_the_current_directory_on_windows(self):
+        # shutil.which on Windows looks in the current directory before PATH, so a node in the checkout would run.
+        def windows_which(cmd, mode=os.F_OK | os.X_OK, path=None):
+            directory, name = os.path.split(cmd)
+            for place in [directory] if directory else [os.curdir, *(path or "").split(os.pathsep)]:
+                candidate = os.path.join(place, name)
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    return candidate
+            return None
+
+        started = []
+
+        def popen(args, **kwargs):
+            started.append(args[0])
+            raise OSError("not started")
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout, installed, empty = (pathlib.Path(directory, name) for name in ("checkout", "bin", "empty"))
+            for place in (checkout, installed, empty):
+                place.mkdir()
+            for place in (checkout, installed):
+                (place / "node").write_text("", encoding="utf-8")
+                (place / "node").chmod(0o755)
+            for search_path, expected in ((str(installed), str(installed / "node")), (os.pathsep + str(installed), str(installed / "node")), (str(empty), None)):
+                with self.subTest(path=search_path), FakeMachine(env={"PATH": search_path}) as machine, contextlib.chdir(checkout), \
+                        mock.patch.object(collector.shutil, "which", windows_which), mock.patch.object(collector.subprocess, "Popen", popen), \
+                        mock.patch.object(collector.os, "name", "nt"):
+                    started.clear()
+                    reason = machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"]
+                    self.assertEqual((started, reason), ([expected], "node could not be run (OSError)") if expected else ([], "node is not on PATH"))
 
 
 class CommandTests(Case):

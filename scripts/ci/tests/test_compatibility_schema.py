@@ -1565,6 +1565,7 @@ class ProfileTests(Case):
             ("no run attempt", lambda d: ci(d).update(run_attempt=unknown())),
             ("run attempt 0", lambda d: ci(d).update(run_attempt=fact(0, "env:GITHUB_RUN_ATTEMPT"))),
             ("run URL of another run", lambda d: ci(d).update(run_url=fact("https://github.com/P-R-N-D/Claus-AI/actions/runs/101", "env:x", provenance="inferred"))),
+            ("run URL of another attempt", lambda d: ci(d).update(run_url=fact("https://github.com/P-R-N-D/Claus-AI/actions/runs/100/attempts/2", "env:x", provenance="inferred"))),
             ("pull_request_target without the pull request", lambda d: (ci(d).update(event=fact("pull_request_target", "env:GITHUB_EVENT_NAME")),
                                                                          revision(d).update(pr_head_sha=unknown(), pr_base_sha=unknown()))),
         ):
@@ -1578,6 +1579,12 @@ class ProfileTests(Case):
                     declared = changed(result, lambda d: group(d).update({name: fact(group(d)[name]["value"], provenance="declared")}))
                     self.assertFinding(check(declared, profile), "ci-evidence", path)
         self.assertFinding(check(changed(result, lambda d: ci(d).update(job=unknown())), profile), "ci-evidence", "/run/ci/job")
+        # A URL with no attempt names the run, whatever its attempt; one with an attempt names that attempt.
+        attempt = lambda n, url: lambda d: ci(d).update(run_attempt=fact(n, "env:GITHUB_RUN_ATTEMPT"), run_url=fact(url, "env:x", provenance="inferred"))  # noqa: E731
+        run = "https://github.com/P-R-N-D/Claus-AI/actions/runs/100"
+        self.assertValid(check(changed(result, attempt(2, run)), profile))
+        self.assertValid(check(changed(result, attempt(2, run + "/attempts/2")), profile))
+        self.assertFinding(check(changed(result, attempt(2, run + "/attempts/1")), profile), "ci-evidence", "/run/ci/run_url")
         self.assertFinding(check(changed(result, lambda d: ci(d).update(run_attempt=fact(0, "env:GITHUB_RUN_ATTEMPT"))), profile), "ci-evidence", "/run/ci/run_attempt")
         push = changed(result, lambda d: (ci(d).update(event=fact("push", "env:GITHUB_EVENT_NAME")),
                                           revision(d).update(pr_head_sha={"value": None, "provenance": "not-applicable", "reason": "push"},

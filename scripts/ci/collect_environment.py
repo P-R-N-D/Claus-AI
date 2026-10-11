@@ -778,7 +778,7 @@ class Probe:
         # access to the directory and its cgroup.procs, cgroup.threads (Linux 4.14 and later) and cgroup.subtree_control;
         # without the last a process cannot enable controllers for its children, so that is not delegation.
         names = ["cgroup.procs", "cgroup.subtree_control"]
-        if (directory / "cgroup.threads").exists():
+        if not self.missing(f"/sys/fs/cgroup/{relative}/cgroup.threads"):
             names.append("cgroup.threads")
         delegated = os.access(directory, os.W_OK) and all(os.access(directory / name, os.W_OK) for name in names)
         evidence = ["file:/sys/fs/cgroup/<own-cgroup>#writable"] + [f"file:/sys/fs/cgroup/<own-cgroup>/{name}#writable" for name in names]

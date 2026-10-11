@@ -670,9 +670,23 @@ class IsolationTests(Case):
             writable = lambda path, mode: not (str(path).endswith(withheld) and mode == collector.os.W_OK)
             with self.subTest(withheld=withheld), mock.patch.object(collector.os, "access", side_effect=writable):
                 self.assertIs(value(self.isolation(threaded)["cgroup"]["delegated"]), False)
-        # A kernel before 4.14 has no cgroup.threads, so the other three decide.
+        # A kernel before 4.14 has no cgroup.threads, so the other three decide. The evidence names each object checked.
+        own = "file:/sys/fs/cgroup/<own-cgroup>"
+        checked = [f"{own}#writable", f"{own}/cgroup.procs#writable", f"{own}/cgroup.subtree_control#writable"]
         with mock.patch.object(collector.os, "access", side_effect=lambda path, mode: not str(path).endswith("cgroup.threads")):
-            self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), True)
+            self.assertEqual(self.isolation(files)["cgroup"]["delegated"], {"value": True, "provenance": "observed", "evidence": checked})
+        with mock.patch.object(collector.os, "access", return_value=True):
+            self.assertEqual(self.isolation(threaded)["cgroup"]["delegated"]["evidence"], checked + [f"{own}/cgroup.threads#writable"])
+        # A cgroup.threads that cannot be looked up is not taken as absent, and the probe does not fail.
+        real_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if str(path).endswith("cgroup.threads"):
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(collector.os, "stat", side_effect=stat), mock.patch.object(collector.os, "access", side_effect=lambda path, mode: not str(path).endswith("cgroup.threads")):
+            self.assertEqual(self.isolation(files)["cgroup"]["delegated"], {"value": False, "provenance": "observed", "evidence": checked + [f"{own}/cgroup.threads#writable"]})
         # access(2) checks the real user ID, so root in any of the IDs, or a capability, says nothing about delegation.
         for label, text in (("root", status(uid=0, cap_eff=FULL)), ("real root", status(real_uid=0)), ("saved root", status(saved_uid=0)),
                             ("permitted capability", status(cap_prm="0000000000000001"))):

@@ -1105,6 +1105,17 @@ class CommandTests(Case):
                     document = json.loads(json.dumps(record))
                     document["stages"]["install"]["reason"] = f"see {sample}"
                     self.assertIn("secret-like-value", validator.validate_document(document, SCHEMA).codes())
+            # The check reads the JSON text, where a character before the value may be an escape ending in a letter.
+            for prefix in ("\n", "\u200e"):
+                for sample in self.SECRET_SAMPLES:
+                    with self.subTest(prefix=prefix, sample=sample[:6]):
+                        document = json.loads(json.dumps(record))
+                        document["stages"]["install"]["reason"] = prefix + sample
+                        with mock.patch.object(collector, "build_result", return_value=document):
+                            code, text = self.run_main("--output", output, "--no-node")
+                        self.assertEqual(code, 2)
+                        self.assertNotIn(sample, text)
+                        self.assertFalse(output.exists())
 
     def test_a_probe_failure_exits_1_after_writing_the_record(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1126,7 +1137,8 @@ class CommandTests(Case):
                     self.assertFalse([line for line in text.splitlines() if line.lstrip().startswith("::") or "##[" in line], text)
                     self.assertNotIn("A" * 36, text)
         # The collector writes its lines as the validator does.
-        for sample in ("::a##[b", "a\nb\u2028c", *self.SECRET_SAMPLES):
+        self.assertEqual(collector.CONTROL.pattern, validator.CONTROL.pattern)
+        for sample in ("::a##[b", "a\nb\u2028c", *self.SECRET_SAMPLES, *(repr("\n" + sample) for sample in self.SECRET_SAMPLES)):
             with self.subTest(sample=sample[:6]):
                 self.assertEqual(collector.plain(sample), validator.plain(sample))
 

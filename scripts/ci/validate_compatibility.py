@@ -140,13 +140,15 @@ NODE_PLATFORMS = {"linux": "linux", "win32": "windows", "darwin": "macos", "free
 
 # C0 and C1 controls, DEL, the Unicode line and paragraph separators and bidirectional controls, and lone surrogates.
 CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]")
+# No shape starts with \b: an escape written just before a value (repr's \n, a JSON Pointer's ~1, JSON's \u200e)
+# ends in a word character and would hide it.
 SECRET_SHAPES = (
-    ("GitHub token", re.compile(r"\bgh[opsur]_[A-Za-z0-9]{30,}")),
-    ("GitHub token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
-    ("AWS access key ID", re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("GitHub token", re.compile(r"gh[opsur]_[A-Za-z0-9]{30,}")),
+    ("GitHub token", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
+    ("AWS access key ID", re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    ("Slack token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
-    ("JSON Web Token", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.")),
+    ("Slack token", re.compile(r"xox[abposr]-[A-Za-z0-9-]{10,}")),
+    ("JSON Web Token", re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.")),
 )
 
 

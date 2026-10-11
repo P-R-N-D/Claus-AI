@@ -1426,19 +1426,29 @@ class CommandTests(Case):
 
     def test_secret_shaped_values_are_not_shown(self):
         # A value the schema rejects is echoed in its finding, and a file name is printed; neither may show a token.
+        # The echo may escape the character before the value (repr's \n, a JSON Pointer's ~1), which a leading \b
+        # in a shape would miss. The summary escapes "_", so it is checked for the token's body.
         token = "gh" + "p_" + "A" * 36
-        document = changed(fixture("linux-x64-vm.result"), lambda d: d.update(kind=token))
+        documents = {
+            "kind": changed(fixture("linux-x64-vm.result"), lambda d: d.update(kind=token)),
+            "escaped": changed(fixture("linux-x64-vm.result"), lambda d: d.update(kind="\n" + token)),
+            "pointer": changed(fixture("linux-x64-vm.result"), lambda d: d.update({"/" + token: 1})),
+        }
         with tempfile.TemporaryDirectory() as directory:
-            for name in ("record.json", token + ".json"):
-                with self.subTest(name=name[:6]):
+            for case, document, name in [(case, document, "record.json") for case, document in documents.items()] + [("name", documents["kind"], token + ".json")]:
+                with self.subTest(case=case):
                     path = pathlib.Path(directory) / name
                     path.write_text(json.dumps(document), encoding="utf-8")
                     summary = pathlib.Path(directory) / "summary.md"
+                    summary.write_text("", encoding="utf-8")
                     code, output = self.run_main("--summary", summary, path)
+                    summary = summary.read_text(encoding="utf-8")
                     self.assertEqual(code, 1)
                     self.assertIn("not shown: looks like a GitHub token", output)
-                    self.assertNotIn(token, output + summary.read_text(encoding="utf-8"))
+                    self.assertIn("not shown: looks like a GitHub token", summary)
+                    self.assertNotIn("A" * 36, output + summary)
         self.assertEqual(validator.plain("a " + token + " b ::c"), "a [not shown: looks like a GitHub token]")
+        self.assertEqual(validator.plain(repr("\x07" + token)), "'\\x07[not shown: looks like a GitHub token]")
 
     def test_file_names_cannot_forge_output_lines(self):
         with tempfile.TemporaryDirectory() as directory:

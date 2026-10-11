@@ -680,14 +680,20 @@ class EnvironmentRuleTests(Case):
         self.assertValid(check(changed(result, lambda d: python(d).update(libc=fact("ucrt", "synthetic:x")))))
 
         # Each of the innermost layer, the platform tag and the ABI tag is enough on its own.
-        def freebsd_layer(d):
-            d["environment"]["layers"][-1]["os"]["family"] = fact("freebsd", "synthetic:x")
-            python(d).update(platform=unknown(), soabi=unknown())
+        def layer(family):
+            def change(d):
+                d["environment"]["layers"][-1]["os"]["family"] = fact(family, "synthetic:x")
+                python(d).update(platform=unknown(), soabi=unknown())
+            return change
 
         for source, change in (
-            ("layer", freebsd_layer),
-            ("platform", lambda d: python(d).update(platform=fact("macosx-14.0-x86_64", "synthetic:x"), soabi=unknown())),
-            ("soabi", lambda d: python(d).update(platform=unknown(), soabi=fact("cpython-312-darwin", "synthetic:x"))),
+            ("windows layer", layer("windows")),
+            ("macos layer", layer("macos")),
+            ("freebsd layer", layer("freebsd")),
+            ("windows platform", lambda d: python(d).update(platform=fact("win-amd64", "synthetic:x"), soabi=unknown())),
+            ("macos platform", lambda d: python(d).update(platform=fact("macosx-14.0-x86_64", "synthetic:x"), soabi=unknown())),
+            ("windows soabi", lambda d: python(d).update(platform=unknown(), soabi=fact("cp312-win_amd64", "synthetic:x"))),
+            ("macos soabi", lambda d: python(d).update(platform=unknown(), soabi=fact("cpython-312-darwin", "synthetic:x"))),
             ("both tags", lambda d: python(d).update(platform=fact("macosx-14.0-arm64", "synthetic:x"), soabi=fact("cpython-312-darwin", "synthetic:x"))),
         ):
             with self.subTest(source=source):

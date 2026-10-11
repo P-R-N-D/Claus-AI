@@ -1159,7 +1159,7 @@ def check_against_profile(result, profile, findings):
         repository, workflow_ref = known(ci["repository"]), known(ci["workflow_ref"])
         sources = [(source["workflow"], source["job"]) for source in profile["evidence_sources"]]
         if isinstance(repository, str) and isinstance(workflow_ref, str):
-            # A known workflow ref is compared; only an unknown one leaves the job to be compared alone.
+            # A known workflow ref is compared when the repository is known too; otherwise the job is compared alone.
             if not workflow_ref.startswith(repository + "/"):
                 findings.error("profile-link", "/run/ci/workflow_ref", f"the workflow ref {workflow_ref!r} is not in repository {repository!r}")
             else:

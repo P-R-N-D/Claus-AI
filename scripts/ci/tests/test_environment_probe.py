@@ -1044,11 +1044,19 @@ class NodeTests(Case):
             facts, errors = self.node('{"v":"24.21.0"}', before="sleep 30\n")
         self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 0.5 seconds", []))
         self.assertLess(time.monotonic() - started, 20)
-        # node closes its output and keeps running: the wait after the read stops it at the same deadline.
+        # node closes its output and keeps running: the wait after the read stops it, by the deadline the read had.
+        timeouts = []
+
+        class Waiting(subprocess.Popen):
+            def wait(self, timeout=None):
+                timeouts.append(timeout)
+                return super().wait(timeout)
+
         started = time.monotonic()
-        with mock.patch.object(collector, "NODE_TIMEOUT", 0.5):
-            facts, errors = self.node('{"v":"24.21.0"}', after="exec >&-\nsleep 30\n")
-        self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 0.5 seconds", []))
+        with mock.patch.object(collector, "NODE_TIMEOUT", 2.0), mock.patch.object(collector.subprocess, "Popen", Waiting):
+            facts, errors = self.node('{"v":"24.21.0"}', before="sleep 0.5\n", after="exec >&-\nsleep 30\n")
+        self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 2.0 seconds", []))
+        self.assertLess(timeouts[0], 1.6)
         self.assertLess(time.monotonic() - started, 20)
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
@@ -1098,20 +1106,24 @@ class NodeTests(Case):
                 timers.pop().function()
         killpg.assert_not_called()
 
-        # The same when the timer fires right after the wait reaped node, before the probe returns.
-        signalled = []
+        # The same when the timer fires right after the wait reaped node, before the probe returns. It runs in a
+        # thread of its own, as a timer does, so a probe that holds the lock there cannot hang this test.
+        fired, signalled = [], []
 
         class Reaping(subprocess.Popen):
             def wait(self, timeout=None):
                 status = super().wait(timeout)
-                with mock.patch.object(collector.os, "killpg") as killpg:
-                    timers[-1].function()
-                signalled.append(killpg.called)
+                fired.append(threading.Thread(target=timers[-1].function, daemon=True))
+                fired[-1].start()
                 return status
 
-        with mock.patch.object(collector.threading, "Timer", Timer), mock.patch.object(collector.subprocess, "Popen", Reaping):
+        with mock.patch.object(collector.threading, "Timer", Timer), mock.patch.object(collector.subprocess, "Popen", Reaping), \
+                mock.patch.object(collector.os, "killpg", lambda pid, sig: signalled.append(pid)):
             facts, errors = self.node('{"v":"24.21.0","m":"137","n":"10","a":"x64","p":"linux"}')
-        self.assertEqual((value(facts["version"]), errors, signalled), ("24.21.0", [], [False]))
+            for thread in fired:
+                thread.join(10)
+        self.assertEqual((value(facts["version"]), errors, len(fired), signalled), ("24.21.0", [], 1, []))
+        self.assertFalse(fired[0].is_alive())
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
     def test_a_timer_that_fires_as_the_read_ends_holds_back_the_reap(self):

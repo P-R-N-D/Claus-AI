@@ -22,10 +22,10 @@ directory, network address or other environment variable. It refuses --stage
 values, and does not write a record, that look like a token or a private key.
 
 On Linux it fills in the layers, identity and isolation facts. On other systems
-it records the OS family, the user and group IDs where os.getresuid or
-os.geteuid exists, the Python and Node runtimes and the run, and leaves the
-layer kind and the isolation facts unknown, so the least-privilege policy fails
-there until a probe measures them.
+it records the OS family, the user and group IDs on FreeBSD (os.getresuid)
+and macOS (os.geteuid, os.getuid), the Python and Node runtimes and the run,
+and leaves the layer kind and the isolation facts unknown, so the
+least-privilege policy fails there until a probe measures them.
 
 Each value it records is marked in one of these ways:
 

@@ -45,9 +45,12 @@ ANNOTATION_KEYWORDS = frozenset({"$schema", "$id", "$comment", "$defs", "title",
 SUPPORTED_KEYWORDS = CHECKING_KEYWORDS | ANNOTATION_KEYWORDS
 JSON_TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean", "null"})
 DIALECT = "https://json-schema.org/draft/2020-12/schema"
-# Pattern syntax that Python's re and ECMA-262 read differently: shorthand classes and anchors that
-# follow Unicode or another definition, and (? groups other than (?:. Only an unescaped one counts.
-NON_PORTABLE_PATTERN = re.compile(r"(?<!\\)(?:\\\\)*(?:\\[dDwWsSbBAZz]|\(\?(?!:)|\{,|[*+?}]\+)")
+# Pattern syntax that Python's re and ECMA-262 read differently: an escaped letter other than t, n, r, f,
+# v, x or u (shorthand classes and anchors follow Unicode or another definition, and \a, \N and \U exist
+# in Python only), (? groups other than (?:, {,n}, possessive quantifiers, and a class that opens with ]
+# or ^]. Only an unescaped one counts; inside a character class some of these are portable, and are
+# rejected anyway.
+NON_PORTABLE_PATTERN = re.compile(r"(?<!\\)(?:\\\\)*(?:\\(?![tnrfvxu])[A-Za-z]|\(\?(?!:)|\{,|[*+?}]\+|\[\^?\])")
 # Keywords whose subschema applies to the same value, so a $ref cycle through them never ends.
 SAME_VALUE_KEYWORDS = ("if", "then", "else")
 

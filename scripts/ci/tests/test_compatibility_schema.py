@@ -261,6 +261,11 @@ class SchemaSubsetTests(Case):
             {"pattern": "^a{,3}$"},
             {"pattern": "^a*+b$"},
             {"pattern": "^a{2}+$"},
+            {"pattern": "^\\a$"},
+            {"pattern": "^\\N{LATIN SMALL LETTER A}$"},
+            {"pattern": "^\\U00000061$"},
+            {"pattern": "^[]a]$"},
+            {"pattern": "^[^]a]$"},
             {"$defs": {"a": {"if": {"$ref": "#/$defs/a"}}}, "$ref": "#/$defs/a"},
             {"$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"else": {"$ref": "#/$defs/a"}}}},
         ):
@@ -273,6 +278,7 @@ class SchemaSubsetTests(Case):
             {"$schema": validator.DIALECT, "$id": "https://example.invalid/s", "title": "t", "$comment": "c"},
             {"pattern": "^(?:a|b)[0-9]\\\\d$"},
             {"pattern": "^\\*+a{0,3}$"},
+            {"pattern": "^\\t\\n\\x41\\u0041\\.\\[\\]$"},
             {"$defs": {"a": {"properties": {"x": {"$ref": "#/$defs/a"}}, "items": {"$ref": "#/$defs/a"}}}, "$ref": "#/$defs/a"},
         ):
             with self.subTest(schema=good):

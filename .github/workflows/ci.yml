@@ -213,3 +213,53 @@ jobs:
       - name: Run the unit tests
         # vitest run exits 1 when it finds no test file, so an empty run fails.
         run: npm run test:unit
+
+  compatibility:
+    # The compatibility model in docs/CI-MATRIX.md: the validator's own tests, the committed
+    # profile, and a record of this runner checked against that profile. A pass shows that
+    # this tooling works on this runner; it is not a support claim for any other platform.
+    name: Compatibility / Schema & Probe / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # uv ignores uv.toml and pyproject.toml files, which a pull request could add.
+      UV_NO_CONFIG: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.24'
+          enable-cache: false
+          # With a Python version given, setup-uv does not look for an interpreter in the checkout and run it.
+          python-version: '3.12.15'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Create a CPython 3.12.15 environment with no packages
+        # The scripts use the standard library only, so nothing is installed into it.
+        run: |
+          uv venv --managed-python --python 3.12.15
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Record this runner's environment
+        # Reads /proc, /sys and allowlisted variables only; never escalates privileges.
+        run: |
+          mkdir -p "$RUNNER_TEMP/compatibility"
+          python -I scripts/ci/collect_environment.py --profile-id linux-x64-gha --output "$RUNNER_TEMP/compatibility/linux-x64-gha.json" --summary "$GITHUB_STEP_SUMMARY"
+      - name: Check the record and the committed profile
+        run: python -I scripts/ci/validate_compatibility.py --require-real --dependency-strategy docs/DEPENDENCY-STRATEGY.md --profile tests/compatibility/profiles/linux-x64-gha.json --summary "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/compatibility/linux-x64-gha.json" tests/compatibility/profiles/*.json
+      - name: Test the validator and the probe, including records that must fail
+        if: ${{ !cancelled() }}
+        # Run directly, not through unittest discover, so scripts/ci/tests/ is not on the import path.
+        run: |
+          python -I scripts/ci/tests/test_compatibility_schema.py --verbose
+          python -I scripts/ci/tests/test_environment_probe.py --verbose
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: compatibility-linux-x64-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compatibility/
+          if-no-files-found: warn
+          retention-days: 7

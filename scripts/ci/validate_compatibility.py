@@ -353,7 +353,7 @@ def calendar_date(text):
 
 
 def calendar_time(text):
-    """Whether a YYYY-MM-DDTHH:MM:SSZ string (the shape the schema checks) names a real day and time of day."""
+    """Whether a YYYY-MM-DDTHH:MM:SSZ string (the shape the schema checks) is a valid date and time, with seconds 00 to 59."""
     try:
         datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
@@ -522,16 +522,17 @@ def soabi_target(soabi):
 
 
 def libc_family(python):
-    """glibc or musl, from a Python's libc or SOABI fact (observed, inferred or declared); None if neither shows it."""
+    """(glibc or musl, the path of the fact it came from), from a Python's libc fact or else its SOABI; (None, None) if neither shows it."""
+    base = "/workload/runtimes/python"
     libc, soabi = known(python["libc"]), known(python["soabi"])
     name = re.match(r"(glibc|musl)\b", libc) if isinstance(libc, str) else None
     if name:
-        return name.group(1)
+        return name.group(1), f"{base}/libc"
     if isinstance(soabi, str):
         match = re.search(r"-linux-(gnu|musl)[a-z0-9]*$", soabi)
         if match:
-            return {"gnu": "glibc", "musl": "musl"}[match.group(1)]
-    return None
+            return {"gnu": "glibc", "musl": "musl"}[match.group(1)], f"{base}/soabi"
+    return None, None
 
 
 def layers_of(document):
@@ -606,7 +607,7 @@ def check_synthetic(document, findings):
         if not synthetic and document["generated_at"] is None:
             findings.error("synthetic-marking", "/generated_at", "a result that is not synthetic records when it was collected")
         if document["generated_at"] is not None and not calendar_time(document["generated_at"]):
-            findings.error("synthetic-marking", "/generated_at", "the collection time is not a day and time of day that exist")
+            findings.error("synthetic-marking", "/generated_at", "the collection time is not a valid date and time (seconds run from 00 to 59)")
 
 
 def check_names(document, findings):
@@ -652,10 +653,14 @@ def check_layers(document, findings):
         if "container" in layer and kind != "container":
             findings.error("layer-structure", f"{base}/container", "only a layer whose kind is container has container facts")
         technology = known(layer["technology"])
-        if kind == "wsl2" and technology is not None and technology != "wsl2":
+        if kind == "host" and technology is not None:
+            findings.error("layer-structure", f"{base}/technology", f"the outermost host runs on hardware and names no technology, not {technology!r}")
+        elif kind == "wsl2" and technology is not None and technology != "wsl2":
             findings.error("layer-structure", f"{base}/technology", f"a WSL2 layer is made by wsl2, not {technology!r}")
         elif kind is not None and technology in TECHNOLOGY_KINDS and TECHNOLOGY_KINDS[technology] != kind:
             findings.error("layer-structure", f"{base}/technology", f"{technology!r} makes a {TECHNOLOGY_KINDS[technology]} layer, not a {kind}")
+        if kind in ("vm", "wsl2", "container") and layer["technology"]["provenance"] == "not-applicable":
+            findings.error("layer-structure", f"{base}/technology", f"a {kind} is made by a hypervisor or engine; record it as unknown when it cannot be seen")
         if kind == "container" and "container" not in layer:
             findings.error("layer-structure", base, "a container layer records its engine mode, privileged state, devices and orchestration")
         if kind == "container" and known(layer["os"]["kernel"]) is not None:
@@ -1043,10 +1048,11 @@ def lane_matches(profile, target, status, findings):
     layers = layers_of(profile)
     python = profile["workload"]["runtimes"]["python"]
     kinds = [known(layer["kind"]) for layer in layers]
+    libc, libc_path = libc_family(python)
     axes = (
         ("os", known(layers[-1]["os"]["family"]), f"/environment/layers/{len(layers) - 1}/os/family", "OS family"),
         ("arch", known(python["arch"]), "/workload/runtimes/python/arch", "Python architecture"),
-        ("libc", libc_family(python), "/workload/runtimes/python/soabi", "C library"),
+        ("libc", libc, libc_path or "/workload/runtimes/python/soabi", "C library"),
         ("wsl2", True if "wsl2" in kinds else False if None not in kinds else None, "/environment/layers", "WSL2 layer"),
     )
     matches = True

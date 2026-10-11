@@ -113,6 +113,9 @@ ARCH_ALIASES = {
 COMPATIBLE = frozenset({("x86", "x86_64")})
 # ELF e_machine values (elf.h) for the architectures in docs/CI-MATRIX.md.
 ELF_MACHINES = {3: "x86", 40: "armv7", 62: "x86_64", 183: "aarch64", 243: "riscv64", 22: "s390x", 258: "loongarch64", 21: "ppc64le"}
+# Each name above is for one byte order: s390x is big-endian and the others little-endian (ppc64 and
+# aarch64_be share their e_machine with ppc64le and aarch64).
+ELF_BIG_ENDIAN = frozenset({"s390x"})
 KNOWN_ARCHES = frozenset(ELF_MACHINES.values())
 OS_FAMILIES = {"Linux": "linux", "Windows": "windows", "Darwin": "macos", "FreeBSD": "freebsd"}
 # Capability numbers from linux/capability.h.
@@ -812,7 +815,7 @@ class Probe:
             return None, None
         if len(header) == 20 and header[:4] == b"\x7fELF" and header[5] in (1, 2):
             machine = int.from_bytes(header[18:20], "little" if header[5] == 1 else "big")
-            if machine in ELF_MACHINES:
+            if machine in ELF_MACHINES and (header[5] == 2) == (ELF_MACHINES[machine] in ELF_BIG_ENDIAN):
                 return ELF_MACHINES[machine], "file:sys.executable#e_machine"
         return None, None
 

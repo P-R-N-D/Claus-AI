@@ -486,6 +486,12 @@ class LinuxProbeTests(Case):
                     with mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
                             mock.patch.object(collector.sys, "executable", str(executable)):
                         self.assertEqual(probe.build_arch(), ("aarch64", "file:sys.executable#e_machine"))
+                    # ppc64 and aarch64_be share e_machine with ppc64le and aarch64; the header's byte order tells them apart.
+                    for machine, order, expected in ((21, 1, "ppc64le"), (21, 2, None), (183, 2, None), (22, 2, "s390x"), (22, 1, None)):
+                        executable.write_bytes(b"\x7fELF\x02" + bytes([order]) + bytes(12) + machine.to_bytes(2, "little" if order == 1 else "big"))
+                        with self.subTest(machine=machine, order=order), mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
+                                mock.patch.object(collector.sys, "executable", str(executable)):
+                            self.assertEqual(probe.build_arch()[0], expected)
                     executable.write_bytes(b"#!/bin/sh\n")
                     with mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
                             mock.patch.object(collector.sys, "executable", str(executable)):
@@ -1251,6 +1257,14 @@ class SharedTableTests(unittest.TestCase):
                              ("macosx-11.0-arm64", ("macos", "aarch64")), ("win-arm64", ("windows", "aarch64")), ("linux-x86_64", ("linux", "x86_64"))):
             with self.subTest(plat=plat):
                 self.assertEqual(collector.split_platform(plat), target)
+
+    def test_layer_technologies(self):
+        # Every technology the collector can write is on the kind of layer the validator binds it to.
+        for technology in {name for _, name in collector.DMI_VENDORS} | {"hyper-v"}:
+            self.assertEqual(validator.TECHNOLOGY_KINDS.get(technology), "vm", technology)
+        for technology in {name for name in collector.CONTAINER_TECHNOLOGIES.values() if name} | {"docker", "podman", "apptainer"}:
+            self.assertEqual(validator.TECHNOLOGY_KINDS.get(technology), "container", technology)
+        self.assertEqual(validator.TECHNOLOGY_KINDS.get("wsl2"), "wsl2")
 
     def test_stages_and_the_overall_verdict(self):
         self.assertEqual(collector.STAGES, validator.STAGES)

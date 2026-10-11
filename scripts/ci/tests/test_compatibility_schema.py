@@ -529,6 +529,9 @@ class EnvironmentRuleTests(Case):
             ("unlisted technology on a WSL2 layer", lambda d: layers(d)[1].update(technology=fact("wsl3", "synthetic:x")), "layer-structure", at + "1/technology"),
             ("WSL2 on a container layer", lambda d: layers(d)[2].update(technology=fact("wsl2", "synthetic:x")), "layer-structure", at + "2/technology"),
             ("technology on the host", lambda d: layers(d)[0].update(technology=fact("hyper-v", "synthetic:x")), "layer-structure", at + "0/technology"),
+            ("unlisted technology on the host", lambda d: layers(d)[0].update(technology=fact("bhyve", "synthetic:x")), "layer-structure", at + "0/technology"),
+            ("container made by nothing", lambda d: layers(d)[2].update(technology={"value": None, "provenance": "not-applicable", "reason": "x"}), "layer-structure", at + "2/technology"),
+            ("WSL2 layer made by nothing", lambda d: layers(d)[1].update(technology={"value": None, "provenance": "not-applicable", "reason": "x"}), "layer-structure", at + "1/technology"),
             ("WSL2 on Linux", lambda d: layers(d)[0]["os"].update(family=fact("linux", "synthetic:x")), "os-contradiction", at + "1/kind"),
             ("WSL2 running Windows", lambda d: (layers(d)[1]["os"].update(family=fact("windows", "synthetic:x")), layers(d)[2]["os"].update(family=fact("windows", "synthetic:x"))), "os-contradiction", at + "1/os/family"),
             ("Windows container on a Linux kernel", lambda d: layers(d)[2]["os"].update(family=fact("windows", "synthetic:x")), "os-contradiction", at + "2/os/family"),
@@ -1205,8 +1208,8 @@ class ProfileTests(Case):
                 if label in ("Python 3.15 free-threaded", "Python 3.13", "PyPy"):
                     # The lane table does not assess this interpreter, so the profile records not-assessed.
                     self.assertValid(check(changed(claimed, lambda d: d["support"].update(status="not-assessed"))))
-        # The C library comes from the libc fact when the ABI tag is not declared.
-        for libc, errors in (("musl 1.2.5", []), ("glibc 2.39", ["/workload/runtimes/python/soabi"])):
+        # The C library comes from the libc fact when the ABI tag is not declared, and an error names that fact.
+        for libc, errors in (("musl 1.2.5", []), ("glibc 2.39", ["/workload/runtimes/python/libc"])):
             with self.subTest(libc=libc):
                 alpine = changed(real, lambda d: (d["support"].update(status="not-supported", lane="Linux musl (Alpine)"),
                                                   python(d).update(libc=fact(libc, provenance="declared"), soabi=unknown())))

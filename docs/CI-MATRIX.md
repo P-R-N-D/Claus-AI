@@ -55,7 +55,7 @@ Layers run from the outermost (index 0) inwards; the workload runs in the last o
 - A container shares the kernel of the layer below it, so it has the same OS family and records no kernel.
 - WSL2 runs on a Windows layer and is itself Linux.
 - Only container layers carry container facts, and every container layer carries them.
-- Each documented technology belongs to one kind of layer: the hypervisors (`kvm`, `hyper-v`, `qemu`, ...) to `vm`, the engines (`docker`, `podman`, `containerd`, ...) to `container`, and `wsl2` to `wsl2`. A documented technology on a layer of another kind, the `host` included, is an error, and a `wsl2` layer names no technology other than `wsl2`.
+- Each documented technology belongs to one kind of layer: the hypervisors (`kvm`, `hyper-v`, `qemu`, ...) to `vm`, the engines (`docker`, `podman`, `containerd`, ...) to `container`, and `wsl2` to `wsl2`. A documented technology on a layer of another kind is an error, and a `wsl2` layer names no technology other than `wsl2`. The outermost `host` runs on hardware and names none; a `vm`, `wsl2`, or `container` layer is made by something, so its technology is never `not-applicable` (`unknown` when it cannot be seen).
 
 Examples, from the profile and the fixtures:
 
@@ -181,7 +181,7 @@ Each finding has a stable code. Errors make the document invalid; warnings do no
 | `control-character`, `secret-like-value` | error | A control or bidirectional formatting character or a lone surrogate, or a value shaped like a GitHub, AWS, Slack, or JWT token or a private key. |
 | `fact-provenance` | error | A fact whose value, evidence, or reason does not fit its provenance. |
 | `profile-provenance` | error | An observed or inferred fact in a profile. |
-| `synthetic-marking` | error | Synthetic and real data mixed, a synthetic result that names a run, commit, collection time, or CI system, a real result without a collection time, a `generated_at` that is not a day and time of day that exist (such as `2026-02-30T12:00:00Z`, or a leap second), or a synthetic document where `--require-real` asks for a measured one. |
+| `synthetic-marking` | error | Synthetic and real data mixed, a synthetic result that names a run, commit, collection time, or CI system, a real result without a collection time, a `generated_at` that is not a valid date and time (such as `2026-02-30T12:00:00Z`; seconds run from 00 to 59, so a leap second is refused too), or a synthetic document where `--require-real` asks for a measured one. |
 | `arch-name` | error | An alias instead of the canonical architecture name. |
 | `unrecognized-value` | warning | A value outside the documented lists, or a CPython SOABI whose form the validator cannot read, so its OS and architecture are not checked. |
 | `layer-structure` | error | Layer order, container facts, or a layer's technology that break the nesting rules. |

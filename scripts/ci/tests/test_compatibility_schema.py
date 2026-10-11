@@ -654,13 +654,14 @@ class EnvironmentRuleTests(Case):
         platform_only = changed(tag, lambda d: d["workload"]["runtimes"]["python"].update(arch=fact("aarch64", "synthetic:x"), soabi=unknown(), execution=fact("emulated", "synthetic:x")))
         self.assertFinding(check(platform_only), "abi-contradiction", "/workload/runtimes/python/arch")
         self.assertCodes(check(platform_only), "abi-contradiction")
-        # An ABI tag architecture outside the list contradicts a listed arch fact; with no arch fact it is not compared with it.
+        # An ABI tag architecture outside the list contradicts a listed arch fact; an unknown or unlisted arch fact is not compared with it.
         vax = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact("cpython-312-vax-linux-gnu", "synthetic:x")))
         self.assertCodes(check(vax), "abi-contradiction")
         self.assertFinding(check(vax), "abi-contradiction", "/workload/runtimes/python/soabi")
         self.assertValid(check(changed(vax, lambda d: d["workload"]["runtimes"]["python"].update(arch=unknown(), execution=unknown()))))
-        unlisted = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(arch=fact("vax", "synthetic:x"), execution=unknown(), pointer_bits=unknown()))
-        self.assertValid(check(unlisted))
+        for soabi in ("cpython-312-x86_64-linux-gnu", "cpython-312-vax-linux-gnu"):
+            with self.subTest(soabi=soabi, arch="sparc64"):
+                self.assertValid(check(changed(result, lambda d: d["workload"]["runtimes"]["python"].update(arch=fact("sparc64", "synthetic:x"), soabi=fact(soabi, "synthetic:x")))))
         _, real = real_result()
         self.assertFinding(check(changed(real, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact("cpython-312-vax-linux-gnu", provenance="declared")))),
                            "abi-contradiction", "/workload/runtimes/python/soabi")
@@ -669,13 +670,13 @@ class EnvironmentRuleTests(Case):
         result = fixture("linux-x64-vm.result")
         _, real = real_result()
         python = lambda d: d["workload"]["runtimes"]["python"]  # noqa: E731
-        for version in ("3.12", "3.12.15", "3.12.15+", "3.12.0a1", "3.12.0b2", "3.12.0rc1", "3.12.0a1+"):
+        for version in ("3.12", "3.12.0", "3.12.10", "3.12.15", "3.12.15+", "3.12.0a0", "3.12.0a1", "3.12.0b2", "3.12.0rc1", "3.12.0a1+"):
             with self.subTest(version=version):
                 self.assertEqual(validator.cpython_version(version), ("3", "12"))
                 self.assertValid(check(changed(result, lambda d: python(d).update(version=fact(version, "synthetic:x")))))
                 self.assertValid(check(changed(real, lambda d: python(d).update(version=fact(version, provenance="declared")))))
         # Text after the version is not ignored: the version is an error, and the profile loses its lane.
-        for version in ("3.12-not-python", "3.12.15garbage", "3.12x", "3.12+", "3.12rc1", "3.12.15 ", " 3.12.15", "3.12.15rc", "3.12.\u0661\u0665", "3.12.1\u0665", "3.12.015", "03.12.15", "3.012"):
+        for version in ("3.12-not-python", "3.12.15garbage", "3.12x", "3.12+", "3.12rc1", "3.12.15 ", " 3.12.15", "3.12.15rc", "3.12.\u0661\u0665", "3.12.1\u0665", "3.12.015", "03.12.15", "3.012", "3.12.0a01", "3.12.0rc01"):
             with self.subTest(version=version):
                 self.assertIsNone(validator.cpython_version(version))
                 self.assertCodes(check(changed(result, lambda d: python(d).update(version=fact(version, "synthetic:x")))), "abi-contradiction")
@@ -686,6 +687,8 @@ class EnvironmentRuleTests(Case):
         self.assertIsNone(validator.cpython_version("3.12.15\n"))
         message = [message for _, code, _, message in check(changed(real, lambda d: python(d).update(version=fact("3.12-not-python", provenance="declared")))).errors if code == "support-claim"][0]
         self.assertIn("declares cpython '3.12-not-python'", message)
+        message = [message for _, code, _, message in check(changed(real, lambda d: python(d).update(version=fact("3.13.0", provenance="declared")))).errors if code == "support-claim"][0]
+        self.assertIn("declares cpython 3.13 (free-threaded build", message)
         # The rule is for CPython, whose version the cache tag and the ABI tag repeat.
         pypy = changed(result, lambda d: python(d).update(implementation=fact("pypy", "synthetic:x"), version=fact("3.10.14-pypy", "synthetic:x"), cache_tag=unknown(), soabi=unknown()))
         self.assertNotIn("/workload/runtimes/python/version", [path for _, _, path, _ in check(pypy).items])

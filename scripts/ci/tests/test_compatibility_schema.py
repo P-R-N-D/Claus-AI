@@ -654,6 +654,36 @@ class EnvironmentRuleTests(Case):
         platform_only = changed(tag, lambda d: d["workload"]["runtimes"]["python"].update(arch=fact("aarch64", "synthetic:x"), soabi=unknown(), execution=fact("emulated", "synthetic:x")))
         self.assertFinding(check(platform_only), "abi-contradiction", "/workload/runtimes/python/arch")
         self.assertCodes(check(platform_only), "abi-contradiction")
+        # An ABI tag architecture outside the list contradicts a listed arch fact; with no arch fact it is not compared with it.
+        vax = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact("cpython-312-vax-linux-gnu", "synthetic:x")))
+        self.assertCodes(check(vax), "abi-contradiction")
+        self.assertFinding(check(vax), "abi-contradiction", "/workload/runtimes/python/soabi")
+        self.assertValid(check(changed(vax, lambda d: d["workload"]["runtimes"]["python"].update(arch=unknown(), execution=unknown()))))
+        _, real = real_result()
+        self.assertFinding(check(changed(real, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact("cpython-312-vax-linux-gnu", provenance="declared")))),
+                           "abi-contradiction", "/workload/runtimes/python/soabi")
+
+    def test_a_cpython_version_is_read_whole(self):
+        result = fixture("linux-x64-vm.result")
+        _, real = real_result()
+        python = lambda d: d["workload"]["runtimes"]["python"]  # noqa: E731
+        for version in ("3.12", "3.12.15", "3.12.15+", "3.12.0a1", "3.12.0b2", "3.12.0rc1", "3.12.0a1+"):
+            with self.subTest(version=version):
+                self.assertEqual(validator.cpython_version(version), ("3", "12"))
+                self.assertValid(check(changed(result, lambda d: python(d).update(version=fact(version, "synthetic:x")))))
+                self.assertValid(check(changed(real, lambda d: python(d).update(version=fact(version, provenance="declared")))))
+        # Text after the version is not ignored: the version is an error, and the profile loses its lane.
+        for version in ("3.12-not-python", "3.12.15garbage", "3.12x", "3.12+", "3.12rc1", "3.12.15 ", " 3.12.15", "3.12.15rc", "3.12.\u0661\u0665"):
+            with self.subTest(version=version):
+                self.assertIsNone(validator.cpython_version(version))
+                self.assertCodes(check(changed(result, lambda d: python(d).update(version=fact(version, "synthetic:x")))), "abi-contradiction")
+                self.assertFinding(check(changed(result, lambda d: python(d).update(version=fact(version, "synthetic:x")))), "abi-contradiction", "/workload/runtimes/python/version")
+                claimed = check(changed(real, lambda d: python(d).update(version=fact(version, provenance="declared"))))
+                self.assertFinding(claimed, "abi-contradiction", "/workload/runtimes/python/version")
+                self.assertFinding(claimed, "support-claim", "/workload/runtimes/python")
+        # The rule is for CPython, whose version the cache tag and the ABI tag repeat.
+        pypy = changed(result, lambda d: python(d).update(implementation=fact("pypy", "synthetic:x"), version=fact("3.10.14-pypy", "synthetic:x"), cache_tag=unknown(), soabi=unknown()))
+        self.assertNotIn("/workload/runtimes/python/version", [path for _, _, path, _ in check(pypy).items])
 
     def test_an_abi_tag_the_validator_cannot_read_is_reported(self):
         result = fixture("linux-x64-vm.result")
@@ -913,6 +943,7 @@ class StageRuleTests(Case):
         for label, change, code, path in (
             ("fell back to the CPU", lambda d: execute(d)["compute"].update(effective="cpu"), "accelerator-fallback", "/stages/execute/compute"),
             ("nothing recorded as running", lambda d: execute(d)["compute"].update(effective=None), "accelerator-fallback", "/stages/execute/compute"),
+            ("CPU requested, nothing recorded as running", lambda d: execute(d)["compute"].update(requested="cpu", effective=None), "backend-reference", "/stages/execute/compute/effective"),
             ("unknown backend requested", lambda d: execute(d)["compute"].update(requested="rocm"), "backend-reference", "/stages/execute/compute/requested"),
             ("unknown backend ran", lambda d: execute(d)["compute"].update(effective="rocm"), "backend-reference", "/stages/execute/compute/effective"),
             ("unavailable backend ran", lambda d: d["compute"]["backends"][1].update(available=unknown()), "backend-reference", "/stages/execute/compute/effective"),
@@ -921,7 +952,10 @@ class StageRuleTests(Case):
         ):
             with self.subTest(label):
                 self.assertFinding(check(changed(result, change), profile), code, path)
-        other_gpu = {"id": "cuda1", "kind": "gpu", "api": "cuda", "available": fact(True, "synthetic:x"), "device": unknown(), "version": unknown(), "features": unknown()}
+        # A GPU stage that records no backend is reported once, as a fallback.
+        nothing = check(changed(result, lambda d: execute(d)["compute"].update(effective=None)), profile)
+        self.assertNotIn(("backend-reference", "/stages/execute/compute/effective"), [(code, path) for _, code, path, _ in nothing.errors])
+        other_gpu ={"id": "cuda1", "kind": "gpu", "api": "cuda", "available": fact(True, "synthetic:x"), "device": unknown(), "version": unknown(), "features": unknown()}
         to_other_gpu = changed(result, lambda d: (d["compute"]["backends"].append(other_gpu), execute(d)["compute"].update(effective="cuda1")))
         self.assertFinding(check(to_other_gpu), "accelerator-fallback", "/stages/execute/compute")
         npu = fixture("windows-arm64-native.result")

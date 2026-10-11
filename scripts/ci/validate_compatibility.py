@@ -506,6 +506,13 @@ def python_platform_target(platform):
     return None, None
 
 
+def cpython_version(version):
+    """(major, minor) of a CPython version written as platform.python_version() gives it (3.12.15, 3.13.0rc1, or
+    3.14.0a1+ for a build after a release), or as major.minor; None for any other text."""
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)(?:\.[0-9]+(?:(?:a|b|rc)[0-9]+)?\+?)?", version) if isinstance(version, str) else None
+    return match.groups() if match else None
+
+
 def soabi_target(soabi):
     """Map a CPython SOABI to (OS family, architecture); either may be None."""
     if not isinstance(soabi, str):
@@ -740,9 +747,12 @@ def check_workload(document, findings):
 
     if known(python["implementation"]) == "cpython":
         version = known(python["version"])
-        match = re.match(r"(\d+)\.(\d+)", version or "")
-        if match:
-            major, minor = match.groups()
+        parts = cpython_version(version)
+        # Text after the version would otherwise be ignored here and in the lane's interpreter check.
+        if version is not None and parts is None:
+            findings.error("abi-contradiction", f"{base}/version", f"{version!r} is not a CPython version such as 3.12.15, 3.13.0rc1 or 3.12, so the cache tag, the ABI tag and a lane cannot be compared with it")
+        if parts:
+            major, minor = parts
             cache_tag = known(python["cache_tag"])
             if cache_tag is not None and cache_tag != f"cpython-{major}{minor}":
                 findings.error("abi-contradiction", f"{base}/cache_tag", f"CPython {major}.{minor} has cache tag cpython-{major}{minor}, not {cache_tag!r}")
@@ -759,7 +769,8 @@ def check_workload(document, findings):
             findings.warning("unrecognized-value", f"{base}/soabi", f"the CPython ABI tag {known(python['soabi'])!r} has no form this validator reads, so its OS and architecture are not checked")
         if soabi_family and family and soabi_family != family:
             findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the innermost layer is {family}")
-        if soabi_arch in ARCH_BITS and python_arch in ARCH_BITS and soabi_arch != python_arch:
+        # An ABI tag architecture outside the list cannot be a listed build architecture, so it is compared too.
+        if soabi_arch is not None and python_arch in ARCH_BITS and soabi_arch != python_arch:
             findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_arch}, the arch fact says {python_arch}")
         # The ABI tag, like the platform tag, is compared with the innermost layer's OS family and with the arch fact. When
         # the family is unknown, or the arch fact is unknown or not a listed name, the two tags are compared with each other.
@@ -846,6 +857,8 @@ def check_stages(document, findings):
             if effective is None or effective["id"] != requested["id"]:
                 ran = "nothing" if effective is None else f"{effective['id']} ({effective['kind']})"
                 findings.error("accelerator-fallback", f"{base}/compute", f"{requested['kind']} backend {requested['id']} was requested but {ran} ran; a fallback is not an accelerator pass")
+        elif status == "passed" and compute["effective"] is None:
+            findings.error("backend-reference", f"{base}/compute/effective", "a passed stage with a compute record names the backend that ran")
     if document["probe_errors"] and stages["detect"]["status"] == "passed":
         findings.error("stage-fields", "/stages/detect/status", "detect cannot pass while probe_errors lists probes that failed")
     expected = overall_of(stages)
@@ -1102,9 +1115,8 @@ def lane_matches(profile, target, status, findings):
             matches = False
             if status != "not-assessed":
                 findings.error("support-claim", path, f"a {status} claim declares the {what} its lane covers ({target[axis]!r})")
-    version = known(python["version"])
-    minor = re.match(r"[0-9]+\.[0-9]+", version).group(0) if isinstance(version, str) and re.match(r"[0-9]+\.[0-9]+", version) else None
-    interpreter = (known(python["implementation"]), minor, known(python["free_threaded_build"]))
+    parts = cpython_version(known(python["version"]))
+    interpreter = (known(python["implementation"]), ".".join(parts) if parts else None, known(python["free_threaded_build"]))
     if interpreter != LOCK_INTERPRETER:
         matches = False
         if status != "not-assessed":

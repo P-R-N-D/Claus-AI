@@ -1,0 +1,687 @@
+{
+  "schema_version": 1,
+  "kind": "result",
+  "synthetic": true,
+  "profile_id": "synthetic-kubernetes-arm64-cuda",
+  "generated_at": null,
+  "collector": {
+    "name": "collect-environment",
+    "version": 1
+  },
+  "run": {
+    "ci": {
+      "system": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "event": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "repository": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "ref": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "run_id": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "run_attempt": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "run_url": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "workflow_ref": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "job": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "runner_environment": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "runner_os": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "runner_arch": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "image_os": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "image_version": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      }
+    },
+    "revision": {
+      "tested_sha": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "event_sha": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "pr_head_sha": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "pr_base_sha": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      }
+    }
+  },
+  "environment": {
+    "layers": [
+      {
+        "label": "aarch64 GPU node",
+        "kind": {
+          "value": "host",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "the outermost host runs on hardware"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.system"
+            ]
+          },
+          "name": {
+            "value": "ubuntu",
+            "provenance": "declared"
+          },
+          "version": {
+            "value": "24.04",
+            "provenance": "declared"
+          },
+          "kernel": {
+            "value": "6.11.0-1016-nvidia",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.release"
+            ]
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "aarch64",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:/proc/sys/kernel/arch"
+            ]
+          },
+          "execution": {
+            "value": "native",
+            "provenance": "declared"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": "systemd",
+            "provenance": "declared"
+          },
+          "scope": {
+            "value": "system",
+            "provenance": "declared"
+          }
+        }
+      },
+      {
+        "label": "Kubernetes pod",
+        "kind": {
+          "value": "container",
+          "provenance": "inferred",
+          "evidence": [
+            "synthetic:/proc/self/cgroup kubepods",
+            "synthetic:KUBERNETES_SERVICE_HOST present"
+          ]
+        },
+        "technology": {
+          "value": "containerd",
+          "provenance": "declared"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.system"
+            ]
+          },
+          "name": {
+            "value": "ubuntu",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:/etc/os-release ID"
+            ]
+          },
+          "version": {
+            "value": "24.04",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:/etc/os-release VERSION_ID"
+            ]
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "not-applicable",
+            "reason": "a container shares the kernel of the layer below"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "aarch64",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.machine"
+            ]
+          },
+          "execution": {
+            "value": "native",
+            "provenance": "inferred",
+            "evidence": [
+              "synthetic:platform.machine",
+              "synthetic:/proc/sys/kernel/arch"
+            ]
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "systemd is not running as the service manager here; other managers are not probed"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "no service manager seen"
+          }
+        },
+        "container": {
+          "engine_mode": {
+            "value": "rootful",
+            "provenance": "declared"
+          },
+          "privileged": {
+            "value": false,
+            "provenance": "declared"
+          },
+          "devices": {
+            "value": [
+              "nvidia-gpu"
+            ],
+            "provenance": "declared"
+          },
+          "orchestration": {
+            "name": {
+              "value": "kubernetes",
+              "provenance": "inferred",
+              "evidence": [
+                "synthetic:KUBERNETES_SERVICE_HOST present"
+              ]
+            },
+            "version": {
+              "value": "1.33",
+              "provenance": "declared"
+            },
+            "scope": {
+              "value": null,
+              "provenance": "not-applicable",
+              "reason": "Kubernetes has no user or system scope"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "workload": {
+    "identity": {
+      "superuser": {
+        "value": false,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "uid": {
+        "value": 1000,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "gid": {
+        "value": 1000,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Gid"
+        ]
+      },
+      "user_namespace": {
+        "initial": {
+          "value": true,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/uid_map"
+          ]
+        },
+        "uid_map": {
+          "value": [
+            [
+              0,
+              0,
+              4294967295
+            ]
+          ],
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/uid_map"
+          ]
+        }
+      }
+    },
+    "isolation": {
+      "no_new_privs": {
+        "value": true,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status NoNewPrivs"
+        ]
+      },
+      "capabilities": {
+        "effective": {
+          "value": [],
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/status CapEff"
+          ]
+        },
+        "bounding": {
+          "value": [
+            "cap_chown",
+            "cap_dac_override",
+            "cap_fowner",
+            "cap_fsetid",
+            "cap_kill",
+            "cap_net_bind_service",
+            "cap_setfcap",
+            "cap_setgid",
+            "cap_setpcap",
+            "cap_setuid",
+            "cap_sys_chroot"
+          ],
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/status CapBnd"
+          ]
+        }
+      },
+      "seccomp": {
+        "value": "filter",
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Seccomp"
+        ]
+      },
+      "apparmor": {
+        "enabled": {
+          "value": true,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/sys/module/apparmor/parameters/enabled"
+          ]
+        },
+        "profile": {
+          "value": "cri-containerd.apparmor.d (enforce)",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/attr/apparmor/current"
+          ]
+        }
+      },
+      "selinux": {
+        "mode": {
+          "value": "disabled",
+          "provenance": "inferred",
+          "evidence": [
+            "synthetic:/proc/filesystems"
+          ]
+        },
+        "context": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "SELinux is not in this kernel"
+        }
+      },
+      "cgroup": {
+        "version": {
+          "value": "v2",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/cgroup"
+          ]
+        },
+        "delegated": {
+          "value": false,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:cgroup.procs writable"
+          ]
+        }
+      }
+    },
+    "runtimes": {
+      "python": {
+        "implementation": {
+          "value": "cpython",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sys.implementation.name"
+          ]
+        },
+        "version": {
+          "value": "3.12.15",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:platform.python_version"
+          ]
+        },
+        "cache_tag": {
+          "value": "cpython-312",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sys.implementation.cache_tag"
+          ]
+        },
+        "soabi": {
+          "value": "cpython-312-aarch64-linux-gnu",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sysconfig.SOABI"
+          ]
+        },
+        "platform": {
+          "value": "linux-aarch64",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sysconfig.get_platform"
+          ]
+        },
+        "arch": {
+          "value": "aarch64",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sys.implementation._multiarch"
+          ]
+        },
+        "pointer_bits": {
+          "value": 64,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:struct.calcsize"
+          ]
+        },
+        "free_threaded_build": {
+          "value": false,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sysconfig.Py_GIL_DISABLED"
+          ]
+        },
+        "gil_enabled": {
+          "value": true,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sys._is_gil_enabled"
+          ]
+        },
+        "libc": {
+          "value": "glibc 2.39",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:platform.libc_ver"
+          ]
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "inferred",
+          "evidence": [
+            "synthetic:sys.implementation._multiarch",
+            "synthetic:/proc/sys/kernel/arch"
+          ]
+        }
+      },
+      "node": {
+        "version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "modules_abi": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "napi_version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "platform": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "arch": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "execution": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        }
+      }
+    }
+  },
+  "compute": {
+    "backends": [
+      {
+        "id": "cpu",
+        "kind": "cpu",
+        "api": "cpu",
+        "available": {
+          "value": true,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:collector ran on it"
+          ]
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "the CPU model is not recorded"
+        },
+        "version": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a CPU has no backend version"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "CPU features are not recorded"
+        }
+      },
+      {
+        "id": "cuda",
+        "kind": "gpu",
+        "api": "cuda",
+        "available": {
+          "value": true,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:nvidia-smi"
+          ]
+        },
+        "device": {
+          "value": "NVIDIA GB10",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:nvidia-smi"
+          ]
+        },
+        "version": {
+          "value": "13.0",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:nvidia-smi"
+          ]
+        },
+        "features": {
+          "value": [
+            "bf16",
+            "fp16"
+          ],
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:deviceQuery"
+          ]
+        },
+        "extensions": {
+          "x-driver": "synthetic example of vendor data the validator ignores"
+        }
+      }
+    ],
+    "accelerator_inventory": {
+      "value": true,
+      "provenance": "observed",
+      "evidence": [
+        "synthetic:nvidia-smi -L"
+      ]
+    }
+  },
+  "stages": {
+    "detect": {
+      "status": "passed",
+      "evidence": [
+        "synthetic:collector"
+      ],
+      "privilege": {
+        "escalation": {
+          "value": "none",
+          "provenance": "declared"
+        }
+      }
+    },
+    "install": {
+      "status": "passed",
+      "evidence": [
+        "synthetic:uv pip sync log"
+      ],
+      "privilege": {
+        "escalation": {
+          "value": "none",
+          "provenance": "declared"
+        }
+      }
+    },
+    "initialize": {
+      "status": "passed",
+      "evidence": [
+        "synthetic:manage.py check log"
+      ],
+      "privilege": {
+        "escalation": {
+          "value": "none",
+          "provenance": "declared"
+        }
+      }
+    },
+    "execute": {
+      "status": "passed",
+      "evidence": [
+        "synthetic:inference smoke test log"
+      ],
+      "privilege": {
+        "escalation": {
+          "value": "none",
+          "provenance": "declared"
+        }
+      },
+      "compute": {
+        "requested": "cuda",
+        "effective": "cuda"
+      }
+    },
+    "correctness": {
+      "status": "passed",
+      "evidence": [
+        "synthetic:inference output comparison"
+      ],
+      "privilege": {
+        "escalation": {
+          "value": "none",
+          "provenance": "declared"
+        }
+      },
+      "compute": {
+        "requested": "cuda",
+        "effective": "cuda"
+      }
+    },
+    "security": {
+      "status": "not-run",
+      "reason": "not run in this scenario"
+    },
+    "performance": {
+      "status": "not-run",
+      "reason": "not run in this scenario"
+    }
+  },
+  "overall": "incomplete",
+  "probe_errors": [],
+  "extensions": {
+    "x-note": "Synthetic fixture for the validator's tests. It describes no machine that was measured."
+  }
+}

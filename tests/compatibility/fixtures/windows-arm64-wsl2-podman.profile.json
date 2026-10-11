@@ -1,0 +1,337 @@
+{
+  "schema_version": 1,
+  "kind": "profile",
+  "synthetic": true,
+  "id": "synthetic-windows-arm64-wsl2-podman",
+  "title": "Synthetic Windows on Arm, WSL2 Ubuntu arm64, rootless Podman",
+  "description": "A non-root user in a rootless Podman container in WSL2 on Windows on Arm; the engine is required to be rootless.",
+  "support": {
+    "status": "statically-resolvable",
+    "lane": "Windows on Arm with WSL2 (Ubuntu arm64)",
+    "reference": "docs/DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes"
+  },
+  "evidence_sources": [],
+  "required_stages": [
+    "detect",
+    "install",
+    "initialize",
+    "execute",
+    "correctness"
+  ],
+  "environment": {
+    "layers": [
+      {
+        "label": "Windows on Arm PC",
+        "kind": {
+          "value": "host",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "the outermost host runs on hardware"
+        },
+        "os": {
+          "family": {
+            "value": "windows",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "a guest cannot see the physical host"
+          },
+          "version": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "a guest cannot see the physical host"
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "a guest cannot see the physical host"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "a guest cannot see the physical host"
+          },
+          "execution": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "a guest cannot see the physical host"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "a guest cannot see the physical host"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "a guest cannot see the physical host"
+          }
+        }
+      },
+      {
+        "label": "WSL2 utility VM",
+        "kind": {
+          "value": "wsl2",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": "wsl2",
+          "provenance": "declared"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "not visible from inside the container"
+          },
+          "version": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "not visible from inside the container"
+          },
+          "kernel": {
+            "value": "6.6.87.2-microsoft-standard-WSL2",
+            "provenance": "declared"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "aarch64",
+            "provenance": "declared"
+          },
+          "execution": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "whether the layer below emulates this CPU is not visible from inside it"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "not visible from inside the container"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "not visible from inside the container"
+          }
+        }
+      },
+      {
+        "label": "Podman container",
+        "kind": {
+          "value": "container",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": "podman",
+          "provenance": "declared"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": "ubuntu",
+            "provenance": "declared"
+          },
+          "version": {
+            "value": "24.04",
+            "provenance": "declared"
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "not-applicable",
+            "reason": "a container shares the kernel of the layer below"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "aarch64",
+            "provenance": "declared"
+          },
+          "execution": {
+            "value": "native",
+            "provenance": "declared"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "systemd is not running as the service manager here; other managers are not probed"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "no service manager seen"
+          }
+        },
+        "container": {
+          "engine_mode": {
+            "value": "rootless",
+            "provenance": "declared"
+          },
+          "privileged": {
+            "value": false,
+            "provenance": "declared"
+          },
+          "devices": {
+            "value": [],
+            "provenance": "declared"
+          },
+          "orchestration": {
+            "name": {
+              "value": "none",
+              "provenance": "declared"
+            },
+            "version": {
+              "value": null,
+              "provenance": "not-applicable",
+              "reason": "no orchestrator"
+            },
+            "scope": {
+              "value": null,
+              "provenance": "not-applicable",
+              "reason": "no orchestrator"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "workload": {
+    "runtimes": {
+      "python": {
+        "implementation": {
+          "value": "cpython",
+          "provenance": "declared"
+        },
+        "version": {
+          "value": "3.12.15",
+          "provenance": "declared"
+        },
+        "cache_tag": {
+          "value": "cpython-312",
+          "provenance": "declared"
+        },
+        "soabi": {
+          "value": "cpython-312-aarch64-linux-gnu",
+          "provenance": "declared"
+        },
+        "platform": {
+          "value": "linux-aarch64",
+          "provenance": "declared"
+        },
+        "arch": {
+          "value": "aarch64",
+          "provenance": "declared"
+        },
+        "pointer_bits": {
+          "value": 64,
+          "provenance": "declared"
+        },
+        "free_threaded_build": {
+          "value": false,
+          "provenance": "declared"
+        },
+        "gil_enabled": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "libc": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "each run records it"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "declared"
+        }
+      },
+      "node": {
+        "version": {
+          "value": "24.21.0",
+          "provenance": "declared"
+        },
+        "modules_abi": {
+          "value": "137",
+          "provenance": "declared"
+        },
+        "napi_version": {
+          "value": "10",
+          "provenance": "declared"
+        },
+        "platform": {
+          "value": "linux",
+          "provenance": "declared"
+        },
+        "arch": {
+          "value": "aarch64",
+          "provenance": "declared"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "declared"
+        }
+      }
+    }
+  },
+  "compute": {
+    "backends": [
+      {
+        "id": "cpu",
+        "kind": "cpu",
+        "api": "cpu",
+        "available": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "the CPU model is not recorded"
+        },
+        "version": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a CPU has no backend version"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "CPU features are not recorded"
+        }
+      }
+    ],
+    "accelerator_inventory": {
+      "value": null,
+      "provenance": "not-applicable",
+      "reason": "this lane uses the CPU only"
+    }
+  },
+  "policy": {
+    "rules": {
+      "engine-rootless": "required"
+    },
+    "exceptions": []
+  },
+  "extensions": {
+    "x-note": "Synthetic fixture for the validator's tests. It describes no machine that was measured."
+  }
+}

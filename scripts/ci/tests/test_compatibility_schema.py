@@ -1,0 +1,774 @@
+"""Tests for scripts/ci/validate_compatibility.py and tests/compatibility/schema.json.
+
+The committed profiles and the synthetic fixtures must be valid. Every other
+test changes one field of a valid document and checks the exact error code the
+change must produce, so a rule that stops firing fails here. No Django and no
+third-party package is needed. From the repository root:
+    python -I scripts/ci/tests/test_compatibility_schema.py --verbose
+"""
+
+import contextlib
+import copy
+import importlib.util
+import io
+import json
+import pathlib
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+SCRIPT = ROOT / "scripts" / "ci" / "validate_compatibility.py"
+COMPATIBILITY = ROOT / "tests" / "compatibility"
+FIXTURES = COMPATIBILITY / "fixtures"
+STRATEGY = ROOT / "docs" / "DEPENDENCY-STRATEGY.md"
+
+spec = importlib.util.spec_from_file_location("validate_compatibility", SCRIPT)
+validator = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(validator)
+
+SCHEMA = validator.load_schema()
+LANES = validator.read_strategy_lanes(STRATEGY)
+PAIRED = ("linux-x64-vm", "windows-arm64-native", "windows-arm64-wsl2-podman", "kubernetes-arm64-cuda")
+
+
+def fixture(name):
+    return validator.load_json(FIXTURES / f"{name}.json")
+
+
+def pair(name):
+    return fixture(f"{name}.result"), fixture(f"{name}.profile")
+
+
+def check(document, profile=None, lanes=LANES, policy=True, real=False):
+    return validator.validate_document(document, SCHEMA, profile, lanes, policy, real)
+
+
+def changed(document, change):
+    document = copy.deepcopy(document)
+    change(document)
+    return document
+
+
+def unknown(reason="not recorded"):
+    return {"value": None, "provenance": "unknown", "reason": reason}
+
+
+def fact(value, *evidence, provenance="observed"):
+    out = {"value": value, "provenance": provenance}
+    if evidence:
+        out["evidence"] = list(evidence)
+    return out
+
+
+def real_result():
+    """A measured-looking result built from the Linux fixture: the shape the collector writes on a runner."""
+    result, profile = pair("linux-x64-vm")
+
+    def unmark(value):
+        if isinstance(value, dict):
+            if isinstance(value.get("evidence"), list):
+                value["evidence"] = [ref.replace("synthetic:", "file:", 1) for ref in value["evidence"]]
+            for item in value.values():
+                unmark(item)
+        elif isinstance(value, list):
+            for item in value:
+                unmark(item)
+
+    result, profile = copy.deepcopy(result), copy.deepcopy(profile)
+    unmark(result)
+    result["synthetic"] = False
+    result["generated_at"] = "2026-10-11T00:00:00Z"
+    result["profile_id"] = profile["id"] = "linux-x64-vm"
+    result.pop("extensions")
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    result["run"] = {
+        "ci": {
+            "system": fact("github-actions", "env:GITHUB_ACTIONS"),
+            "event": fact("pull_request", "env:GITHUB_EVENT_NAME"),
+            "repository": fact("P-R-N-D/Claus-AI", "env:GITHUB_REPOSITORY"),
+            "ref": fact("refs/pull/1/merge", "env:GITHUB_REF"),
+            "run_id": fact("100", "env:GITHUB_RUN_ID"),
+            "run_attempt": fact(1, "env:GITHUB_RUN_ATTEMPT"),
+            "run_url": fact("https://github.com/P-R-N-D/Claus-AI/actions/runs/100", "env:GITHUB_RUN_ID", provenance="inferred"),
+            "workflow_ref": fact("P-R-N-D/Claus-AI/.github/workflows/ci.yml@refs/pull/1/merge", "env:GITHUB_WORKFLOW_REF"),
+            "job": fact("compatibility", "env:GITHUB_JOB"),
+            "runner_environment": fact("github-hosted", "env:RUNNER_ENVIRONMENT"),
+            "runner_os": fact("Linux", "env:RUNNER_OS"),
+            "runner_arch": fact("X64", "env:RUNNER_ARCH"),
+            "image_os": fact("ubuntu24", "env:ImageOS"),
+            "image_version": fact("20261004.327.1", "env:ImageVersion"),
+        },
+        "revision": {
+            "tested_sha": fact(sha, "git:.git/HEAD"),
+            "event_sha": fact(sha, "env:GITHUB_SHA"),
+            "pr_head_sha": fact("1" * 40, "event:pull_request.head.sha"),
+            "pr_base_sha": fact("2" * 40, "event:pull_request.base.sha"),
+        },
+    }
+    profile["synthetic"] = False
+    profile["evidence_sources"] = [{"workflow": ".github/workflows/ci.yml", "job": "compatibility"}]
+    profile.pop("extensions")
+    return result, profile
+
+
+class Case(unittest.TestCase):
+    def assertCodes(self, findings, *codes, level="error"):
+        self.assertEqual(findings.codes(level), sorted(codes), findings.items)
+
+    def assertValid(self, findings):
+        self.assertEqual(findings.errors, [], findings.items)
+
+    def assertFinding(self, findings, code, path, level="error"):
+        """The finding with this code is reported at this path, not only somewhere."""
+        found = [(code_, path_) for kind, code_, path_, _ in findings.items if kind == level]
+        self.assertIn((code, path), found, findings.items)
+
+
+class CommittedDocumentTests(Case):
+    def test_paired_fixtures_are_valid(self):
+        for name in PAIRED:
+            result, profile = pair(name)
+            with self.subTest(name=name):
+                self.assertValid(check(profile))
+                self.assertValid(check(result, profile))
+
+    def test_unpaired_fixture_is_valid_under_the_default_policy(self):
+        self.assertValid(check(fixture("vm-podman-quadlet-systemd.result")))
+
+    def test_the_rootful_cluster_fixture_only_warns_about_the_preferred_rule(self):
+        result, profile = pair("kubernetes-arm64-cuda")
+        findings = check(result, profile)
+        self.assertCodes(findings)
+        self.assertCodes(findings, "policy-engine-rootless", level="warning")
+
+    def test_fixtures_are_marked_synthetic_and_carry_no_measured_data(self):
+        for path in sorted(FIXTURES.glob("*.json")):
+            document = validator.load_json(path)
+            with self.subTest(path=path.name):
+                self.assertIs(document["synthetic"], True)
+                refs = [ref for _, ref in validator.evidence_refs(document)]
+                self.assertTrue(all(ref.startswith("synthetic:") for ref in refs))
+                if document["kind"] == "profile":
+                    self.assertTrue(document["id"].startswith("synthetic-"))
+                    self.assertNotEqual(document["support"]["status"], "checked")
+                else:
+                    self.assertTrue(refs)
+                    self.assertIsNone(document["generated_at"])
+                    self.assertTrue(all(value["provenance"] == "not-applicable" for value in document["run"]["ci"].values()))
+
+    def test_committed_profiles_are_real_and_linked_to_a_job(self):
+        profiles = sorted((COMPATIBILITY / "profiles").glob("*.json"))
+        self.assertTrue(profiles)
+        for path in profiles:
+            profile = validator.load_json(path)
+            with self.subTest(path=path.name):
+                self.assertIs(profile["synthetic"], False)
+                self.assertTrue(profile["evidence_sources"])
+                self.assertValid(check(profile))
+
+    def test_required_scenarios_are_covered(self):
+        documents = [validator.load_json(path) for path in FIXTURES.glob("*.result.json")]
+        kinds = [[layer["kind"]["value"] for layer in validator.layers_of(document)] for document in documents]
+        self.assertIn(["host"], kinds)
+        self.assertIn(["host", "wsl2", "container"], kinds)
+        self.assertIn(["host", "vm", "container"], kinds)
+        self.assertIn(["host", "container"], kinds)
+        apis = {backend["api"] for document in documents for backend in document["compute"]["backends"]}
+        self.assertTrue({"cpu", "cuda", "qnn"} <= apis)
+        wsl = fixture("windows-arm64-wsl2-podman.result")
+        self.assertEqual(wsl["environment"]["layers"][2]["container"]["engine_mode"]["value"], "rootless")
+        self.assertEqual(wsl["workload"]["identity"]["uid"]["value"], 1000)
+        quadlet = fixture("vm-podman-quadlet-systemd.result")["environment"]["layers"]
+        self.assertEqual(quadlet[1]["service_manager"]["name"]["value"], "systemd")
+        self.assertEqual(quadlet[2]["service_manager"]["name"]["value"], "systemd")
+        self.assertEqual(quadlet[2]["container"]["orchestration"]["scope"]["value"], "user")
+
+
+class SchemaSubsetTests(Case):
+    def keywords(self, node, out):
+        if isinstance(node, dict):
+            out.update(node)
+            for key in ("properties", "$defs"):
+                for sub in node.get(key, {}).values():
+                    self.keywords(sub, out)
+            for key in ("items", "additionalProperties", "propertyNames", "if", "then", "else"):
+                if key in node:
+                    self.keywords(node[key], out)
+        return out
+
+    def test_the_schema_uses_only_the_supported_keywords(self):
+        used = self.keywords(SCHEMA, set())
+        self.assertLessEqual(used, validator.SUPPORTED_KEYWORDS)
+        self.assertEqual(used & validator.CHECKING_KEYWORDS, validator.CHECKING_KEYWORDS - {"minLength", "minimum"} | (used & {"minLength", "minimum"}))
+
+    def test_other_keywords_are_rejected_before_any_document_is_read(self):
+        for keyword in ("oneOf", "anyOf", "allOf", "not", "format", "uniqueItems", "patternProperties",
+                        "exclusiveMinimum", "multipleOf", "dependentRequired", "prefixItems", "contains",
+                        "unevaluatedProperties", "$dynamicRef", "default"):
+            with self.subTest(keyword=keyword), self.assertRaises(validator.SchemaError):
+                validator.check_schema({"type": "object", "properties": {"a": {keyword: []}}})
+        for bad in (
+            {"$defs": {"a": {"$defs": {}}}, "$ref": "#/$defs/a"},
+            {"$ref": "#/$defs/missing"},
+            {"$ref": "other.json#/x"},
+            {"pattern": "("},
+            {"type": "decimal"},
+            {"minItems": -1},
+            {"maxLength": 1.0},
+            {"required": "a"},
+        ):
+            with self.subTest(schema=bad), self.assertRaises(validator.SchemaError):
+                validator.check_schema(bad)
+
+    def test_each_checking_keyword_is_applied(self):
+        defs = {"$defs": {"s": {"type": "string"}}}
+        cases = [
+            ({"type": "integer"}, 1, 1.5),
+            ({"type": "integer"}, 1, True),
+            ({"type": "integer"}, 1, 1.0),
+            ({"type": "number"}, 1, "1"),
+            ({"type": ["string", "null"]}, None, 0),
+            ({"enum": [1, "a"]}, "a", True),
+            ({"const": False}, False, 0),
+            ({"properties": {"a": {"type": "string"}}}, {"a": "x"}, {"a": 1}),
+            ({"properties": {"a": False, "b": True}}, {"b": 1}, {"a": 1}),
+            ({"required": ["a"]}, {"a": 1}, {"b": 1}),
+            ({"additionalProperties": False, "properties": {"a": {}}}, {"a": 1}, {"a": 1, "b": 2}),
+            ({"additionalProperties": {"type": "integer"}}, {"b": 2}, {"b": "2"}),
+            ({"propertyNames": {"pattern": "^x-"}}, {"x-a": 1}, {"a": 1}),
+            ({"items": {"type": "integer"}}, [1, 2], [1, "2"]),
+            ({"minItems": 1}, [1], []),
+            ({"maxItems": 1}, [1], [1, 2]),
+            ({"minLength": 2}, "ab", "a"),
+            ({"maxLength": 2}, "ab", "abc"),
+            ({"pattern": "^a+$"}, "aa", "ab"),
+            ({"minimum": 0}, 0, -1),
+            ({"maximum": 10}, 10, 11),
+            (dict(defs, **{"$ref": "#/$defs/s"}), "a", 1),
+            ({"if": {"properties": {"k": {"const": 1}}}, "then": {"required": ["a"]}, "else": {"required": ["b"]}}, {"k": 1, "a": 0}, {"k": 1, "b": 0}),
+            ({"if": {"properties": {"k": {"const": 1}}}, "then": {"required": ["a"]}, "else": {"required": ["b"]}}, {"k": 2, "b": 0}, {"k": 2, "a": 0}),
+        ]
+        exercised = set()
+        for schema, good, bad in cases:
+            validator.check_schema(schema)
+            exercised.update(set(schema) & validator.CHECKING_KEYWORDS)
+            with self.subTest(schema=schema, value=good):
+                findings = validator.Findings()
+                validator.validate_schema(good, schema, schema, "", findings)
+                self.assertEqual(findings.items, [])
+            with self.subTest(schema=schema, value=bad):
+                findings = validator.Findings()
+                validator.validate_schema(bad, schema, schema, "", findings)
+                self.assertTrue(findings.errors)
+        self.assertEqual(exercised, validator.CHECKING_KEYWORDS)
+
+    def test_a_structural_error_stops_the_cross_field_rules(self):
+        result = changed(fixture("linux-x64-vm.result"), lambda d: d["stages"].pop("security"))
+        findings = check(result)
+        self.assertCodes(findings, "schema")
+        self.assertCodes(findings, "semantic-skipped", level="warning")
+
+    def test_structure_errors(self):
+        result = fixture("linux-x64-vm.result")
+        for label, change in (
+            ("missing field", lambda d: d["workload"].pop("identity")),
+            ("wrong type", lambda d: d["workload"]["identity"]["uid"].update(value="1001")),
+            ("unknown status", lambda d: d["stages"]["install"].update(status="skipped")),
+            ("unknown provenance", lambda d: d["workload"]["identity"]["uid"].update(provenance="guessed")),
+            ("schema version", lambda d: d.update(schema_version=2)),
+            ("extra field", lambda d: d.update(notes="x")),
+            ("extension without x-", lambda d: d["extensions"].update(note="x")),
+            ("layer field without x-", lambda d: d["environment"]["layers"][1].update(cloud="azure")),
+            ("too many layers", lambda d: d["environment"].update(layers=d["environment"]["layers"] * 5)),
+            ("bad evidence kind", lambda d: d["stages"]["detect"].update(evidence=["https://example.com"])),
+            ("bad sha", lambda d: d["run"]["revision"].update(tested_sha=fact("ABC", "synthetic:x"))),
+        ):
+            with self.subTest(label):
+                self.assertCodes(check(changed(result, change)), "schema")
+
+    def test_extension_fields_are_accepted_and_ignored(self):
+        result = changed(fixture("linux-x64-vm.result"), lambda d: (
+            d["extensions"].update({"x-vendor-data": {"anything": [1, 2]}}),
+            d["environment"]["layers"][1].update(extensions={"x-azure-sku": "Standard_D4ads_v6"}),
+            d["stages"]["detect"].update(extensions={"x-duration-seconds": 3}),
+        ))
+        self.assertValid(check(result))
+
+
+class JsonLoadingTests(Case):
+    def write(self, directory, content):
+        path = pathlib.Path(directory) / "document.json"
+        path.write_bytes(content)
+        return path
+
+    def test_lenient_json_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for label, content in (
+                ("duplicate key", b'{"a": 1, "a": 2}'),
+                ("NaN", b'{"a": NaN}'),
+                ("Infinity", b'{"a": -Infinity}'),
+                ("overflow", b'{"a": 1e999}'),
+                ("byte order mark", b'\xef\xbb\xbf{}'),
+                ("not UTF-8", b'{"a": "\xff"}'),
+                ("deep nesting", b"[" * 100000 + b"]" * 100000),
+                ("too large", b'{"a": "' + b"x" * validator.MAX_DOCUMENT_BYTES + b'"}'),
+            ):
+                with self.subTest(label), self.assertRaises(ValueError):
+                    validator.load_json(self.write(directory, content))
+
+    def test_the_command_reports_unparsable_documents_as_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(directory, b'{"a": 1, "a": 2}')
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(validator.main([str(path)]), 1)
+            self.assertIn("ERROR json /", output.getvalue())
+
+
+class ProvenanceTests(Case):
+    def test_fact_rules(self):
+        result = fixture("linux-x64-vm.result")
+        uid = ("workload", "identity", "uid")
+
+        def set_uid(value):
+            return lambda d: d["workload"]["identity"].update(uid=value)
+
+        for label, change in (
+            ("observed without evidence", set_uid({"value": 1001, "provenance": "observed"})),
+            ("observed without value", set_uid({"value": None, "provenance": "observed", "evidence": ["synthetic:x"]})),
+            ("inferred without evidence", set_uid({"value": 1001, "provenance": "inferred", "evidence": []})),
+            ("declared without value", set_uid({"value": None, "provenance": "declared"})),
+            ("unknown with a value", set_uid({"value": 1001, "provenance": "unknown", "reason": "x"})),
+            ("unknown without reason", set_uid({"value": None, "provenance": "unknown"})),
+            ("not-applicable with a value", set_uid({"value": 1001, "provenance": "not-applicable", "reason": "x"})),
+        ):
+            with self.subTest(label):
+                findings = check(changed(result, change), policy=False)
+                self.assertIn("fact-provenance", findings.codes(), uid)
+
+    def test_a_profile_cannot_hold_observations(self):
+        profile = changed(fixture("linux-x64-vm.profile"), lambda d: d["environment"]["layers"][1]["os"].update(
+            name=fact("ubuntu", "synthetic:x")))
+        self.assertCodes(check(profile), "profile-provenance")
+
+    def test_synthetic_marking(self):
+        result = fixture("linux-x64-vm.result")
+        profile = fixture("linux-x64-vm.profile")
+        cases = (
+            ("measured evidence in a synthetic document", result, lambda d: d["stages"]["detect"].update(evidence=["log:job"])),
+            ("synthetic result with a collection time", result, lambda d: d.update(generated_at="2026-10-11T00:00:00Z")),
+            ("synthetic result claiming a run", result, lambda d: d["run"]["ci"].update(system=fact("github-actions", "synthetic:x"))),
+            ("real result without a collection time", result, lambda d: d.update(synthetic=False)),
+            ("synthetic profile without the id prefix", profile, lambda d: d.update(id="linux-x64-vm")),
+        )
+        for label, document, change in cases:
+            with self.subTest(label):
+                self.assertIn("synthetic-marking", check(changed(document, change), policy=False).codes())
+        measured, _ = real_result()
+        self.assertCodes(check(changed(measured, lambda d: d["stages"]["detect"].update(evidence=["synthetic:x"]))), "synthetic-marking")
+        self.assertCodes(check(result, real=True), "synthetic-marking")
+        undated = check(changed(measured, lambda d: d.update(generated_at=None)))
+        self.assertCodes(undated, "synthetic-marking")
+        self.assertFinding(undated, "synthetic-marking", "/generated_at")
+
+    def test_strings_with_control_characters_or_secrets_are_rejected(self):
+        result = fixture("linux-x64-vm.result")
+        for label, text, code in (
+            ("newline", "a\nb", "control-character"),
+            ("bidirectional override", "a‮b", "control-character"),
+            ("GitHub token", "token ghp_" + "A" * 36, "secret-like-value"),
+            ("fine-grained token", "github_pat_" + "a" * 30, "secret-like-value"),
+            ("AWS key", "AKIA" + "ABCDEFGHIJKLMNOP", "secret-like-value"),
+            ("private key", "-----BEGIN OPENSSH PRIVATE KEY-----", "secret-like-value"),
+        ):
+            with self.subTest(label):
+                document = changed(result, lambda d: d["stages"]["install"].update(reason=text))
+                self.assertCodes(check(document), code)
+        document = changed(result, lambda d: d["extensions"].update({"x-data": {"ghp_" + "A" * 36: 1}}))
+        self.assertCodes(check(document), "secret-like-value")
+
+
+class EnvironmentRuleTests(Case):
+    def test_layer_structure(self):
+        result = fixture("windows-arm64-wsl2-podman.result")
+        layers = lambda d: d["environment"]["layers"]  # noqa: E731
+        at = "/environment/layers/"
+        for label, change, code, path in (
+            ("host inside", lambda d: layers(d)[1].update(kind=fact("host", "synthetic:x")), "layer-structure", at + "1/kind"),
+            ("WSL2 outermost", lambda d: layers(d).pop(0), "layer-structure", at + "0/kind"),
+            ("container without container facts", lambda d: layers(d)[2].pop("container"), "layer-structure", at + "2"),
+            ("container facts on a VM", lambda d: layers(d)[1].update(container=layers(d)[2]["container"]), "layer-structure", at + "1/container"),
+            ("container with its own kernel", lambda d: layers(d)[2]["os"].update(kernel=fact("6.6", "synthetic:x")), "layer-structure", at + "2/os/kernel"),
+            ("WSL2 on Linux", lambda d: layers(d)[0]["os"].update(family=fact("linux", "synthetic:x")), "os-contradiction", at + "1/kind"),
+            ("WSL2 running Windows", lambda d: (layers(d)[1]["os"].update(family=fact("windows", "synthetic:x")), layers(d)[2]["os"].update(family=fact("windows", "synthetic:x"))), "os-contradiction", at + "1/os/family"),
+            ("Windows container on a Linux kernel", lambda d: layers(d)[2]["os"].update(family=fact("windows", "synthetic:x")), "os-contradiction", at + "2/os/family"),
+            ("emulated host", lambda d: layers(d)[0]["cpu"].update(execution=fact("emulated", "synthetic:x")), "cpu-contradiction", at + "0/cpu/execution"),
+            ("foreign CPU declared native", lambda d: layers(d)[2]["cpu"].update(arch=fact("x86_64", "synthetic:x")), "cpu-contradiction", at + "2/cpu/execution"),
+            ("architecture alias", lambda d: layers(d)[2]["cpu"].update(arch=fact("arm64", "synthetic:x")), "arch-name", at + "2/cpu/arch"),
+        ):
+            with self.subTest(label):
+                self.assertFinding(check(changed(result, change), policy=False), code, path)
+
+    def test_emulation_is_recorded_as_emulated(self):
+        def emulate(d):
+            layers = d["environment"]["layers"]
+            layers[2]["cpu"].update(arch=fact("x86_64", "synthetic:x"), execution=fact("emulated", "synthetic:x"))
+            python = d["workload"]["runtimes"]["python"]
+            python.update(platform=fact("linux-x86_64", "synthetic:x"), arch=fact("x86_64", "synthetic:x"),
+                          soabi=fact("cpython-312-x86_64-linux-gnu", "synthetic:x"), execution=fact("emulated", "synthetic:x"))
+            d["workload"]["runtimes"]["node"].update(arch=fact("x86_64", "synthetic:x"), execution=fact("emulated", "synthetic:x"))
+        self.assertValid(check(changed(fixture("windows-arm64-wsl2-podman.result"), emulate)))
+
+    def test_runtime_and_abi_contradictions(self):
+        result = fixture("linux-x64-vm.result")
+        python = lambda d: d["workload"]["runtimes"]["python"]  # noqa: E731
+        node = lambda d: d["workload"]["runtimes"]["node"]  # noqa: E731
+        for label, change, code in (
+            ("Windows Python on Linux", lambda d: python(d).update(platform=fact("win-amd64", "synthetic:x")), "os-contradiction"),
+            ("macOS Node on Linux", lambda d: node(d).update(platform=fact("darwin", "synthetic:x")), "os-contradiction"),
+            ("platform tag and arch differ", lambda d: python(d).update(arch=fact("aarch64", "synthetic:x"), execution=fact("emulated", "synthetic:x")), "abi-contradiction"),
+            ("32-bit pointers on x86_64", lambda d: python(d).update(pointer_bits=fact(32, "synthetic:x")), "abi-contradiction"),
+            ("cache tag of another version", lambda d: python(d).update(cache_tag=fact("cpython-313", "synthetic:x")), "abi-contradiction"),
+            ("ABI tag of another version", lambda d: python(d).update(soabi=fact("cpython-313-x86_64-linux-gnu", "synthetic:x")), "abi-contradiction"),
+            ("free-threaded ABI tag on a GIL build", lambda d: python(d).update(soabi=fact("cpython-312t-x86_64-linux-gnu", "synthetic:x")), "abi-contradiction"),
+            ("no GIL on a GIL build", lambda d: python(d).update(gil_enabled=fact(False, "synthetic:x")), "abi-contradiction"),
+            ("aarch64 Node declared native on x86_64", lambda d: node(d).update(arch=fact("aarch64", "synthetic:x")), "cpu-contradiction"),
+        ):
+            with self.subTest(label):
+                self.assertIn(code, check(changed(result, change)).codes())
+
+    def test_32_bit_code_on_a_64_bit_kernel_of_its_family_is_native(self):
+        def thirty_two_bit(d):
+            d["workload"]["runtimes"]["python"].update(arch=fact("x86", "synthetic:x"), pointer_bits=fact(32, "synthetic:x"),
+                                                        soabi=fact("cpython-312-i386-linux-gnu", "synthetic:x"))
+        self.assertValid(check(changed(fixture("linux-x64-vm.result"), thirty_two_bit)))
+
+        def x86_on_arm(d):
+            d["workload"]["runtimes"]["python"].update(arch=fact("x86", "synthetic:x"), pointer_bits=fact(32, "synthetic:x"))
+        self.assertIn("cpu-contradiction", check(changed(fixture("windows-arm64-wsl2-podman.result"), x86_on_arm)).codes())
+
+    def test_a_free_threaded_build_is_consistent(self):
+        def free_threaded(d):
+            python = d["workload"]["runtimes"]["python"]
+            python.update(version=fact("3.15.0", "synthetic:x"), cache_tag=fact("cpython-315", "synthetic:x"),
+                          soabi=fact("cpython-315t-x86_64-linux-gnu", "synthetic:x"),
+                          free_threaded_build=fact(True, "synthetic:x"), gil_enabled=fact(False, "synthetic:x"))
+        self.assertValid(check(changed(fixture("linux-x64-vm.result"), free_threaded)))
+
+    def test_unrecognized_values_warn_and_change_nothing_else(self):
+        def unusual(d):
+            d["profile_id"] = None
+            layer = d["environment"]["layers"][1]
+            layer["cpu"]["arch"] = fact("e2k", "synthetic:x")
+            layer["technology"] = fact("bhyve", "synthetic:x")
+            layer["os"]["family"] = fact("haiku", "synthetic:x")
+            d["workload"]["runtimes"]["python"].update(platform=fact("haiku-e2k", "synthetic:x"), arch=fact("e2k", "synthetic:x"),
+                                                        soabi=unknown(), execution=unknown())
+            d["workload"]["runtimes"]["node"].update(platform=fact("haiku", "synthetic:x"), arch=unknown(), execution=unknown())
+            d["compute"]["backends"].append({"id": "npu0", "kind": "npu", "api": "vendor-sdk", "available": unknown(),
+                                             "device": unknown(), "version": unknown(), "features": unknown()})
+        findings = check(changed(fixture("linux-x64-vm.result"), unusual))
+        self.assertValid(findings)
+        self.assertCodes(findings, "unrecognized-value", level="warning")
+        for path in ("/environment/layers/1/cpu/arch", "/environment/layers/1/os/family", "/environment/layers/1/technology", "/compute/backends/1/api"):
+            self.assertFinding(findings, "unrecognized-value", path, level="warning")
+
+    def test_identity(self):
+        result = fixture("windows-arm64-wsl2-podman.result")
+        identity = lambda d: d["workload"]["identity"]  # noqa: E731
+        superuser = changed(result, lambda d: identity(d).update(superuser=fact(True, "synthetic:x")))
+        self.assertIn("identity-contradiction", check(superuser, policy=False).codes())
+        initial = changed(result, lambda d: identity(d)["user_namespace"].update(initial=fact(True, "synthetic:x")))
+        self.assertCodes(check(initial), "identity-contradiction")
+        nested_full_map = changed(fixture("linux-x64-vm.result"), lambda d: identity(d)["user_namespace"].update(initial=fact(False, "synthetic:x")))
+        self.assertValid(check(nested_full_map))
+
+
+class StageRuleTests(Case):
+    def stage(self, document, name, **values):
+        def change(d):
+            d["stages"][name] = values
+            d["overall"] = validator.overall_of(d["stages"])
+        return changed(document, change)
+
+    def test_stage_fields(self):
+        result = fixture("linux-x64-vm.result")
+        escalation = {"escalation": {"value": "none", "provenance": "declared"}}
+        for label, values in (
+            ("not-run with evidence", dict(status="not-run", reason="x", evidence=["synthetic:log"])),
+            ("not-run without reason", dict(status="not-run")),
+            ("failed without evidence", dict(status="failed", reason="x", privilege=escalation)),
+            ("failed without reason", dict(status="failed", evidence=["synthetic:log"], privilege=escalation)),
+            ("passed without evidence", dict(status="passed", privilege=escalation)),
+            ("passed without privilege", dict(status="passed", evidence=["synthetic:log"])),
+            ("blocked without reason", dict(status="blocked")),
+        ):
+            with self.subTest(label):
+                self.assertIn("stage-fields", check(self.stage(result, "install", **values)).codes())
+
+    def test_a_stage_cannot_pass_before_its_prerequisites(self):
+        result = fixture("linux-x64-vm.result")
+        passed = dict(status="passed", evidence=["synthetic:log"], privilege={"escalation": {"value": "none", "provenance": "declared"}})
+        for name in ("initialize", "correctness", "performance"):
+            with self.subTest(name):
+                self.assertCodes(check(self.stage(result, name, **passed)), "stage-order")
+        failed_detect = self.stage(result, "detect", status="failed", reason="probe error", evidence=["synthetic:log"], privilege=passed["privilege"])
+        self.assertCodes(check(self.stage(failed_detect, "security", **passed)), "stage-order")
+
+    def test_not_run_stages_cannot_make_the_run_pass(self):
+        result = fixture("linux-x64-vm.result")
+        self.assertEqual(result["overall"], "incomplete")
+        self.assertCodes(check(changed(result, lambda d: d.update(overall="passed"))), "overall-mismatch")
+        failed = fixture("windows-arm64-native.result")
+        self.assertEqual(failed["overall"], "failed")
+        self.assertCodes(check(changed(failed, lambda d: d.update(overall="incomplete"))), "overall-mismatch")
+
+    def test_a_failure_is_not_recorded_as_not_run(self):
+        result = fixture("windows-arm64-native.result")
+        hidden = self.stage(result, "install", status="not-run", reason="x", evidence=["synthetic:uv pip sync log"])
+        self.assertCodes(check(hidden), "stage-fields")
+
+    def test_required_stages_must_pass(self):
+        result, profile = pair("windows-arm64-wsl2-podman")
+        skipped = self.stage(result, "correctness", status="not-run", reason="x")
+        self.assertCodes(check(skipped, profile), "required-stage")
+
+    def test_cpu_fallback_is_not_an_accelerator_pass(self):
+        result, profile = pair("kubernetes-arm64-cuda")
+        execute = lambda d: d["stages"]["execute"]  # noqa: E731
+        for label, change, code, path in (
+            ("fell back to the CPU", lambda d: execute(d)["compute"].update(effective="cpu"), "accelerator-fallback", "/stages/execute/compute"),
+            ("nothing recorded as running", lambda d: execute(d)["compute"].update(effective=None), "accelerator-fallback", "/stages/execute/compute"),
+            ("unknown backend requested", lambda d: execute(d)["compute"].update(requested="rocm"), "backend-reference", "/stages/execute/compute/requested"),
+            ("unknown backend ran", lambda d: execute(d)["compute"].update(effective="rocm"), "backend-reference", "/stages/execute/compute/effective"),
+            ("unavailable backend ran", lambda d: d["compute"]["backends"][1].update(available=unknown()), "backend-reference", "/stages/execute/compute/effective"),
+            ("duplicate backend id", lambda d: d["compute"]["backends"].append(copy.deepcopy(d["compute"]["backends"][1])), "backend-reference", "/compute/backends/1/id"),
+            ("CPU API on a GPU", lambda d: d["compute"]["backends"][1].update(api="cpu"), "backend-reference", "/compute/backends/1"),
+        ):
+            with self.subTest(label):
+                self.assertFinding(check(changed(result, change), profile), code, path)
+
+    def test_a_failed_stage_may_record_the_fallback_it_hit(self):
+        result, profile = pair("kubernetes-arm64-cuda")
+
+        def fail(d):
+            d["stages"]["correctness"].update(status="failed", reason="the CUDA kernel did not load; the CPU ran instead")
+            d["stages"]["correctness"]["compute"]["effective"] = "cpu"
+            d["overall"] = "failed"
+        findings = check(changed(result, fail), profile)
+        self.assertCodes(findings, "required-stage")
+
+    def test_a_stage_that_did_not_run_used_no_backend(self):
+        result = fixture("linux-x64-vm.result")
+        document = changed(result, lambda d: d["stages"]["install"].update(compute={"requested": "cpu", "effective": "cpu"}))
+        self.assertCodes(check(document), "backend-reference")
+
+
+class PolicyTests(Case):
+    def test_the_default_policy_rejects_root_privileged_devices_capabilities_and_escalation(self):
+        result = fixture("windows-arm64-wsl2-podman.result")
+        container = lambda d: d["environment"]["layers"][2]["container"]  # noqa: E731
+        for label, change, code in (
+            ("root workload", lambda d: d["workload"]["identity"].update(superuser=fact(True, "synthetic:x"), uid=fact(0, "synthetic:x")), "policy-app-non-root"),
+            ("unknown user", lambda d: d["workload"]["identity"].update(superuser=unknown()), "policy-app-non-root"),
+            ("privileged container", lambda d: container(d).update(privileged=fact(True, "synthetic:x")), "policy-no-privileged-container"),
+            ("unknown privileged state", lambda d: container(d).update(privileged=unknown()), "policy-no-privileged-container"),
+            ("device passed in", lambda d: container(d).update(devices=fact(["fuse"], "synthetic:x")), "policy-minimal-devices"),
+            ("capability held", lambda d: d["workload"]["isolation"]["capabilities"].update(effective=fact(["cap_net_admin"], "synthetic:x")), "policy-minimal-capabilities"),
+            ("sudo in a stage", lambda d: d["stages"]["install"]["privilege"].update(escalation={"value": "sudo", "provenance": "declared"}), "policy-no-privilege-escalation"),
+        ):
+            with self.subTest(label):
+                self.assertCodes(check(changed(result, change)), code)
+
+    def test_rootless_engine_and_non_root_workload_are_independent(self):
+        result, profile = pair("windows-arm64-wsl2-podman")
+        root_in_rootless = changed(result, lambda d: d["workload"]["identity"].update(
+            superuser=fact(True, "synthetic:x"), uid=fact(0, "synthetic:x"),
+            user_namespace={"initial": fact(False, "synthetic:x"), "uid_map": fact([[0, 1000, 1], [1, 100000, 65536]], "synthetic:x")}))
+        self.assertCodes(check(root_in_rootless, profile), "policy-app-non-root")
+        rootful = changed(result, lambda d: (d["environment"]["layers"][2]["container"].update(engine_mode=fact("rootful", "synthetic:x")), d.update(profile_id=None)))
+        findings = check(rootful)
+        self.assertCodes(findings)
+        self.assertCodes(findings, "policy-engine-rootless", level="warning")
+        rootful_profile = changed(profile, lambda d: d["environment"]["layers"][2]["container"].update(engine_mode=unknown()))
+        self.assertCodes(check(changed(rootful, lambda d: d.update(profile_id=profile["id"])), rootful_profile), "policy-engine-rootless")
+
+    def test_exceptions_need_approval_and_a_matching_scope(self):
+        result, profile = pair("kubernetes-arm64-cuda")
+        exception = lambda d: d["policy"]["exceptions"][0]  # noqa: E731
+        pending = changed(profile, lambda d: exception(d)["approval"].update(status="pending"))
+        self.assertCodes(check(result, pending), "policy-exception-not-approved")
+        other_device = changed(profile, lambda d: exception(d)["scope"].update(devices=["fuse"]))
+        self.assertCodes(check(result, other_device), "policy-minimal-devices")
+        self.assertCodes(check(result), "policy-minimal-devices")
+        for label, change in (
+            ("approved without a reference", lambda d: exception(d)["approval"].pop("reference")),
+            ("scope of another rule", lambda d: exception(d)["scope"].update(stages=["execute"])),
+            ("no scope", lambda d: exception(d).update(scope={})),
+            ("duplicate id", lambda d: d["policy"]["exceptions"].append(copy.deepcopy(exception(d)))),
+        ):
+            with self.subTest(label):
+                self.assertIn("policy-exception", check(changed(profile, change)).codes())
+        for label, change in (
+            ("no reason", lambda d: exception(d).pop("reason")),
+            ("no end condition", lambda d: exception(d).pop("end_condition")),
+            ("no verification", lambda d: exception(d).update(verification="")),
+            ("unknown rule", lambda d: exception(d).update(rule="no-network")),
+        ):
+            with self.subTest(label):
+                self.assertCodes(check(changed(profile, change)), "schema")
+
+    def test_unused_exceptions_warn(self):
+        result, profile = pair("kubernetes-arm64-cuda")
+        no_gpu = changed(result, lambda d: d["environment"]["layers"][1]["container"].update(devices=fact([], "synthetic:x")))
+        self.assertIn("policy-exception-unused", check(no_gpu, changed(profile, lambda d: d["environment"]["layers"][1]["container"].update(devices=unknown()))).codes("warning"))
+
+    def test_a_profile_can_tighten_but_not_weaken_a_rule(self):
+        profile = fixture("linux-x64-vm.profile")
+        self.assertCodes(check(changed(profile, lambda d: d["policy"]["rules"].update({"app-non-root": "preferred"}))), "policy-weakened")
+        self.assertValid(check(changed(profile, lambda d: d["policy"]["rules"].update({"engine-rootless": "required"}))))
+
+    def test_the_policy_can_be_skipped_for_machines_it_is_not_meant_for(self):
+        result = changed(fixture("linux-x64-vm.result"), lambda d: d["workload"]["identity"].update(superuser=fact(True, "synthetic:x"), uid=fact(0, "synthetic:x")))
+        self.assertCodes(check(result), "policy-app-non-root")
+        self.assertValid(check(result, policy=False))
+
+
+class ProfileTests(Case):
+    def test_support_claims_follow_the_dependency_strategy(self):
+        profile = fixture("windows-arm64-native.profile")
+        support = lambda d: d["support"]  # noqa: E731
+        for label, change in (
+            ("synthetic checked claim", lambda d: support(d).update(status="checked")),
+            ("status that differs from the lane table", lambda d: support(d).update(status="statically-resolvable")),
+            ("lane that is not in the table", lambda d: support(d).update(lane="Windows on Arm, native")),
+            ("claim without a lane", lambda d: support(d).update(lane=None)),
+            ("not assessed with a lane", lambda d: support(d).update(status="not-assessed")),
+        ):
+            with self.subTest(label):
+                self.assertIn("support-claim", check(changed(profile, change)).codes())
+        unlisted = changed(profile, lambda d: support(d).update(status="not-assessed", lane=None))
+        self.assertValid(check(unlisted))
+        # The lane table agrees with this claim, so only the synthetic marking can reject it.
+        on_checked_lane = changed(profile, lambda d: support(d).update(status="checked", lane="Linux x86-64 glibc"))
+        self.assertCodes(check(on_checked_lane), "support-claim")
+
+    def test_a_checked_claim_needs_the_lane_table(self):
+        _, profile = real_result()
+        claimed = changed(profile, lambda d: d.update(support={"status": "checked", "lane": "Linux x86-64 glibc", "reference": "docs/DEPENDENCY-STRATEGY.md"}))
+        self.assertValid(check(claimed))
+        self.assertIn("support-claim-unverified", check(claimed, lanes=None).codes("warning"))
+        other = changed(claimed, lambda d: d["support"].update(lane="Linux aarch64 glibc"))
+        self.assertCodes(check(other), "support-claim")
+
+    def test_evidence_sources_name_a_real_workflow_job(self):
+        _, profile = real_result()
+        self.assertValid(check(profile))
+        for label, source in (
+            ("missing job", {"workflow": ".github/workflows/ci.yml", "job": "gpu"}),
+            ("missing workflow", {"workflow": ".github/workflows/devices.yml", "job": "compatibility"}),
+            ("outside the workflow directory", {"workflow": "docs/CONTEXT.md", "job": "compatibility"}),
+            ("path traversal", {"workflow": ".github/workflows/../../docs/CONTEXT.md", "job": "compatibility"}),
+        ):
+            with self.subTest(label):
+                self.assertCodes(check(changed(profile, lambda d: d.update(evidence_sources=[source]))), "evidence-source")
+
+    def test_a_result_is_checked_against_what_its_profile_declares(self):
+        result, profile = pair("windows-arm64-wsl2-podman")
+        layers = lambda d: d["environment"]["layers"]  # noqa: E731
+        for label, change, code in (
+            ("other profile id", lambda d: d.update(profile_id="synthetic-other"), "profile-link"),
+            ("other Python", lambda d: d["workload"]["runtimes"]["python"].update(version=fact("3.13.9", "synthetic:x"), cache_tag=fact("cpython-313", "synthetic:x"), soabi=fact("cpython-313-aarch64-linux-gnu", "synthetic:x")), "profile-mismatch"),
+            ("missing layer", lambda d: (layers(d).pop(1), layers(d)[0].update(kind=fact("host", "synthetic:x"))), "profile-mismatch"),
+            ("rootful engine", lambda d: layers(d)[2]["container"].update(engine_mode=fact("rootful", "synthetic:x")), "profile-mismatch"),
+            ("not established", lambda d: layers(d)[2]["os"].update(version=unknown()), "profile-unverified"),
+            ("backend missing", lambda d: d["compute"]["backends"][0].update(id="cpu0"), "profile-mismatch"),
+            ("backend of another kind", lambda d: d["compute"]["backends"][0].update(kind="other", api="wasm"), "profile-mismatch"),
+        ):
+            with self.subTest(label):
+                self.assertIn(code, check(changed(result, change), profile).codes())
+
+    def test_a_real_result_is_linked_to_a_real_profile_and_its_job(self):
+        result, profile = real_result()
+        self.assertValid(check(result, profile))
+        self.assertCodes(check(result, fixture("linux-x64-vm.profile")), "profile-link")
+        # Same id and job, so only the synthetic flag differs.
+        synthetic = changed(fixture("linux-x64-vm.profile"), lambda d: d.update(id=result["profile_id"], evidence_sources=profile["evidence_sources"]))
+        self.assertCodes(check(result, synthetic), "profile-link")
+        self.assertFinding(check(result, synthetic), "profile-link", "/synthetic")
+        other_job = changed(result, lambda d: d["run"]["ci"].update(job=fact("backend", "env:GITHUB_JOB")))
+        self.assertCodes(check(other_job, profile), "profile-link")
+
+    def test_a_github_actions_record_names_its_run_and_commits(self):
+        result, profile = real_result()
+        ci = lambda d: d["run"]["ci"]  # noqa: E731
+        revision = lambda d: d["run"]["revision"]  # noqa: E731
+        for label, change in (
+            ("no run id", lambda d: ci(d).update(run_id=unknown())),
+            ("run URL of another repository", lambda d: ci(d).update(run_url=fact("https://github.com/other/repo/actions/runs/100", "env:x", provenance="inferred"))),
+            ("no GITHUB_SHA", lambda d: revision(d).update(event_sha=unknown())),
+            ("pull request without its head", lambda d: revision(d).update(pr_head_sha=unknown())),
+        ):
+            with self.subTest(label):
+                self.assertCodes(check(changed(result, change), profile), "ci-evidence")
+        push = changed(result, lambda d: (ci(d).update(event=fact("push", "env:GITHUB_EVENT_NAME")),
+                                          revision(d).update(pr_head_sha={"value": None, "provenance": "not-applicable", "reason": "push"},
+                                                             pr_base_sha={"value": None, "provenance": "not-applicable", "reason": "push"})))
+        self.assertValid(check(push, profile))
+
+    def test_strategy_lane_table_parsing(self):
+        self.assertEqual(LANES["Linux x86-64 glibc"], "checked")
+        self.assertEqual(LANES["Windows on Arm, native (`win_arm64`)"], "not-supported")
+        self.assertEqual(LANES["Windows on Arm with WSL2 (Ubuntu arm64)"], "statically-resolvable")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "strategy.md"
+            path.write_text("# T\n\n## Platform and accelerator lanes\n\n| Lane | Wheels | Backend lock | Notes |\n|---|---|---|---|\n"
+                            "| A | x | Checked: CI | n |\n| B | x | Same as A | n |\n| C | x | Partly | n |\n", encoding="utf-8")
+            self.assertEqual(validator.read_strategy_lanes(path), {"A": "checked", "B": "checked", "C": None})
+            path.write_text("# T\n\n## Other\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                validator.read_strategy_lanes(path)
+
+
+class CommandTests(Case):
+    def run_main(self, *argv):
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            code = validator.main([str(arg) for arg in argv])
+        return code, out.getvalue() + err.getvalue()
+
+    def test_exit_status(self):
+        result, profile = FIXTURES / "linux-x64-vm.result.json", FIXTURES / "linux-x64-vm.profile.json"
+        self.assertEqual(self.run_main("--dependency-strategy", STRATEGY, "--profile", profile, result, profile)[0], 0)
+        self.assertEqual(self.run_main("--require-real", result)[0], 1)
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            invalid = directory / "invalid.json"
+            invalid.write_text(json.dumps(changed(fixture("linux-x64-vm.result"), lambda d: d.update(overall="passed"))), encoding="utf-8")
+            code, output = self.run_main(invalid)
+            self.assertEqual(code, 1)
+            self.assertIn("ERROR overall-mismatch /overall", output)
+            self.assertEqual(self.run_main(directory / "missing.json")[0], 2)
+            self.assertEqual(self.run_main("--profile", invalid, result)[0], 2)
+            self.assertEqual(self.run_main("--profile", result, result)[0], 2)
+            bad_schema = directory / "schema.json"
+            bad_schema.write_text(json.dumps({"oneOf": []}), encoding="utf-8")
+            self.assertEqual(self.run_main("--schema", bad_schema, result)[0], 2)
+            no_lanes = directory / "strategy.md"
+            no_lanes.write_text("# Nothing\n", encoding="utf-8")
+            self.assertEqual(self.run_main("--dependency-strategy", no_lanes, result)[0], 2)
+
+    def test_summary_states_what_a_valid_record_means(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            odd = directory / "a|b.json"
+            odd.write_text(json.dumps(changed(fixture("linux-x64-vm.result"), lambda d: d.update(overall="passed"))), encoding="utf-8")
+            summary = directory / "summary.md"
+            code, _ = self.run_main("--summary", summary, FIXTURES / "linux-x64-vm.result.json", odd)
+            self.assertEqual(code, 1)
+            text = summary.read_text(encoding="utf-8")
+            self.assertIn("| linux-x64-vm.result.json | result | valid | 0 | 1 |", text)
+            self.assertIn("| a\\|b.json | result | invalid | 1 | 1 |", text)
+            self.assertIn("It is not a support claim", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

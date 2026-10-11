@@ -13,13 +13,17 @@ import ast
 import contextlib
 import importlib.util
 import io
+import itertools
 import json
 import os
 import pathlib
+import re
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -44,10 +48,13 @@ CPUINFO_X86 = "processor\t: 0\nvendor_id\t: AuthenticAMD\nflags\t\t: fpu vme sse
 CPUINFO_ARM = "processor\t: 0\nBogoMIPS\t: 50.00\nFeatures\t: fp asimd\nCPU implementer\t: 0x41\n"
 
 
-def status(uid=1001, gid=118, cap_eff="0000000000000000", cap_bnd=FULL, no_new_privs=0, seccomp=0):
+def status(uid=1001, gid=118, cap_eff="0000000000000000", cap_bnd=FULL, no_new_privs=0, seccomp=0, real_uid=None, saved_uid=None, cap_prm=None):
+    real_uid = uid if real_uid is None else real_uid
+    saved_uid = uid if saved_uid is None else saved_uid
+    cap_prm = cap_eff if cap_prm is None else cap_prm
     return (
-        f"Name:\tpython\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n"
-        f"CapInh:\t0000000000000000\nCapPrm:\t{cap_eff}\nCapEff:\t{cap_eff}\nCapBnd:\t{cap_bnd}\n"
+        f"Name:\tpython\nUid:\t{real_uid}\t{uid}\t{saved_uid}\t{uid}\nGid:\t{gid}\t{gid}\t{gid}\t{gid}\n"
+        f"CapInh:\t0000000000000000\nCapPrm:\t{cap_prm}\nCapEff:\t{cap_eff}\nCapBnd:\t{cap_bnd}\n"
         f"CapAmb:\t0000000000000000\nNoNewPrivs:\t{no_new_privs}\nSeccomp:\t{seccomp}\n"
     )
 
@@ -80,10 +87,16 @@ RUNNER_FILES = {
 }
 
 
+# The inodes of the initial user and PID namespaces (PROC_USER_INIT_INO and PROC_PID_INIT_INO in
+# linux/proc_ns.h), written out so that a wrong constant in the collector fails these tests.
+INITIAL_USER_NS = 4026531837
+INITIAL_PID_NS = 4026531836
+
+
 class FakeProbe(collector.Probe):
     """A Probe whose namespace inodes are set by the test instead of read from /proc."""
 
-    def __init__(self, *args, user_inode=collector.USER_NS_INIT_INO, pid_inode=collector.PID_NS_INIT_INO, **kwargs):
+    def __init__(self, *args, user_inode=INITIAL_USER_NS, pid_inode=INITIAL_PID_NS, **kwargs):
         super().__init__(*args, **kwargs)
         self.inodes = {"user": user_inode, "pid": pid_inode}
 
@@ -93,10 +106,49 @@ class FakeProbe(collector.Probe):
         return self.inodes[name]
 
 
-class FakeMachine:
-    """A temporary root directory, an environment and a git directory for one made-up machine."""
+def interpreter_patches(system, interpreter):
+    """Make the interpreter facts the collector reads match the made-up machine, not the host that runs the tests."""
+    config = collector.sysconfig.get_config_var
+    version = f"{sys.version_info[0]}{sys.version_info[1]}"
+    if system == "Linux":
+        host_soabi = config("SOABI") or f"cpython-{version}-x86_64-linux-gnu"
+        soabi = re.sub(r"^([a-z]+-[0-9]+[a-z]*)-[a-z0-9_]+-(linux-[a-z0-9]+)$", rf"\g<1>-{interpreter}-\g<2>", host_soabi)
+        plat = f"linux-{interpreter}"
+    elif system == "Windows":
+        soabi, plat = None, {"x86_64": "win-amd64", "aarch64": "win-arm64"}[interpreter]
+    elif system == "Darwin":
+        soabi, plat = f"cpython-{version}-darwin", f"macosx-11.0-{'arm64' if interpreter == 'aarch64' else interpreter}"
+    else:
+        soabi, plat = None, f"freebsd-14.1-RELEASE-{'amd64' if interpreter == 'x86_64' else interpreter}"
+    patches = [
+        mock.patch.object(collector.sysconfig, "get_config_var", side_effect=lambda name: soabi if name == "SOABI" else config(name)),
+        mock.patch.object(collector.sysconfig, "get_platform", return_value=plat),
+        mock.patch.object(collector.sys.implementation, "_multiarch", f"{interpreter}-linux-gnu" if system == "Linux" else None, create=True),
+    ]
+    if system != "Linux":
+        patches.append(mock.patch.object(collector.os, "confstr", side_effect=ValueError("unrecognized configuration name"), create=True))
+    return patches
 
-    def __init__(self, files=None, remove=(), env=None, machine="x86_64", release="6.17.0-1022-azure", system="Linux"):
+
+@contextlib.contextmanager
+def without(module, name):
+    """Remove an attribute, such as os.getresuid on macOS, for the duration of a test."""
+    saved = getattr(module, name)
+    delattr(module, name)
+    try:
+        yield
+    finally:
+        setattr(module, name, saved)
+
+
+class FakeMachine:
+    """A temporary root directory, an environment and a git directory for one made-up machine.
+
+    `machine` is what uname reports; `interpreter` is the architecture the Python
+    build targets, which emulation and personality changes do not alter.
+    """
+
+    def __init__(self, files=None, remove=(), env=None, machine="x86_64", release="6.17.0-1022-azure", system="Linux", interpreter="x86_64"):
         self.directory = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.directory.name) / "root"
         content = dict(RUNNER_FILES if files is None else files)
@@ -117,6 +169,7 @@ class FakeMachine:
         self.patches = [
             mock.patch.object(collector.platform, "machine", return_value=machine),
             mock.patch.object(collector.platform, "release", return_value=release),
+            *interpreter_patches(system, interpreter),
         ]
         self.system = system
 
@@ -142,6 +195,23 @@ def value(fact):
     return fact["value"] if fact["provenance"] in ("observed", "inferred", "declared") else None
 
 
+def walk_provenance(node, path=""):
+    """(JSON pointer, provenance) for every fact in a record."""
+    if isinstance(node, dict):
+        if "provenance" in node:
+            yield path, node["provenance"]
+            return
+        for key, item in node.items():
+            yield from walk_provenance(item, f"{path}/{key}")
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            yield from walk_provenance(item, f"{path}/{index}")
+
+
+def unescaped_pipes(line):
+    return len(re.findall(r"(?<!\\)\|", line))
+
+
 def kinds(result):
     return [value(layer["kind"]) for layer in result["environment"]["layers"]]
 
@@ -151,6 +221,10 @@ class Case(unittest.TestCase):
         findings = validator.validate_document(result, SCHEMA, evaluate_policy=policy)
         self.assertEqual(findings.errors, [], findings.items)
         return findings
+
+    def assertFact(self, fact, expected, provenance):
+        """The value and how it was established: an inferred fact must not turn into an observed one."""
+        self.assertEqual((value(fact), fact["provenance"]), (expected, provenance), fact)
 
 
 class LinuxProbeTests(Case):
@@ -173,8 +247,12 @@ class LinuxProbeTests(Case):
         self.assertEqual(value(vm["service_manager"]["scope"]), "system")
         identity, isolation = result["workload"]["identity"], result["workload"]["isolation"]
         self.assertEqual((value(identity["uid"]), value(identity["gid"]), value(identity["superuser"])), (1001, 118, False))
+        self.assertEqual(identity["real_uid"], {"value": 1001, "provenance": "observed", "evidence": ["file:/proc/self/status#Uid"]})
+        self.assertEqual(identity["saved_uid"], {"value": 1001, "provenance": "observed", "evidence": ["file:/proc/self/status#Uid"]})
         self.assertIs(value(identity["user_namespace"]["initial"]), True)
         self.assertEqual(value(isolation["capabilities"]["effective"]), [])
+        self.assertEqual(isolation["capabilities"]["permitted"], {"value": [], "provenance": "observed", "evidence": ["file:/proc/self/status#CapPrm"]})
+        self.assertEqual(vm["os"]["kernel"], {"value": "6.17.0-1022-azure", "provenance": "observed", "evidence": ["file:/proc/sys/kernel/osrelease"]})
         self.assertEqual(len(value(isolation["capabilities"]["bounding"])), 41)
         self.assertEqual(value(isolation["seccomp"]), "disabled")
         self.assertEqual(value(isolation["apparmor"]["profile"]), "unconfined")
@@ -184,6 +262,21 @@ class LinuxProbeTests(Case):
         self.assertEqual(result["stages"]["detect"]["status"], "passed")
         self.assertEqual(result["overall"], "incomplete")
         self.assertValidRecord(result)
+
+    def test_derived_facts_keep_their_provenance(self):
+        with FakeMachine() as machine:
+            result = machine.result()
+        host, vm = result["environment"]["layers"]
+        self.assertFact(host["kind"], "host", "inferred")
+        self.assertFact(vm["kind"], "vm", "inferred")
+        self.assertFact(vm["technology"], "hyper-v", "inferred")
+        self.assertFact(result["workload"]["isolation"]["selinux"]["mode"], "disabled", "inferred")
+        self.assertFact(result["run"]["ci"]["system"], "local", "inferred")
+        python = result["workload"]["runtimes"]["python"]
+        self.assertEqual(python["gil_enabled"]["provenance"], "observed" if hasattr(sys, "_is_gil_enabled") else "inferred")
+        # The collector states its own escalation; it is the only declared fact it writes.
+        self.assertEqual(result["stages"]["detect"]["privilege"]["escalation"], {"value": "none", "provenance": "declared", "evidence": ["tool:collect-environment"]})
+        self.assertEqual([path for path, provenance in walk_provenance(result) if provenance == "declared"], ["/stages/detect/privilege/escalation"])
 
     def test_a_vmbus_names_hyper_v_when_dmi_does_not(self):
         files = dict(RUNNER_FILES)
@@ -218,10 +311,31 @@ class LinuxProbeTests(Case):
         self.assertEqual(container["os"]["kernel"]["provenance"], "not-applicable")
         self.assertEqual(container["container"]["engine_mode"]["provenance"], "unknown")
         self.assertEqual(container["container"]["privileged"]["provenance"], "unknown")
+        self.assertEqual(container["container"]["orchestration"]["name"]["provenance"], "unknown")
         self.assertValidRecord(result, policy=False)
         codes = validator.validate_document(result, SCHEMA).codes()
         self.assertIn("policy-no-privileged-container", codes)
         self.assertIn("policy-minimal-devices", codes)
+        # Docker does not tell a container whether it runs rootless, even in a user namespace of its own.
+        with FakeMachine(files) as machine:
+            result = machine.result(user_inode=4026532000)
+        self.assertEqual(result["environment"]["layers"][-1]["container"]["engine_mode"]["provenance"], "unknown")
+
+    def test_container_markers_that_disagree_name_no_engine(self):
+        # An image can hold /run/.containerenv; under Docker it does not show a Podman engine or its mode.
+        files = dict(RUNNER_FILES)
+        files.update({".dockerenv": "", "run/.containerenv": "rootless=1\n", "proc/self/cgroup": "0::/\n"})
+        with FakeMachine(files) as machine:
+            container = machine.result()["environment"]["layers"][-1]
+        self.assertEqual(container["technology"]["provenance"], "unknown")
+        self.assertIn("name different engines (docker, podman)", container["technology"]["reason"])
+        self.assertEqual(container["technology"]["evidence"], ["file:/.dockerenv", "file:/run/.containerenv"])
+        self.assertEqual(container["container"]["engine_mode"]["provenance"], "unknown")
+        for env, expected in (({"PATH": "", "container": "podman"}, "podman"), ({"PATH": "", "container": "lxc"}, None), ({"PATH": "", "container": "oci"}, "podman")):
+            with self.subTest(env=env), FakeMachine(dict(RUNNER_FILES, **{"run/.containerenv": "rootless=0\n"}), env=env) as machine:
+                container = machine.result()["environment"]["layers"][-1]
+                self.assertEqual(value(container["technology"]), expected)
+                self.assertEqual(value(container["container"]["engine_mode"]), "rootful" if expected else None)
 
     def test_a_rootless_podman_container_with_a_non_root_user(self):
         files = dict(RUNNER_FILES)
@@ -235,7 +349,7 @@ class LinuxProbeTests(Case):
             result = machine.result(user_inode=4026532000)
         container = result["environment"]["layers"][-1]
         self.assertEqual(value(container["technology"]), "podman")
-        self.assertEqual(value(container["container"]["engine_mode"]), "rootless")
+        self.assertFact(container["container"]["engine_mode"], "rootless", "inferred")
         identity = result["workload"]["identity"]
         self.assertEqual((value(identity["uid"]), value(identity["superuser"])), (1000, False))
         self.assertIs(value(identity["user_namespace"]["initial"]), False)
@@ -269,7 +383,8 @@ class LinuxProbeTests(Case):
         with FakeMachine(files, env=env, release="6.6.87.2-microsoft-standard-WSL2") as machine:
             result = machine.result()
         self.assertEqual(kinds(result), ["host", "wsl2"])
-        self.assertEqual(value(result["environment"]["layers"][0]["os"]["family"]), "windows")
+        self.assertFact(result["environment"]["layers"][0]["os"]["family"], "windows", "inferred")
+        self.assertFact(result["environment"]["layers"][1]["kind"], "wsl2", "inferred")
         self.assertNotIn("PrivateDistroName", json.dumps(result))
         self.assertValidRecord(result)
         # WSL 2 runs each distribution in its own PID namespace, so that namespace does not hide its os-release.
@@ -376,12 +491,47 @@ class LinuxProbeTests(Case):
                         self.assertEqual(probe.build_arch(), (None, None))
 
     def test_unexpected_text_is_not_recorded(self):
-        files = dict(RUNNER_FILES, **{"proc/self/attr/apparmor/current": "unconfined\x1b]0;title\x07\n"})
-        with FakeMachine(files, release="6.17.0\x1b[31m") as machine:
+        files = dict(RUNNER_FILES, **{"proc/self/attr/apparmor/current": "unconfined\x1b]0;title\x07\n", "proc/sys/kernel/osrelease": "6.17.0\x1b[31m\n"})
+        with FakeMachine(files) as machine:
             result = machine.result()
         self.assertEqual(result["environment"]["layers"][1]["os"]["kernel"]["provenance"], "unknown")
         self.assertEqual(result["workload"]["isolation"]["apparmor"]["profile"]["provenance"], "unknown")
         self.assertValidRecord(result)
+        # os-release values that fail their checks are not recorded.
+        for text, field in (("ID=ubuntu;reboot\nVERSION_ID=24.04\n", "name"), ("ID=ubuntu\nVERSION_ID=\"24.04\x1b[2J\"\n", "version")):
+            with self.subTest(field=field), FakeMachine(dict(RUNNER_FILES, **{"etc/os-release": text})) as machine:
+                fact = machine.result()["environment"]["layers"][1]["os"][field]
+                self.assertEqual(fact["provenance"], "unknown")
+                self.assertIn("os-release has no usable", fact["reason"])
+
+    def test_the_kernel_release_comes_from_proc(self):
+        # uname follows personality changes (UNAME26) and qemu-user, so it is used only without the file.
+        with FakeMachine(release="2.6.97") as machine:
+            self.assertFact(machine.result()["environment"]["layers"][1]["os"]["kernel"], "6.17.0-1022-azure", "observed")
+        with FakeMachine(remove=("proc/sys/kernel/osrelease",), release="6.17.0-1022-azure") as machine:
+            kernel = machine.result()["environment"]["layers"][1]["os"]["kernel"]
+        self.assertEqual(kernel, {"value": "6.17.0-1022-azure", "provenance": "inferred", "evidence": ["python:platform.release"]})
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(signal, "alarm"), "needs FIFOs and SIGALRM")
+    def test_a_fifo_is_not_read(self):
+        # A FIFO in place of a file must not block the probe; SIGALRM ends the test run if it does.
+        files = dict(RUNNER_FILES)
+        files.pop("etc/os-release")
+        with FakeMachine(files) as machine:
+            (machine.root / "etc").mkdir()
+            os.mkfifo(machine.root / "etc" / "os-release")
+            os.mkfifo(machine.git / "packed-refs")
+            (machine.git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            signal.alarm(20)
+            try:
+                result = machine.result()
+                text, reason = machine.probe().read("/etc/os-release")
+            finally:
+                signal.alarm(0)
+        self.assertEqual((text, reason), (None, "/etc/os-release is not a regular file"))
+        self.assertEqual(result["probe_errors"], [])
+        self.assertEqual(result["environment"]["layers"][1]["os"]["name"]["provenance"], "unknown")
+        self.assertEqual(result["run"]["revision"]["tested_sha"]["provenance"], "unknown")
 
     def test_a_container_without_markers_is_not_read_as_the_vm(self):
         files = dict(RUNNER_FILES, **{"proc/self/cgroup": "0::/\n", "etc/os-release": "ID=debian\nVERSION_ID=\"12\"\n"})
@@ -472,7 +622,7 @@ class LinuxProbeTests(Case):
             result = machine.result()
         container = result["environment"]["layers"][-1]
         self.assertEqual(value(container["kind"]), "container")
-        self.assertEqual(value(container["container"]["orchestration"]["name"]), "kubernetes")
+        self.assertFact(container["container"]["orchestration"]["name"], "kubernetes", "inferred")
         text = json.dumps(result)
         self.assertNotIn("10.96.0.1", text)
         self.assertNotIn("cri-containerd-0123", text)
@@ -513,11 +663,15 @@ class IsolationTests(Case):
             self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), True)
         with mock.patch.object(collector.os, "access", return_value=False):
             self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), False)
-        root = dict(files, **{"proc/self/status": status(uid=0, cap_eff=FULL)})
+        # access(2) checks the real user ID, so root in any of the IDs, or a capability, says nothing about delegation.
+        for label, text in (("root", status(uid=0, cap_eff=FULL)), ("real root", status(real_uid=0)), ("saved root", status(saved_uid=0)),
+                            ("permitted capability", status(cap_prm="0000000000000001"))):
+            with self.subTest(label), mock.patch.object(collector.os, "access", return_value=True):
+                self.assertEqual(self.isolation(dict(files, **{"proc/self/status": text}))["cgroup"]["delegated"]["provenance"], "unknown")
+        # /sys/fs/cgroup/../../../etc is the made-up root's etc, which exists; the '..' check alone refuses it.
+        escape = dict(files, **{"proc/self/cgroup": "0::/../../../etc\n"})
         with mock.patch.object(collector.os, "access", return_value=True):
-            self.assertEqual(self.isolation(root)["cgroup"]["delegated"]["provenance"], "unknown")
-        escape = dict(files, **{"proc/self/cgroup": "0::/../../etc\n"})
-        self.assertEqual(self.isolation(escape)["cgroup"]["delegated"]["provenance"], "unknown")
+            self.assertEqual(self.isolation(escape)["cgroup"]["delegated"]["provenance"], "unknown")
 
     def test_security_modules(self):
         selinux = dict(RUNNER_FILES)
@@ -558,6 +712,22 @@ class IsolationTests(Case):
         self.assertEqual(collector.decode_capabilities("0000020000000001"), ["cap_chown", "cap_41"])
         files = dict(RUNNER_FILES, **{"proc/self/status": status(cap_eff="0000000000002000")})
         self.assertEqual(value(self.isolation(files)["capabilities"]["effective"]), ["cap_net_raw"])
+        # A permitted capability can be raised again, so the policy reads the permitted set too.
+        files = dict(RUNNER_FILES, **{"proc/self/status": status(cap_prm="0000000000002000")})
+        capabilities = self.isolation(files)["capabilities"]
+        self.assertEqual((value(capabilities["effective"]), value(capabilities["permitted"])), ([], ["cap_net_raw"]))
+        with FakeMachine(files) as machine:
+            self.assertIn("policy-minimal-capabilities", validator.validate_document(machine.result(), SCHEMA).codes())
+
+    def test_a_process_that_can_regain_root(self):
+        for label, text in (("real", status(real_uid=0)), ("saved", status(saved_uid=0))):
+            with self.subTest(label), FakeMachine(dict(RUNNER_FILES, **{"proc/self/status": text})) as machine:
+                result = machine.result()
+                identity = result["workload"]["identity"]
+                self.assertIs(value(identity["superuser"]), False)
+                self.assertEqual(value(identity[f"{label}_uid"]), 0)
+                findings = validator.validate_document(result, SCHEMA)
+                self.assertIn(("policy-app-non-root", f"/workload/identity/{label}_uid"), [(code, path) for _, code, path, _ in findings.errors])
 
     def test_missing_files_give_unknown_values_without_errors(self):
         with FakeMachine({}) as machine:
@@ -586,17 +756,46 @@ class IsolationTests(Case):
 
 
 class OtherSystemTests(Case):
+    # Off Linux the collector does not measure the layer kind, elevation or capabilities, so these rules fail.
+    UNMEASURED = ["policy-app-non-root", "policy-minimal-capabilities", "policy-minimal-devices", "policy-no-privileged-container"]
+
     def test_a_system_other_than_linux(self):
-        with FakeMachine(system="Windows") as machine:
+        with FakeMachine(system="Windows", interpreter="aarch64") as machine:
             result = machine.result()
         layers = result["environment"]["layers"]
         self.assertEqual(len(layers), 1)
         self.assertEqual(value(layers[0]["os"]["family"]), "windows")
         self.assertEqual(layers[0]["kind"]["provenance"], "unknown")
         self.assertEqual(result["workload"]["isolation"]["seccomp"]["provenance"], "unknown")
+        identity = result["workload"]["identity"]
+        self.assertEqual((identity["superuser"]["provenance"], identity["real_uid"]["provenance"], identity["saved_uid"]["provenance"]), ("unknown", "not-applicable", "not-applicable"))
         self.assertEqual(result["probe_errors"], [])
-        findings = validator.validate_document(result, SCHEMA, evaluate_policy=False)
-        self.assertEqual([item for item in findings.errors if item[1] == "schema"], [])
+        python = result["workload"]["runtimes"]["python"]
+        self.assertFact(python["arch"], "aarch64", "observed")
+        self.assertEqual(python["libc"]["provenance"], "unknown")
+        self.assertValidRecord(result, policy=False)
+        findings = validator.validate_document(result, SCHEMA)
+        self.assertEqual(sorted({code for code in findings.codes() if code[len("policy-"):] in validator.RULE_SCOPE}), self.UNMEASURED)
+        self.assertIn("policy-engine-rootless", findings.codes("warning"))
+
+    def test_user_ids_off_linux(self):
+        with FakeMachine(system="FreeBSD") as machine:
+            identity = machine.result()["workload"]["identity"]
+        self.assertEqual([identity[name]["evidence"] for name in ("uid", "real_uid", "saved_uid")], [["python:os.getresuid"]] * 3)
+        # macOS has no getresuid: execve(2) saved the effective user ID, so the saved one is inferred.
+        with without(collector.os, "getresuid"), mock.patch.object(collector.os, "geteuid", return_value=501), \
+                mock.patch.object(collector.os, "getuid", return_value=501), FakeMachine(system="Darwin", interpreter="aarch64") as machine:
+            result = machine.result()
+        identity = result["workload"]["identity"]
+        self.assertEqual(identity["uid"], {"value": 501, "provenance": "observed", "evidence": ["python:os.geteuid"]})
+        self.assertEqual(identity["real_uid"], {"value": 501, "provenance": "observed", "evidence": ["python:os.getuid"]})
+        self.assertEqual(identity["saved_uid"], {"value": 501, "provenance": "inferred", "evidence": ["python:os.geteuid"]})
+        self.assertFact(identity["superuser"], False, "observed")
+        self.assertEqual(identity["user_namespace"]["initial"]["provenance"], "unknown")
+        self.assertValidRecord(result, policy=False)
+        codes = validator.validate_document(result, SCHEMA).codes()
+        self.assertNotIn("policy-app-non-root", codes)
+        self.assertIn("policy-minimal-capabilities", codes)
 
 
 class RunEvidenceTests(Case):
@@ -627,7 +826,8 @@ class RunEvidenceTests(Case):
                 result = machine.result()
         run = result["run"]
         self.assertEqual(value(run["ci"]["system"]), "github-actions")
-        self.assertEqual(value(run["ci"]["run_url"]), "https://github.com/P-R-N-D/Claus-AI/actions/runs/123456")
+        self.assertFact(run["ci"]["system"], "github-actions", "observed")
+        self.assertFact(run["ci"]["run_url"], "https://github.com/P-R-N-D/Claus-AI/actions/runs/123456", "inferred")
         self.assertEqual(value(run["ci"]["run_attempt"]), 2)
         self.assertEqual(value(run["revision"]["event_sha"]), "a" * 40)
         self.assertEqual(value(run["revision"]["pr_head_sha"]), "b" * 40)
@@ -665,6 +865,15 @@ class RunEvidenceTests(Case):
                 result = machine.result()
             self.assertIn("could not be read", result["run"]["revision"]["pr_head_sha"]["reason"])
             self.assertEqual(result["probe_errors"], [])
+            target = {"pull_request": {"head": {"sha": "b" * 40}, "base": {"sha": "c" * 40}}}
+            with FakeMachine(env=self.run_env(directory, "pull_request_target", target)) as machine:
+                revision = machine.result()["run"]["revision"]
+            self.assertEqual((value(revision["pr_head_sha"]), value(revision["pr_base_sha"])), ("b" * 40, "c" * 40))
+            no_path = {key: item for key, item in self.run_env(directory, "pull_request", {}).items() if key != "GITHUB_EVENT_PATH"}
+            with FakeMachine(env=no_path) as machine:
+                result = machine.result()
+            self.assertEqual(result["run"]["revision"]["pr_head_sha"], {"value": None, "provenance": "unknown", "reason": "GITHUB_EVENT_PATH is not set"})
+            self.assertIn("ci-evidence", validator.validate_document(result, SCHEMA).codes())
             odd = dict(push, GITHUB_REPOSITORY="owner/repo|x", RUNNER_ENVIRONMENT="custom", GITHUB_SHA="not-a-sha")
             with FakeMachine(env=odd) as machine:
                 ci = machine.result()["run"]
@@ -708,24 +917,28 @@ class RunEvidenceTests(Case):
         for name in collector.PRESENCE_ONLY:
             with self.subTest(name), self.assertRaises(collector.ProbeError):
                 probe.env_value(name, ".*")
+        # WSL 2 is recognised from the kernel release; the WSL variables are not read.
+        for name in ("WSL_DISTRO_NAME", "WSL_INTEROP"):
+            with self.subTest(name), self.assertRaises(collector.ProbeError):
+                collector.Probe(env={name: "x"}).env(name)
 
 
 class NodeTests(Case):
-    def fake_node(self, directory, output, status=0):
+    def fake_node(self, directory, output, status=0, before=""):
         script = pathlib.Path(directory) / "node"
         leak = pathlib.Path(directory) / "leak"
         script.write_text(
             "#!/bin/sh\n"
             f'if [ -n "${{SENTINEL_SECRET+x}}" ] || [ -n "${{HOME+x}}" ]; then echo leaked > "{leak}"; fi\n'
-            f"printf '%s' '{output}'\nexit {status}\n",
+            f"{before}printf '%s' '{output}'\nexit {status}\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
         return leak
 
-    def node(self, output, status=0, reference=("x86_64", "x86")):
+    def node(self, output, status=0, reference=("x86_64", "x86"), before=""):
         with tempfile.TemporaryDirectory() as directory, FakeMachine(env={"PATH": directory}) as machine:
-            leak = self.fake_node(directory, output, status)
+            leak = self.fake_node(directory, output, status, before)
             with mock.patch.dict(os.environ, {"SENTINEL_SECRET": "x", "HOME": "/home/private"}):
                 probe = machine.probe(probe_node=True)
                 facts = probe.guard("node", lambda: probe.node(reference), collector.node_fallback)
@@ -754,6 +967,22 @@ class NodeTests(Case):
         self.assertEqual(errors, [{"probe": "node", "error": "JSONDecodeError raised by the node probe"}])
         facts, errors = self.node('{"v":"24.21.0; rm -rf /","m":"x","a":"x64","p":"linux"}')
         self.assertEqual((facts["version"]["provenance"], facts["modules_abi"]["provenance"]), ("unknown", "unknown"))
+        for napi, platform_name, arch in (("10; x", "linux", "x64"), ("10", "Linux OS", "x64"), ("10", "linux", "x64 && id")):
+            facts, _ = self.node(f'{{"v":"24.21.0","m":"137","n":"{napi}","a":"{arch}","p":"{platform_name}"}}')
+            with self.subTest(napi=napi, platform=platform_name, arch=arch):
+                self.assertIn("unknown", (facts["napi_version"]["provenance"], facts["platform"]["provenance"], facts["arch"]["provenance"]))
+
+    @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
+    def test_node_output_and_time_are_bounded(self):
+        # Only one byte past the limit is read; node is then stopped.
+        facts, errors = self.node("x" * (collector.NODE_OUTPUT_LIMIT + 1) + "y" * 1000000)
+        self.assertEqual((facts["version"]["reason"], errors), (f"node wrote more than {collector.NODE_OUTPUT_LIMIT} bytes", []))
+        # The shell's own child holds stdout open, so stopping only the shell would leave the read waiting.
+        started = time.monotonic()
+        with mock.patch.object(collector, "NODE_TIMEOUT", 0.5):
+            facts, errors = self.node('{"v":"24.21.0"}', before="sleep 30\n")
+        self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 0.5 seconds", []))
+        self.assertLess(time.monotonic() - started, 20)
 
     def test_node_absent_or_skipped(self):
         with tempfile.TemporaryDirectory() as directory, FakeMachine(env={"PATH": directory}) as machine:
@@ -806,7 +1035,7 @@ class CommandTests(Case):
     def test_a_record_that_looks_like_it_holds_a_secret_is_not_written(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "result.json"
-            with mock.patch.object(collector.platform, "release", return_value="6.17.0-ghp_" + "A" * 36):
+            with mock.patch.object(collector.platform, "python_version", return_value="3.12.15-ghp_" + "A" * 36):
                 code, text = self.run_main("--output", output, "--no-node")
             self.assertEqual(code, 2)
             self.assertIn("looks like a GitHub token; it was not written", text)
@@ -816,6 +1045,34 @@ class CommandTests(Case):
     def test_the_secret_shapes_match_the_validator(self):
         self.assertEqual([(label, shape.pattern) for label, shape in collector.SECRET_SHAPES],
                          [(label, shape.pattern) for label, shape in validator.SECRET_SHAPES])
+
+    # One sample per shape, built from parts so the repository holds no token-shaped literal.
+    SECRET_SAMPLES = (
+        *(("gh" + kind + "_" + "A" * 36) for kind in "opsur"),
+        "github" + "_pat_" + "A" * 22,
+        "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+        "AS" + "IA" + "ABCDEFGHIJKLMNOP",
+        "-----BEGIN " + "RSA PRIVATE KEY-----",
+        *(("xo" + "x" + kind + "-" + "A" * 12) for kind in "abposr"),
+        "ey" + "J" + "A" * 10 + ".ey" + "J" + "B" * 10 + ".",
+    )
+
+    def test_every_secret_shape_is_refused(self):
+        for label, shape in collector.SECRET_SHAPES:
+            with self.subTest(shape=shape.pattern):
+                self.assertTrue(any(shape.search(sample) for sample in self.SECRET_SAMPLES), f"no sample for {label}")
+        record = validator.load_json(ROOT / "tests" / "compatibility" / "fixtures" / "linux-x64-vm.result.json")
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "result.json"
+            for sample in self.SECRET_SAMPLES:
+                with self.subTest(sample=sample[:6]):
+                    code, text = self.run_main("--output", output, "--no-node", "--stage", "install=failed", "--stage-reason", f"install=see {sample}")
+                    self.assertEqual(code, 2)
+                    self.assertNotIn(sample, text)
+                    self.assertFalse(output.exists())
+                    document = json.loads(json.dumps(record))
+                    document["stages"]["install"]["reason"] = f"see {sample}"
+                    self.assertIn("secret-like-value", validator.validate_document(document, SCHEMA).codes())
 
     def test_a_probe_failure_exits_1_after_writing_the_record(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -845,9 +1102,17 @@ class CommandTests(Case):
     def test_the_summary_escapes_table_cells(self):
         self.assertEqual(collector.markdown_cell("a|b`c\nd"), "a\\|b\\`c d")
         self.assertEqual(collector.markdown_cell("[x](https://example.invalid) <b>\\"), "\\[x\\]\\(https://example.invalid\\) \\<b\\>\\\\")
-        with FakeMachine() as machine:
-            lines = collector.summary_lines(machine.result())
-        self.assertTrue(all(line.count("|") >= 3 for line in lines if line.startswith("| ")))
+        # A VERSION_ID with Markdown in it passes the printable check, so the summary must escape it.
+        hostile = 'ID=ubuntu\nVERSION_ID="24.04|**x**](https://example.invalid)`<b>"\n'
+        with FakeMachine(dict(RUNNER_FILES, **{"etc/os-release": hostile})) as machine:
+            result = machine.result()
+        self.assertEqual(value(result["environment"]["layers"][1]["os"]["version"]), "24.04|**x**](https://example.invalid)`<b>")
+        rows = [line for line in collector.summary_lines(result) if line.startswith("| ")]
+        self.assertTrue(any("24.04" in row for row in rows))
+        for row in rows:
+            with self.subTest(row=row[:30]):
+                self.assertEqual(unescaped_pipes(row), 3)
+                self.assertIsNone(re.search(r"(?<!\\)\]\(|(?<!\\)[`<*]", row.replace("\\\\", "")))
 
 
 class ThisMachineTests(Case):
@@ -899,6 +1164,26 @@ class ThisMachineTests(Case):
         self.assertValidRecord(result, policy=False)
 
 
+class SharedTableTests(unittest.TestCase):
+    """The collector and the validator each keep a copy of these tables; the copies must agree."""
+
+    def test_architecture_names(self):
+        self.assertEqual(collector.ARCH_ALIASES, validator.ARCH_ALIASES)
+
+    def test_platform_tags(self):
+        for plat in ("linux-x86_64", "linux-aarch64", "linux-armv7l", "linux-i686", "win32", "win-amd64", "win-arm64", "win-arm32",
+                     "macosx-11.0-arm64", "macosx-10.9-x86_64", "macosx-10.9-universal2", "freebsd-14.1-RELEASE-amd64",
+                     "freebsd-14.1-RELEASE-arm64", "cygwin-3.5.4-x86_64", "linux"):
+            with self.subTest(plat=plat):
+                self.assertEqual(collector.split_platform(plat), validator.python_platform_target(plat))
+
+    def test_stages_and_the_overall_verdict(self):
+        self.assertEqual(collector.STAGES, validator.STAGES)
+        for statuses in itertools.product(collector.STATUSES, repeat=len(collector.STAGES)):
+            stages = {name: {"status": status} for name, status in zip(collector.STAGES, statuses)}
+            self.assertEqual(collector.overall_of(stages), validator.overall_of(stages), statuses)
+
+
 class SourceTests(unittest.TestCase):
     """The collector's own code may not reach for host names, account names, the network or the whole environment."""
 
@@ -923,7 +1208,7 @@ class SourceTests(unittest.TestCase):
                 imported.update(alias.name.split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imported.add((node.module or "").split(".")[0])
-        allowed = {"argparse", "datetime", "json", "os", "pathlib", "platform", "re", "shutil", "struct", "subprocess", "sys", "sysconfig"}
+        allowed = {"argparse", "datetime", "json", "os", "pathlib", "platform", "re", "shutil", "signal", "stat", "struct", "subprocess", "sys", "sysconfig", "threading"}
         self.assertEqual(imported - allowed, set())
 
     def test_no_forbidden_calls(self):
@@ -937,11 +1222,13 @@ class SourceTests(unittest.TestCase):
     def test_one_subprocess_without_a_shell(self):
         calls = [node for node in ast.walk(self.tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                  and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"]
-        self.assertEqual([call.func.attr for call in calls], ["run"])
+        self.assertEqual([call.func.attr for call in calls], ["Popen"])
         keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
         self.assertNotIn("shell", keywords)
         self.assertIsInstance(keywords["env"], ast.Dict)
         self.assertEqual(keywords["env"].keys, [])
+        # stderr is discarded, and stdout is read through the bounded reader in Probe.node.
+        self.assertEqual(ast.unparse(keywords["stderr"]), "subprocess.DEVNULL")
 
     def test_files_are_opened_for_reading_except_the_outputs(self):
         for node in ast.walk(self.tree):

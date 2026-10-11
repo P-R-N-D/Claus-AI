@@ -193,11 +193,17 @@
           },
           "name": {
             "value": "fedora",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side VM /etc/os-release ID"
+            ]
           },
           "version": {
             "value": "42",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side VM /etc/os-release VERSION_ID"
+            ]
           },
           "kernel": {
             "value": "6.14.4-300.fc42.x86_64",
@@ -224,11 +230,17 @@
         "service_manager": {
           "name": {
             "value": "systemd",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side VM /run/systemd/system"
+            ]
           },
           "scope": {
             "value": "system",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side VM /proc/1/comm"
+            ]
           }
         }
       },
@@ -314,29 +326,44 @@
             "value": "rootless",
             "provenance": "observed",
             "evidence": [
-              "synthetic:/run/.containerenv rootless=1"
+              "synthetic:engine-side podman info: host.security.rootless"
             ]
           },
           "privileged": {
             "value": false,
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side podman inspect: HostConfig.Privileged"
+            ]
           },
           "devices": {
             "value": [],
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side podman inspect: HostConfig.Devices"
+            ]
           },
           "orchestration": {
             "name": {
               "value": "quadlet",
-              "provenance": "declared"
+              "provenance": "observed",
+              "evidence": [
+                "synthetic:engine-side systemctl --user show: SourcePath is a .container unit"
+              ]
             },
             "version": {
               "value": "5.4",
-              "provenance": "declared"
+              "provenance": "observed",
+              "evidence": [
+                "synthetic:engine-side podman version"
+              ]
             },
             "scope": {
               "value": "user",
-              "provenance": "declared"
+              "provenance": "observed",
+              "evidence": [
+                "synthetic:engine-side systemctl --user show"
+              ]
             }
           }
         }
@@ -353,6 +380,20 @@
         ]
       },
       "uid": {
+        "value": 1000,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "real_uid": {
+        "value": 1000,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "saved_uid": {
         "value": 1000,
         "provenance": "observed",
         "evidence": [
@@ -408,6 +449,13 @@
           "provenance": "observed",
           "evidence": [
             "synthetic:/proc/self/status CapEff"
+          ]
+        },
+        "permitted": {
+          "value": [],
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/status CapPrm"
           ]
         },
         "bounding": {

@@ -110,7 +110,10 @@
         "label": "aarch64 GPU node",
         "kind": {
           "value": "host",
-          "provenance": "declared"
+          "provenance": "inferred",
+          "evidence": [
+            "synthetic:engine-side kubectl get node: no hypervisor in node info"
+          ]
         },
         "technology": {
           "value": null,
@@ -127,11 +130,17 @@
           },
           "name": {
             "value": "ubuntu",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side kubectl get node: status.nodeInfo.osImage"
+            ]
           },
           "version": {
             "value": "24.04",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side kubectl get node: status.nodeInfo.osImage"
+            ]
           },
           "kernel": {
             "value": "6.11.0-1016-nvidia",
@@ -151,17 +160,26 @@
           },
           "execution": {
             "value": "native",
-            "provenance": "declared"
+            "provenance": "inferred",
+            "evidence": [
+              "synthetic:engine-side kubectl get node: status.nodeInfo.architecture"
+            ]
           }
         },
         "service_manager": {
           "name": {
             "value": "systemd",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side node /run/systemd/system"
+            ]
           },
           "scope": {
             "value": "system",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side node /proc/1/comm"
+            ]
           }
         }
       },
@@ -177,7 +195,10 @@
         },
         "technology": {
           "value": "containerd",
-          "provenance": "declared"
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:engine-side kubectl get node: status.nodeInfo.containerRuntimeVersion"
+          ]
         },
         "os": {
           "family": {
@@ -239,17 +260,26 @@
         "container": {
           "engine_mode": {
             "value": "rootful",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side containerd runs as root on the node"
+            ]
           },
           "privileged": {
             "value": false,
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side kubectl get pod: spec.containers[0].securityContext.privileged"
+            ]
           },
           "devices": {
             "value": [
               "nvidia-gpu"
             ],
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side kubectl get pod: spec.containers[0].resources.limits"
+            ]
           },
           "orchestration": {
             "name": {
@@ -261,7 +291,10 @@
             },
             "version": {
               "value": "1.33",
-              "provenance": "declared"
+              "provenance": "observed",
+              "evidence": [
+                "synthetic:engine-side kubectl version: serverVersion"
+              ]
             },
             "scope": {
               "value": null,
@@ -283,6 +316,20 @@
         ]
       },
       "uid": {
+        "value": 1000,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "real_uid": {
+        "value": 1000,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "saved_uid": {
         "value": 1000,
         "provenance": "observed",
         "evidence": [
@@ -333,6 +380,13 @@
           "provenance": "observed",
           "evidence": [
             "synthetic:/proc/self/status CapEff"
+          ]
+        },
+        "permitted": {
+          "value": [],
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/status CapPrm"
           ]
         },
         "bounding": {

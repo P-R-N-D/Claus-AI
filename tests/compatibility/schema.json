@@ -302,7 +302,7 @@
       }
     },
     "fact_execution": {
-      "description": "native: instructions run on the hardware CPU; emulated: some layer translates them.",
+      "description": "native: no translation was found between the process and the CPU it runs on (no user-mode emulation, and an architecture the layers around it run natively); emulated: some layer translates the instructions. A system that its hypervisor emulates whole looks native from inside; see docs/CI-MATRIX.md \"CPU execution\".",
       "type": "object",
       "required": [
         "value",
@@ -726,11 +726,13 @@
       }
     },
     "identity": {
-      "description": "Who the process runs as, inside its own user namespace.",
+      "description": "Who the process runs as. superuser: effective UID 0 on Linux (in the process's own user namespace), macOS and FreeBSD; on Windows, an elevated token, membership of Administrators, or SYSTEM. real_uid and saved_uid show whether a non-root process could switch back to UID 0; they are not-applicable on Windows.",
       "type": "object",
       "required": [
         "superuser",
         "uid",
+        "real_uid",
+        "saved_uid",
         "gid",
         "user_namespace"
       ],
@@ -740,6 +742,12 @@
           "$ref": "#/$defs/fact_boolean"
         },
         "uid": {
+          "$ref": "#/$defs/fact_integer"
+        },
+        "real_uid": {
+          "$ref": "#/$defs/fact_integer"
+        },
+        "saved_uid": {
           "$ref": "#/$defs/fact_integer"
         },
         "gid": {
@@ -783,11 +791,15 @@
           "type": "object",
           "required": [
             "effective",
+            "permitted",
             "bounding"
           ],
           "additionalProperties": false,
           "properties": {
             "effective": {
+              "$ref": "#/$defs/fact_slug_list"
+            },
+            "permitted": {
               "$ref": "#/$defs/fact_slug_list"
             },
             "bounding": {
@@ -1211,6 +1223,18 @@
               },
               "maxItems": 7
             },
+            "escalations": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "sudo",
+                  "root-login",
+                  "setuid",
+                  "other"
+                ]
+              },
+              "maxItems": 4
+            },
             "layers": {
               "type": "array",
               "items": {
@@ -1371,6 +1395,26 @@
         }
       }
     },
+    "runner": {
+      "description": "Run-level conditions a profile declares, compared with run.ci of each result checked against it.",
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "properties": {
+        "runner_environment": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "runner_os": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "runner_arch": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "image_os": {
+          "$ref": "#/$defs/fact_string"
+        }
+      }
+    },
     "profile": {
       "description": "A declared lane: what its environment is meant to be and which policy applies. Not a measurement.",
       "type": "object",
@@ -1417,6 +1461,9 @@
             "$ref": "#/$defs/evidence_source"
           },
           "maxItems": 16
+        },
+        "runner": {
+          "$ref": "#/$defs/runner"
         },
         "required_stages": {
           "type": "array",

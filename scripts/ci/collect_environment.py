@@ -10,7 +10,11 @@ The collector reads the following, and nothing else:
 - The environment variables in ENV_ALLOWLIST.
 - The pull request head and base in the GitHub Actions event file.
 - The checkout's .git/HEAD, and the loose ref or packed-refs line it points to.
-- The output of `node -p`, run with an empty environment.
+- The first 4 KiB that `node -p` writes, run with an empty environment and
+  stopped after 30 seconds.
+
+Files are read only when they are regular files, and are opened so that a FIFO
+cannot block the probe.
 
 It uses no network, never escalates privileges, and writes only the output file
 and the optional summary. It records no host name, account name, home
@@ -18,14 +22,18 @@ directory, network address or other environment variable. It refuses --stage
 values, and does not write a record, that look like a token or a private key.
 
 On Linux it fills in the layers, identity and isolation facts. On other systems
-it records the OS family, the user and group IDs where os.geteuid exists, the
-Python and Node runtimes and the run, and leaves the layer and isolation facts
-unknown.
+it records the OS family, the user and group IDs where os.getresuid or
+os.geteuid exists, the Python and Node runtimes and the run, and leaves the
+layer kind and the isolation facts unknown, so the least-privilege policy fails
+there until a probe measures them.
 
 Each value it records is marked in one of these ways:
 
 - observed: read on this machine. The evidence names the file, variable or call.
 - inferred: derived from evidence that is named.
+- declared: stated, not measured. The collector declares only the detect
+  stage's escalation (none: this script never changes its privileges) and the
+  escalation a --stage-escalation option gives.
 - unknown or not-applicable: with the reason.
 
 An absent or unreadable file gives an unknown value. It is not an error. An
@@ -58,10 +66,13 @@ import pathlib
 import platform
 import re
 import shutil
+import signal
+import stat
 import struct
 import subprocess
 import sys
 import sysconfig
+import threading
 
 COLLECTOR = {"name": "collect-environment", "version": 1}
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -74,13 +85,13 @@ ENV_ALLOWLIST = frozenset({
     "GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_SHA", "GITHUB_REF",
     "GITHUB_REPOSITORY", "GITHUB_SERVER_URL", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
     "GITHUB_WORKFLOW_REF", "GITHUB_JOB", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH",
-    "ImageOS", "ImageVersion", "container", "KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME",
-    "WSL_INTEROP", "PATH", "_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH",
+    "ImageOS", "ImageVersion", "container", "KUBERNETES_SERVICE_HOST", "PATH",
+    "_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH",
     "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER",
 })
 # sysconfig reads these even under python -I; when one is set, its values are not recorded.
 SYSCONFIG_OVERRIDES = ("_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH")
-PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME", "WSL_INTEROP", "PATH", "GITHUB_EVENT_PATH", "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER", *SYSCONFIG_OVERRIDES})
+PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "PATH", "GITHUB_EVENT_PATH", "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER", *SYSCONFIG_OVERRIDES})
 
 STAGES = ("detect", "install", "initialize", "execute", "correctness", "security", "performance")
 STATUSES = ("passed", "failed", "blocked", "not-run", "not-applicable")
@@ -134,6 +145,8 @@ DMI_VENDORS = (
 )
 CONTAINER_TECHNOLOGIES = {"docker": "docker", "podman": "podman", "lxc": "lxc", "lxc-libvirt": "lxc", "systemd-nspawn": "systemd-nspawn", "oci": None}
 NODE_EXPRESSION = "JSON.stringify({v:process.versions.node,m:process.versions.modules,n:process.versions.napi||null,a:process.arch,p:process.platform})"
+NODE_OUTPUT_LIMIT = 4096
+NODE_TIMEOUT = 30
 
 
 def observed(value, *evidence):
@@ -191,10 +204,10 @@ def execution_fact(arch, arch_evidence, reference):
     /proc/cpuinfo of another architecture family shows emulation: qemu-user
     synthesises an Arm /proc/cpuinfo, so a match does not show native execution.
     """
-    kernel_arch, cpu_family = reference
-    arch_evidence = [arch_evidence] if isinstance(arch_evidence, str) else list(arch_evidence)
     if arch is None:
         return unknown("the architecture is not known")
+    kernel_arch, cpu_family = reference
+    arch_evidence = [arch_evidence] if isinstance(arch_evidence, str) else list(arch_evidence)
     if kernel_arch is not None:
         if arch != kernel_arch and not {arch, kernel_arch} <= KNOWN_ARCHES:
             return unknown(f"{arch} on a {kernel_arch} kernel is outside the documented architectures")
@@ -210,6 +223,24 @@ def execution_fact(arch, arch_evidence, reference):
 
 class ProbeError(Exception):
     pass
+
+
+class NotRegularFile(OSError):
+    pass
+
+
+def read_regular(path, limit):
+    """Read at most `limit` bytes of a regular file.
+
+    O_NONBLOCK keeps a FIFO from blocking the open, and anything that is not a
+    regular file (a FIFO, socket, device or directory) is refused before it is
+    read. The /proc and /sys files the probe reads are regular files.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_BINARY", 0)
+    with open(os.open(path, flags), "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise NotRegularFile(f"{path} is not a regular file")
+        return handle.read(limit)
 
 
 class Probe:
@@ -247,14 +278,13 @@ class Probe:
     def read(self, absolute, limit=65536):
         """Return (text, None), or (None, reason) when the file is absent or unreadable."""
         try:
-            with open(self.path(absolute), "rb") as handle:
-                data = handle.read(limit)
+            data = read_regular(self.path(absolute), limit)
         except FileNotFoundError:
             return None, f"{absolute} is absent"
         except PermissionError:
             return None, f"{absolute} is not readable by this user"
-        except IsADirectoryError:
-            return None, f"{absolute} is a directory"
+        except NotRegularFile:
+            return None, f"{absolute} is not a regular file"
         except OSError as exc:
             return None, f"{absolute} could not be read ({type(exc).__name__})"
         return data.decode("utf-8", "replace"), None
@@ -350,15 +380,19 @@ class Probe:
         return "wsl1" if text.endswith("-Microsoft") else "microsoft"
 
     def container_signals(self):
-        """Return (technology or None, evidence list, /run/.containerenv values)."""
-        evidence, technology, containerenv = [], None, {}
+        """Return (the engines the markers name, evidence list, /run/.containerenv values).
+
+        Every marker is a file or variable inside the container, which the image
+        can also supply, so the caller names an engine only when the markers agree.
+        """
+        evidence, named, containerenv = [], set(), {}
         if self.exists("/.dockerenv"):
             evidence.append("file:/.dockerenv")
-            technology = "docker"
+            named.add("docker")
         text, _ = self.read("/run/.containerenv", 4096)
         if text is not None:
             evidence.append("file:/run/.containerenv")
-            technology = "podman"
+            named.add("podman")
             for line in text.splitlines():
                 key, _, value = line.partition("=")
                 if key in ("engine", "rootless"):
@@ -369,17 +403,18 @@ class Probe:
                                 ("env:SINGULARITY_CONTAINER", self.env("SINGULARITY_CONTAINER") is not None)):
             if present:
                 evidence.append(source)
-                technology = technology or "apptainer"
+                named.add("apptainer")
         for source, value in (("env:container", self.env("container")), ("file:/run/systemd/container", (self.read("/run/systemd/container", 256)[0] or "").strip())):
             if value:
                 evidence.append(source)
-                technology = technology or CONTAINER_TECHNOLOGIES.get(value)
+                if CONTAINER_TECHNOLOGIES.get(value):
+                    named.add(CONTAINER_TECHNOLOGIES[value])
         cgroup, _ = self.read("/proc/self/cgroup", 16384)
         if cgroup and re.search(r"/(docker|libpod|kubepods|lxc)[/.-]", cgroup):
             evidence.append("file:/proc/self/cgroup#path")
         if self.env("KUBERNETES_SERVICE_HOST") is not None:
             evidence.append("env:KUBERNETES_SERVICE_HOST")
-        return technology, evidence, containerenv
+        return named, evidence, containerenv
 
     def status_fields(self):
         text, reason = self.read("/proc/self/status")
@@ -435,10 +470,9 @@ class Probe:
 
         _, hypervisor = self.cpuinfo()
         kernel_arch = self.kernel_arch()
-        release = platform.release()
-        kernel_fact = observed(release, "python:platform.release") if PRINTABLE.fullmatch(release or "") else unknown("the kernel release is empty or has unexpected characters")
+        kernel_fact = self.kernel_release()
 
-        container_technology, container_evidence, containerenv = self.container_signals()
+        container_names, container_evidence, containerenv = self.container_signals()
         in_container = bool(container_evidence)
         wsl = self.wsl()
         dmi_technology, dmi_evidence = self.dmi_technology()
@@ -522,7 +556,12 @@ class Probe:
 
         if in_container:
             container = {"kind": inferred("container", *container_evidence)}
-            container["technology"] = inferred(container_technology, *container_evidence) if container_technology else unknown("the container signals do not name the engine", *container_evidence)
+            if len(container_names) == 1:
+                container["technology"] = inferred(next(iter(container_names)), *container_evidence)
+            elif container_names:
+                container["technology"] = unknown(f"the container signals name different engines ({', '.join(sorted(container_names))})", *container_evidence)
+            else:
+                container["technology"] = unknown("the container signals do not name the engine", *container_evidence)
             container["os"] = dict(self.distribution(), family=observed("linux", "python:platform.system"), kernel=not_applicable("a container shares the kernel of the layer below"))
             # The container runs on the kernel layer's CPU, and its programs need not all be built for
             # one architecture, so each runtime records its own architecture and whether it is emulated.
@@ -530,10 +569,13 @@ class Probe:
             container["cpu"] = {"arch": unknown(per_runtime), "execution": unknown(per_runtime)}
             container["service_manager"] = self.service_manager()
             rootless = containerenv.get("rootless")
-            if rootless in ("0", "1"):
-                engine_mode = observed("rootless" if rootless == "1" else "rootful", "file:/run/.containerenv#rootless")
+            if container_names != {"podman"}:
+                engine_mode = unknown("only Podman tells a container whether it runs rootless, and the markers do not name Podman alone")
+            elif rootless in ("0", "1"):
+                # The file is inside the container; Podman writes it, but an image could also hold one.
+                engine_mode = inferred("rootless" if rootless == "1" else "rootful", "file:/run/.containerenv#rootless")
             else:
-                engine_mode = unknown("the engine does not tell this container whether it runs rootless")
+                engine_mode = unknown("/run/.containerenv does not say whether the engine runs rootless")
             orchestration_name = inferred("kubernetes", "env:KUBERNETES_SERVICE_HOST") if self.env("KUBERNETES_SERVICE_HOST") is not None else unknown("no orchestrator signal; that does not show there is none")
             container["container"] = {
                 "engine_mode": engine_mode,
@@ -547,6 +589,19 @@ class Probe:
             }
             layers.append(order_layer(container))
         return layers
+
+    def kernel_release(self):
+        """The release the kernel reports in /proc; uname, which personality changes and qemu-user can rewrite, only as a fallback."""
+        text, _ = self.read("/proc/sys/kernel/osrelease", 256)
+        if text is not None:
+            release = text.strip()
+            if PRINTABLE.fullmatch(release):
+                return observed(release, "file:/proc/sys/kernel/osrelease")
+            return unknown("the kernel release is empty or has unexpected characters", "file:/proc/sys/kernel/osrelease")
+        release = platform.release()
+        if PRINTABLE.fullmatch(release or ""):
+            return inferred(release, "python:platform.release")
+        return unknown("the kernel release is empty or has unexpected characters")
 
     def distribution(self):
         values, evidence = self.os_release()
@@ -568,22 +623,37 @@ class Probe:
         return {"name": unknown(reason, "file:/run/systemd/system"), "scope": unknown(reason)}
 
     def identity(self):
+        # The real and saved user IDs matter too: a process whose real or saved ID is 0 can set its effective ID back to 0.
         if self.system == "Linux":
             fields, reason = self.status_fields()
             if "Uid" not in fields or "Gid" not in fields:
                 return identity_fallback(reason or "/proc/self/status has no Uid or Gid line")
-            uid, gid = int(fields["Uid"].split()[1]), int(fields["Gid"].split()[1])
-            source = ("file:/proc/self/status#Uid", "file:/proc/self/status#Gid")
+            # Uid: real, effective, saved set-user-ID, file system.
+            real_uid, uid, saved_uid = (int(part) for part in fields["Uid"].split()[:3])
+            gid = int(fields["Gid"].split()[1])
+            source = "file:/proc/self/status#Uid"
+            ids = {"uid": observed(uid, source), "real_uid": observed(real_uid, source), "saved_uid": observed(saved_uid, source)}
+            gid_fact = observed(gid, "file:/proc/self/status#Gid")
+        elif self.system == "Windows":
+            # Whether a Windows process holds an elevated token is not probed, so superuser stays unknown.
+            identity = identity_fallback("this probe reads POSIX user IDs only")
+            identity["real_uid"] = not_applicable("Windows has no POSIX user IDs")
+            identity["saved_uid"] = not_applicable("Windows has no POSIX user IDs")
+            return identity
+        elif hasattr(os, "getresuid"):
+            real_uid, uid, saved_uid = os.getresuid()
+            source = "python:os.getresuid"
+            ids = {"uid": observed(uid, source), "real_uid": observed(real_uid, source), "saved_uid": observed(saved_uid, source)}
+            gid_fact = observed(os.getegid(), "python:os.getegid")
         elif hasattr(os, "geteuid"):
-            uid, gid = os.geteuid(), os.getegid()
-            source = ("python:os.geteuid", "python:os.getegid")
+            # macOS has no getresuid. execve(2) saves the effective user ID, and this script never changes it.
+            uid = os.geteuid()
+            source = "python:os.geteuid"
+            ids = {"uid": observed(uid, source), "real_uid": observed(os.getuid(), "python:os.getuid"), "saved_uid": inferred(uid, source)}
+            gid_fact = observed(os.getegid(), "python:os.getegid")
         else:
             return identity_fallback("this probe reads POSIX user IDs only")
-        identity = {
-            "superuser": observed(uid == 0, source[0]),
-            "uid": observed(uid, source[0]),
-            "gid": observed(gid, source[1]),
-        }
+        identity = {"superuser": observed(uid == 0, source), **ids, "gid": gid_fact}
         if self.system != "Linux":
             reason = "user namespaces are a Linux interface"
             identity["user_namespace"] = {"initial": unknown(reason), "uid_map": unknown(reason)}
@@ -617,7 +687,7 @@ class Probe:
 
         out = {
             "no_new_privs": field("NoNewPrivs", lambda v: {"0": False, "1": True}[v]),
-            "capabilities": {"effective": field("CapEff", decode_capabilities), "bounding": field("CapBnd", decode_capabilities)},
+            "capabilities": {"effective": field("CapEff", decode_capabilities), "permitted": field("CapPrm", decode_capabilities), "bounding": field("CapBnd", decode_capabilities)},
             "seccomp": field("Seccomp", lambda v: SECCOMP[v]),
             "apparmor": self.apparmor(),
             "selinux": self.selinux(),
@@ -689,8 +759,9 @@ class Probe:
             return {"version": unknown(why, evidence), "delegated": unknown(why)}
         if version["value"] != "v2":
             return {"version": version, "delegated": unknown("delegation is read for cgroup v2 only")}
+        # access(2) checks the real user ID, so a real, effective or saved ID of 0, or any capability, leaves delegation unknown.
         uid = status.get("Uid", "").split()
-        if len(uid) < 2 or uid[1] == "0" or status.get("CapEff", "0").strip("0"):
+        if len(uid) < 4 or "0" in uid or any(status.get(name, "0").strip("0") for name in ("CapEff", "CapPrm")):
             return {"version": version, "delegated": unknown("write access says nothing about delegation for a process with root or capabilities")}
         text, reason = self.read("/proc/self/cgroup", 16384)
         unified = [line[3:] for line in (text or "").splitlines() if line.startswith("0::")]
@@ -788,15 +859,51 @@ class Probe:
         if executable is None:
             return all_unknown("node is not on PATH")
         try:
-            completed = subprocess.run(
+            # On POSIX node gets a session, and so a process group, of its own; Windows ignores the option.
+            process = subprocess.Popen(
                 [executable, "-p", NODE_EXPRESSION], env={}, stdin=subprocess.DEVNULL,
-                capture_output=True, timeout=30, check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except OSError as exc:
             return all_unknown(f"node could not be run ({type(exc).__name__})")
-        if completed.returncode != 0:
-            return all_unknown(f"node exited with status {completed.returncode}")
-        values = json.loads(completed.stdout[:4096].decode("utf-8"))
+
+        def stop():
+            # The whole group, so that a child holding stdout open cannot keep the read below waiting.
+            try:
+                if hasattr(os, "killpg"):
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+
+        # Read at most one byte more than the limit, and stop node if it runs too long or writes too much.
+        expired = threading.Event()
+
+        def expire():
+            expired.set()
+            stop()
+
+        timer = threading.Timer(NODE_TIMEOUT, expire)
+        timer.start()
+        try:
+            with process.stdout:
+                output = process.stdout.read(NODE_OUTPUT_LIMIT + 1)
+                if len(output) > NODE_OUTPUT_LIMIT:
+                    stop()
+            status = process.wait()
+        finally:
+            timer.cancel()
+            if process.poll() is None:
+                stop()
+                process.wait()
+        if expired.is_set():
+            return all_unknown(f"node did not finish within {NODE_TIMEOUT} seconds")
+        if len(output) > NODE_OUTPUT_LIMIT:
+            return all_unknown(f"node wrote more than {NODE_OUTPUT_LIMIT} bytes")
+        if status != 0:
+            return all_unknown(f"node exited with status {status}")
+        values = json.loads(output.decode("utf-8"))
         evidence = "cmd:node -p process.versions,process.arch,process.platform"
 
         def checked(key, pattern):
@@ -870,8 +977,7 @@ class Probe:
         if not path:
             return {"pr_head_sha": unknown("GITHUB_EVENT_PATH is not set"), "pr_base_sha": unknown("GITHUB_EVENT_PATH is not set")}
         try:
-            with open(path, "rb") as handle:
-                payload = json.loads(handle.read(8 * 1024 * 1024).decode("utf-8"))
+            payload = json.loads(read_regular(path, 8 * 1024 * 1024).decode("utf-8"))
         except (OSError, ValueError) as exc:
             reason = f"the event file could not be read ({type(exc).__name__})"
             return {"pr_head_sha": unknown(reason), "pr_base_sha": unknown(reason)}
@@ -908,8 +1014,7 @@ class Probe:
         try:
             if not self.git_dir.is_dir():
                 return None, ".git is not a directory (no checkout, or a worktree)"
-            with open(self.git_dir / name, "rb") as handle:
-                return handle.read(1 << 20).decode("utf-8", "replace"), None
+            return read_regular(self.git_dir / name, 1 << 20).decode("utf-8", "replace"), None
         except OSError as exc:
             return None, f".git/{name} could not be read ({type(exc).__name__})"
 
@@ -960,14 +1065,18 @@ def order_layer(layer):
 
 
 def split_platform(plat):
+    """(OS family, architecture) from sysconfig.get_platform(), as python_platform_target() in validate_compatibility.py reads it."""
     if plat.startswith("linux-"):
         return "linux", normalize_arch(plat[len("linux-"):])
     windows = {"win32": "x86", "win-amd64": "x86_64", "win-arm64": "aarch64", "win-arm32": "armv7"}
     if plat in windows:
         return "windows", windows[plat]
     match = re.fullmatch(r"macosx-[0-9.]+-([A-Za-z0-9_]+)", plat)
-    if match and match.group(1) not in ("universal2", "intel", "fat", "fat3", "fat64"):
-        return "macos", normalize_arch(match.group(1))
+    if match:
+        return "macos", None if match.group(1) in ("universal2", "intel", "fat", "fat3", "fat64") else normalize_arch(match.group(1))
+    match = re.fullmatch(r"freebsd-[^-]+-([A-Za-z0-9_]+)", plat)
+    if match:
+        return "freebsd", normalize_arch(match.group(1))
     return None, None
 
 
@@ -988,13 +1097,16 @@ def layer_fallback(reason):
 
 
 def identity_fallback(reason):
-    return {"superuser": unknown(reason), "uid": unknown(reason), "gid": unknown(reason), "user_namespace": {"initial": unknown(reason), "uid_map": unknown(reason)}}
+    return {
+        "superuser": unknown(reason), "uid": unknown(reason), "real_uid": unknown(reason), "saved_uid": unknown(reason),
+        "gid": unknown(reason), "user_namespace": {"initial": unknown(reason), "uid_map": unknown(reason)},
+    }
 
 
 def isolation_fallback(reason):
     return {
         "no_new_privs": unknown(reason),
-        "capabilities": {"effective": unknown(reason), "bounding": unknown(reason)},
+        "capabilities": {"effective": unknown(reason), "permitted": unknown(reason), "bounding": unknown(reason)},
         "seccomp": unknown(reason),
         "apparmor": {"enabled": unknown(reason), "profile": unknown(reason)},
         "selinux": {"mode": unknown(reason), "context": unknown(reason)},
@@ -1134,8 +1246,8 @@ def summary_lines(result):
         rows.append((f"Layer {index}", f"{describe(layer['kind'])}; {describe(layer['technology'])}; {describe(os_facts['family'])} {describe(os_facts['name'])} {describe(os_facts['version'])}; kernel {describe(os_facts['kernel'])}; {describe(layer['cpu']['arch'])}, {describe(layer['cpu']['execution'])}"))
     identity, isolation = result["workload"]["identity"], result["workload"]["isolation"]
     rows += [
-        ("Workload user", f"uid {describe(identity['uid'])}, superuser {describe(identity['superuser'])}, initial user namespace {describe(identity['user_namespace']['initial'])}"),
-        ("Isolation", f"no_new_privs {describe(isolation['no_new_privs'])}, seccomp {describe(isolation['seccomp'])}, effective capabilities {describe(isolation['capabilities']['effective'])}, AppArmor {describe(isolation['apparmor']['enabled'])}, SELinux {describe(isolation['selinux']['mode'])}, cgroup {describe(isolation['cgroup']['version'])}"),
+        ("Workload user", f"uid {describe(identity['uid'])}, real {describe(identity['real_uid'])}, saved {describe(identity['saved_uid'])}, superuser {describe(identity['superuser'])}, initial user namespace {describe(identity['user_namespace']['initial'])}"),
+        ("Isolation", f"no_new_privs {describe(isolation['no_new_privs'])}, seccomp {describe(isolation['seccomp'])}, effective capabilities {describe(isolation['capabilities']['effective'])}, permitted capabilities {describe(isolation['capabilities']['permitted'])}, AppArmor {describe(isolation['apparmor']['enabled'])}, SELinux {describe(isolation['selinux']['mode'])}, cgroup {describe(isolation['cgroup']['version'])}"),
     ]
     for name, runtime in result["workload"]["runtimes"].items():
         rows.append((name.capitalize(), ", ".join(f"{key} {describe(fact)}" for key, fact in runtime.items())))

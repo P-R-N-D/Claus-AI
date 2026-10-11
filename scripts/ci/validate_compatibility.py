@@ -7,7 +7,7 @@ scripts/ci/collect_environment.py writes it). Each is checked in two layers:
    the JSON Schema keywords in SUPPORTED_KEYWORDS. A schema that uses any other
    keyword is rejected before any document is read, so the schema cannot ask
    for a check this script does not perform. This is not a general JSON Schema
-   implementation; see docs/CI-MATRIX.md for where it is stricter.
+   implementation; see docs/CI-MATRIX.md for where its result can differ.
 2. Rules across fields that JSON Schema cannot express: provenance and
    evidence, layer nesting, OS, CPU and ABI consistency, stage order, CPU
    fallback reported as accelerator success, the privilege policy and its
@@ -44,6 +44,12 @@ CHECKING_KEYWORDS = frozenset({
 ANNOTATION_KEYWORDS = frozenset({"$schema", "$id", "$comment", "$defs", "title", "description"})
 SUPPORTED_KEYWORDS = CHECKING_KEYWORDS | ANNOTATION_KEYWORDS
 JSON_TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean", "null"})
+DIALECT = "https://json-schema.org/draft/2020-12/schema"
+# Pattern syntax that Python's re and ECMA-262 read differently: shorthand classes and anchors that
+# follow Unicode or another definition, and (? groups other than (?:. Only an unescaped one counts.
+NON_PORTABLE_PATTERN = re.compile(r"(?<!\\)(?:\\\\)*(?:\\[dDwWsSbBAZz]|\(\?(?!:))")
+# Keywords whose subschema applies to the same value, so a $ref cycle through them never ends.
+SAME_VALUE_KEYWORDS = ("if", "then", "else")
 
 STAGES = ("detect", "install", "initialize", "execute", "correctness", "security", "performance")
 PREREQUISITES = {
@@ -63,6 +69,10 @@ RAN = ("passed", "failed")
 # Evidence kinds that show what a stage did in a real run; detect may also cite the collector itself.
 STAGE_EVIDENCE = ("log:", "artifact:")
 KNOWN = ("observed", "inferred", "declared")
+# Provenances that show something about a run. A declared value in a result is a statement, so it
+# can be checked for contradictions but cannot show compliance with the policy or with a profile.
+MEASURED = ("observed", "inferred")
+POSIX_FAMILIES = ("linux", "macos", "freebsd")
 
 DEFAULT_POLICY = {
     "app-non-root": "required",
@@ -72,20 +82,37 @@ DEFAULT_POLICY = {
     "minimal-capabilities": "required",
     "minimal-devices": "required",
 }
-# Which exception scope list an exception for each rule must name; None means no scope.
+# The exception scope lists an exception to each rule must name. A violation is covered only when every
+# one of its values is in the matching list, so an escalation exception names both the stages and the methods.
 RULE_SCOPE = {
-    "app-non-root": None,
-    "engine-rootless": "layers",
-    "no-privileged-container": "layers",
-    "no-privilege-escalation": "stages",
-    "minimal-capabilities": "capabilities",
-    "minimal-devices": "devices",
+    "app-non-root": (),
+    "engine-rootless": ("layers",),
+    "no-privileged-container": ("layers",),
+    "no-privilege-escalation": ("stages", "escalations"),
+    "minimal-capabilities": ("capabilities",),
+    "minimal-devices": ("devices",),
 }
+
+# What each row of the docs/DEPENDENCY-STRATEGY.md lane table describes: the innermost layer's OS family,
+# the architecture and C library the Python is built for, and whether the lane runs inside WSL2. None
+# leaves that axis open. A lane the table lists but this map does not cannot carry a support status.
+LANE_TARGETS = {
+    "Linux x86-64 glibc": {"os": "linux", "arch": "x86_64", "libc": "glibc", "wsl2": None},
+    "Linux aarch64 glibc": {"os": "linux", "arch": "aarch64", "libc": "glibc", "wsl2": None},
+    "Windows on Arm, native (`win_arm64`)": {"os": "windows", "arch": "aarch64", "libc": None, "wsl2": False},
+    "Windows on Arm with WSL2 (Ubuntu arm64)": {"os": "linux", "arch": "aarch64", "libc": "glibc", "wsl2": True},
+    "Windows x64, native": {"os": "windows", "arch": "x86_64", "libc": None, "wsl2": False},
+    "macOS Apple Silicon": {"os": "macos", "arch": "aarch64", "libc": None, "wsl2": False},
+    "macOS Intel": {"os": "macos", "arch": "x86_64", "libc": None, "wsl2": False},
+    "Linux musl (Alpine)": {"os": "linux", "arch": None, "libc": "musl", "wsl2": None},
+}
+# The lane table's backend lock column describes backend/locks/cp312-linux-x86_64.txt: CPython 3.12 with the GIL.
+LOCK_INTERPRETER = ("cpython", "3.12", False)
 
 ARCH_ALIASES = {
     "amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64", "i386": "x86", "i486": "x86",
-    "i586": "x86", "i686": "x86", "ia32": "x86", "armv7l": "armv7", "arm": "armv7", "loong64": "loongarch64",
-    "powerpc64le": "ppc64le",
+    "i586": "x86", "i686": "x86", "ia32": "x86", "armv7l": "armv7", "armv8l": "armv7", "arm": "armv7",
+    "loong64": "loongarch64", "powerpc64le": "ppc64le",
 }
 ARCH_BITS = {
     "x86_64": 64, "aarch64": 64, "riscv64": 64, "ppc64le": 64, "s390x": 64, "loongarch64": 64,
@@ -107,8 +134,8 @@ KNOWN_ORCHESTRATION = frozenset({"none", "kubernetes", "k3s", "openshift", "noma
 KNOWN_SERVICE_MANAGERS = frozenset({"none", "systemd", "launchd", "windows-scm", "openrc"})
 NODE_PLATFORMS = {"linux": "linux", "win32": "windows", "darwin": "macos", "freebsd": "freebsd"}
 
-# C0 and C1 controls, DEL, the Unicode bidirectional controls, and lone surrogates.
-CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+# C0 and C1 controls, DEL, the Unicode line and paragraph separators and bidirectional controls, and lone surrogates.
+CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]")
 SECRET_SHAPES = (
     ("GitHub token", re.compile(r"\bgh[opsur]_[A-Za-z0-9]{30,}")),
     ("GitHub token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
@@ -187,7 +214,9 @@ def load_json(path):
 
 def check_schema(schema):
     """Reject a schema that uses a keyword or value outside the supported subset."""
-    defs = schema.get("$defs", {}) if isinstance(schema, dict) else {}
+    if not isinstance(schema, dict):
+        raise SchemaError("#: the root schema must be an object")
+    defs = schema.get("$defs", {})
     stack = [("#", schema)]
     while stack:
         where, node = stack.pop()
@@ -198,11 +227,17 @@ def check_schema(schema):
         unknown = sorted(set(node) - SUPPORTED_KEYWORDS)
         if unknown:
             raise SchemaError(f"{where}: unsupported keyword(s) {', '.join(unknown)}")
-        if "$defs" in node and where != "#":
-            raise SchemaError(f"{where}: $defs is supported only at the root")
+        for key in ("$defs", "$schema", "$id"):
+            if key in node and where != "#":
+                raise SchemaError(f"{where}: {key} is supported only at the root")
+        if node.get("$schema", DIALECT) != DIALECT:
+            raise SchemaError(f"{where}: only the {DIALECT} dialect is supported")
+        for key in ("$id", "$comment", "title", "description"):
+            if key in node and not isinstance(node[key], str):
+                raise SchemaError(f"{where}: {key} must be a string")
         if "type" in node:
             types = node["type"] if isinstance(node["type"], list) else [node["type"]]
-            if not types or any(t not in JSON_TYPES for t in types):
+            if not types or any(not isinstance(t, str) or t not in JSON_TYPES for t in types):
                 raise SchemaError(f"{where}: bad type {node['type']!r}")
         if "required" in node and not (isinstance(node["required"], list) and all(isinstance(r, str) for r in node["required"])):
             raise SchemaError(f"{where}: required must be a list of strings")
@@ -219,6 +254,8 @@ def check_schema(schema):
                 re.compile(node["pattern"])
             except (re.error, TypeError) as exc:
                 raise SchemaError(f"{where}: bad pattern: {exc}") from None
+            if NON_PORTABLE_PATTERN.search(node["pattern"]):
+                raise SchemaError(f"{where}: pattern uses syntax that Python and ECMA-262 read differently")
         if "$ref" in node:
             match = re.fullmatch(r"#/\$defs/([A-Za-z0-9_]+)", str(node["$ref"]))
             if not match or match.group(1) not in defs:
@@ -231,6 +268,33 @@ def check_schema(schema):
         for key in ("items", "additionalProperties", "propertyNames", "if", "then", "else"):
             if key in node:
                 stack.append((f"{where}/{key}", node[key]))
+    check_ref_cycles(schema, defs)
+
+
+def check_ref_cycles(schema, defs):
+    """Reject $ref chains that return to a definition without moving to another value, which would never end."""
+    def same_value_refs(node):
+        """Definitions that `node` applies to the value it is applied to."""
+        stack, refs = [node], set()
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                if "$ref" in node:
+                    refs.add(node["$ref"].rsplit("/", 1)[1])
+                stack.extend(node[key] for key in SAME_VALUE_KEYWORDS if key in node)
+        return refs
+
+    edges = {name: same_value_refs(sub) for name, sub in defs.items()}
+    for start in sorted(same_value_refs(schema) | set(defs)):
+        path, seen = [start], set()
+        while path:
+            name = path.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            if start in edges.get(name, ()):
+                raise SchemaError(f"#/$defs/{start}: $ref leads back to itself without moving to another value")
+            path.extend(edges.get(name, ()))
 
 
 def json_type(value):
@@ -356,6 +420,13 @@ def known(fact):
     return None
 
 
+def measured(fact):
+    """The value of a fact whose provenance is observed or inferred, else None."""
+    if is_fact(fact) and fact["provenance"] in MEASURED:
+        return fact["value"]
+    return None
+
+
 def normalize_arch(name):
     return ARCH_ALIASES.get(name, name) if isinstance(name, str) else None
 
@@ -409,15 +480,27 @@ def soabi_target(soabi):
     """Map a CPython SOABI to (OS family, architecture); either may be None."""
     if not isinstance(soabi, str):
         return None, None
-    match = re.fullmatch(r"cpython-[0-9]+t?-([a-z0-9_]+)-linux-[a-z0-9]+", soabi)
+    match = re.fullmatch(r"cpython-[0-9]+t?d?-([a-z0-9_]+)-linux-[a-z0-9]+", soabi)
     if match:
         return "linux", normalize_arch(match.group(1))
-    if re.fullmatch(r"cpython-[0-9]+t?-darwin", soabi):
+    if re.fullmatch(r"cpython-[0-9]+t?d?-darwin", soabi):
         return "macos", None
-    match = re.fullmatch(r"cp[0-9]+t?-(win32|win_amd64|win_arm64)", soabi)
+    match = re.fullmatch(r"cp[0-9]+t?d?-(win32|win_amd64|win_arm64)", soabi)
     if match:
         return "windows", {"win32": "x86", "win_amd64": "x86_64", "win_arm64": "aarch64"}[match.group(1)]
     return None, None
+
+
+def libc_family(python):
+    """glibc or musl, from a Python's libc or SOABI fact (observed, inferred or declared); None if neither shows it."""
+    libc, soabi = known(python["libc"]), known(python["soabi"])
+    if isinstance(libc, str) and libc.startswith("glibc "):
+        return "glibc"
+    if isinstance(soabi, str):
+        match = re.search(r"-linux-(gnu|musl)[a-z0-9]*$", soabi)
+        if match:
+            return {"gnu": "glibc", "musl": "musl"}[match.group(1)]
+    return None
 
 
 def layers_of(document):
@@ -607,6 +690,8 @@ def check_workload(document, findings):
                     findings.error("abi-contradiction", f"{base}/free_threaded_build", "the free-threaded flag disagrees with the ABI tag's t suffix")
         # The platform part of the ABI tag is checked even when the version is unknown.
         soabi_family, soabi_arch = soabi_target(known(python["soabi"]))
+        if known(python["soabi"]) is not None and soabi_family is None:
+            findings.warning("unrecognized-value", f"{base}/soabi", f"the CPython ABI tag {known(python['soabi'])!r} has no form this validator reads, so its OS and architecture are not checked")
         if soabi_family and family and soabi_family != family:
             findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the innermost layer is {family}")
         if soabi_arch in ARCH_BITS and python_arch in ARCH_BITS and soabi_arch != python_arch:
@@ -691,8 +776,9 @@ def check_identity(document, findings):
     identity = document["workload"]["identity"]
     family = known(layers_of(document)[-1]["os"]["family"])
     uid, superuser = known(identity["uid"]), known(identity["superuser"])
-    if family == "linux" and uid is not None and superuser is not None and superuser != (uid == 0):
-        findings.error("identity-contradiction", "/workload/identity/superuser", f"uid {uid} {'is' if uid == 0 else 'is not'} root in its user namespace")
+    # On a POSIX system the superuser is effective UID 0; Windows names it by its token, so there the two are not compared.
+    if family in POSIX_FAMILIES and uid is not None and superuser is not None and superuser != (uid == 0):
+        findings.error("identity-contradiction", "/workload/identity/superuser", f"uid {uid} {'is' if uid == 0 else 'is not'} the superuser (in its user namespace, on Linux)")
     initial, uid_map = known(identity["user_namespace"]["initial"]), known(identity["user_namespace"]["uid_map"])
     # A nested namespace can also map 0 0 4294967295, so only one direction is checked.
     if initial is True and uid_map is not None and uid_map != [[0, 0, 4294967295]]:
@@ -739,12 +825,13 @@ def effective_policy(profile, findings):
         if exception["id"] in seen:
             findings.error("policy-exception", f"{base}/id", f"duplicate exception id {exception['id']!r}")
         seen.add(exception["id"])
-        scope_key = RULE_SCOPE[exception["rule"]]
+        scope_keys = RULE_SCOPE[exception["rule"]]
         for key, values in exception["scope"].items():
-            if key != scope_key and values:
+            if key not in scope_keys and values:
                 findings.error("policy-exception", f"{base}/scope/{key}", f"an exception to {exception['rule']} cannot be scoped by {key}")
-        if scope_key and not exception["scope"].get(scope_key):
-            findings.error("policy-exception", f"{base}/scope", f"an exception to {exception['rule']} names the {scope_key} it covers")
+        for key in scope_keys:
+            if not exception["scope"].get(key):
+                findings.error("policy-exception", f"{base}/scope", f"an exception to {exception['rule']} names the {key} it covers")
         approval = exception["approval"]
         if approval["status"] == "approved" and not (approval.get("reference") and approval.get("date")):
             findings.error("policy-exception", f"{base}/approval", "an approved exception records where and when it was approved")
@@ -753,72 +840,102 @@ def effective_policy(profile, findings):
 
 
 def policy_violations(result):
-    """Yield (rule, scope key, scope item, path, message, detail) for each item that does not comply.
+    """Yield (rule, item, path, message, detail) for each thing in a result that does not comply.
 
+    `item` maps each of the rule's RULE_SCOPE keys to this violation's value, so that an exception
+    can be matched with it. It is None when the state is not measured: no exception covers that.
+    Only observed and inferred facts show compliance; a declared value in a result is a statement.
     Findings that share a rule, a path and a message are reported once, with their details joined.
     """
+    layers = layers_of(result)
+    family = measured(layers[-1]["os"]["family"])
     identity = result["workload"]["identity"]
-    superuser = known(identity["superuser"])
+    superuser = measured(identity["superuser"])
     if superuser is not False:
         state = "runs as the superuser" if superuser else "is not shown to run as a non-root user"
-        yield "app-non-root", None, None, "/workload/identity/superuser", f"the workload {state}", None
-    layers = layers_of(result)
-    family = known(layers[-1]["os"]["family"])
+        yield "app-non-root", {} if superuser else None, "/workload/identity/superuser", f"the workload {state}", None
+    for name, label in (("real_uid", "real"), ("saved_uid", "saved")):
+        fact = identity[name]
+        if fact["provenance"] == "not-applicable" and family is not None and family not in POSIX_FAMILIES:
+            continue
+        uid = measured(fact)
+        if uid == 0:
+            yield "app-non-root", {}, f"/workload/identity/{name}", f"the workload can regain root: its {label} user ID is 0", None
+        elif uid is None:
+            yield "app-non-root", None, f"/workload/identity/{name}", f"the {label} user ID is not measured, so the workload is not shown to be unable to regain root", None
+
+    # A layer that any fact calls a container is held to the container rules, which only measured facts pass.
     containers = [index for index, layer in enumerate(layers) if known(layer["kind"]) == "container"]
-    # WSL 2 runs each distribution in its own PID namespace inside its VM, so there the namespace tells nothing.
-    in_wsl2 = known(layers[-1]["kind"]) == "wsl2"
-    if not containers and not in_wsl2 and family in (None, "linux") and known(result["workload"]["isolation"]["pid_namespace"]["initial"]) is not True:
-        # Without a container layer and outside the initial PID namespace, an undetected container cannot be ruled out.
-        path, message = "/workload/isolation/pid_namespace/initial", "no layer is a container, but the workload is not shown to run outside one"
-        yield "engine-rootless", "layers", None, path, message, None
-        yield "no-privileged-container", "layers", None, path, message, None
-        yield "minimal-devices", "devices", None, path, message, None
+    if not containers:
+        innermost = measured(layers[-1]["kind"])
+        message = None
+        if family in (None, "linux"):
+            # WSL 2 runs each distribution in its own PID namespace inside its VM, so there the namespace tells nothing.
+            if innermost != "wsl2" and measured(result["workload"]["isolation"]["pid_namespace"]["initial"]) is not True:
+                path, message = "/workload/isolation/pid_namespace/initial", "no layer is a container, but the workload is not shown to run outside one"
+        elif innermost not in ("host", "vm"):
+            # Off Linux no namespace probe applies, so only a measured host or VM as the innermost layer rules a container out.
+            path, message = f"/environment/layers/{len(layers) - 1}/kind", f"no layer is a container, but on {family} only a measured host or VM kind shows the workload runs outside one"
+        if message is not None:
+            yield "engine-rootless", None, path, message, None
+            yield "no-privileged-container", None, path, message, None
+            yield "minimal-devices", None, path, message, None
     for index in containers:
-        layer = layers[index]
-        container = layer.get("container", {})
+        container = layers[index].get("container", {})
         base = f"/environment/layers/{index}/container"
-        mode = known(container.get("engine_mode"))
+        mode = measured(container.get("engine_mode"))
         if mode != "rootless":
-            yield "engine-rootless", "layers", index, f"{base}/engine_mode", f"the container engine is {mode or 'not shown to be rootless'}", None
-        privileged = known(container.get("privileged"))
+            yield "engine-rootless", {"layers": index} if mode else None, f"{base}/engine_mode", f"the container engine is {mode or 'not shown to be rootless'}", None
+        privileged = measured(container.get("privileged"))
         if privileged is not False:
-            yield "no-privileged-container", "layers", index, f"{base}/privileged", "the container is privileged" if privileged else "the container is not shown to be unprivileged", None
-        devices = known(container.get("devices"))
+            yield "no-privileged-container", {"layers": index} if privileged else None, f"{base}/privileged", "the container is privileged" if privileged else "the container is not shown to be unprivileged", None
+        devices = measured(container.get("devices"))
         if devices is None:
-            yield "minimal-devices", "devices", None, f"{base}/devices", "the devices passed to the container are not known", None
+            yield "minimal-devices", None, f"{base}/devices", "the devices passed to the container are not measured", None
         for device in devices or []:
-            yield "minimal-devices", "devices", device, f"{base}/devices", "devices are passed to the container", device
+            yield "minimal-devices", {"devices": device}, f"{base}/devices", "devices are passed to the container", device
     for name in STAGES:
         stage = result["stages"][name]
         if stage["status"] not in RAN:
             continue
+        # The job that ran a stage states its escalation; the collector cannot see another step's privileges.
         escalation = known(stage.get("privilege", {}).get("escalation"))
         if escalation != "none":
-            yield "no-privilege-escalation", "stages", name, f"/stages/{name}/privilege/escalation", f"{name} {'used ' + escalation if escalation else 'is not shown to have used no escalation'}", None
-    effective = result["workload"]["isolation"]["capabilities"]["effective"]
-    if effective["provenance"] == "not-applicable" and family not in (None, "linux"):
-        return
-    capabilities = known(effective)
-    if capabilities is None:
-        yield "minimal-capabilities", "capabilities", None, "/workload/isolation/capabilities/effective", "the effective capabilities are not known", None
-    for capability in capabilities or []:
-        yield "minimal-capabilities", "capabilities", capability, "/workload/isolation/capabilities/effective", "the workload holds capabilities", capability
+            item = {"stages": name, "escalations": escalation} if escalation else None
+            yield "no-privilege-escalation", item, f"/stages/{name}/privilege/escalation", f"{name} {'used ' + escalation if escalation else 'is not shown to have used no escalation'}", None
+    for name in ("effective", "permitted"):
+        fact = result["workload"]["isolation"]["capabilities"][name]
+        path = f"/workload/isolation/capabilities/{name}"
+        # Linux capabilities do not exist on another measured OS family. Windows privileges are not recorded (docs/CI-MATRIX.md).
+        if fact["provenance"] == "not-applicable" and family is not None and family != "linux":
+            continue
+        capabilities = measured(fact)
+        if capabilities is None:
+            yield "minimal-capabilities", None, path, f"the {name} capabilities are not measured", None
+        for capability in capabilities or []:
+            yield "minimal-capabilities", {"capabilities": capability}, path, f"the workload holds {name} capabilities", capability
+
+
+def covers(exception, rule, item):
+    """Whether an exception covers one violation: same rule, a known state, and every scope value listed."""
+    return exception["rule"] == rule and item is not None and all(item[key] in exception["scope"].get(key, []) for key in RULE_SCOPE[rule])
 
 
 def check_policy(result, profile, findings):
     # Errors in the profile's own policy are reported when the profile is validated.
     rules, exceptions = effective_policy(profile, Findings())
-    used, groups = set(), {}
-    for rule, scope_key, item, path, message, detail in policy_violations(result):
-        matching = [
-            exception for exception in exceptions
-            if exception["rule"] == rule and (scope_key is None or (item is not None and item in exception["scope"].get(scope_key, [])))
-        ]
+    applied, groups = {}, {}
+    for rule, item, path, message, detail in policy_violations(result):
+        matching = [exception for exception in exceptions if covers(exception, rule, item)]
         approved = [exception for exception in matching if exception["approval"]["status"] == "approved"]
         if approved:
-            used.update(exception["id"] for exception in approved)
+            what = ", ".join(f"{key} {value}" for key, value in item.items()) or path
+            for exception in approved:
+                applied.setdefault(exception["id"], []).append(what)
             continue
         unapproved = ", ".join(f"{exception['id']} ({exception['approval']['status']})" for exception in matching)
+        if item is None and any(exception["rule"] == rule for exception in exceptions):
+            message += "; an exception cannot cover a state that is not measured"
         details = groups.setdefault((rule, path, message, unapproved), [])
         if detail is not None:
             details.append(detail)
@@ -830,8 +947,14 @@ def check_policy(result, profile, findings):
             findings.error("policy-exception-not-approved", path, f"{text}; exception {unapproved} is not approved")
         else:
             findings.error(f"policy-{rule}", path, f"{text}, and no approved exception covers it")
-    for exception in exceptions:
-        if exception["approval"]["status"] == "approved" and exception["id"] not in used:
+    for index, exception in enumerate(exceptions):
+        if exception["approval"]["status"] != "approved":
+            continue
+        if exception["id"] in applied:
+            # An approval is a reference this validator cannot verify, so every use of one is shown for review.
+            approval = exception["approval"]
+            findings.warning("policy-exception-applied", f"/policy/exceptions/{index}", f"exception {exception['id']} ({exception['rule']}) covers {'; '.join(applied[exception['id']])}; approval {approval.get('reference', 'with no reference')}, {approval.get('date', 'undated')}")
+        else:
             findings.warning("policy-exception-unused", "/policy/exceptions", f"exception {exception['id']} covers nothing in this result")
 
 
@@ -848,8 +971,13 @@ def check_support(profile, strategy_lanes, findings):
         if status != "not-assessed":
             findings.error("support-claim", "/support/lane", f"a {status} claim names its docs/DEPENDENCY-STRATEGY.md lane")
         return
-    if status == "not-assessed" and not synthetic:
-        findings.error("support-claim", "/support/status", "a real profile of a lane that docs/DEPENDENCY-STRATEGY.md lists copies its status from there")
+    target = LANE_TARGETS.get(lane)
+    if target is None:
+        findings.error("support-claim", "/support/lane", f"no lane {lane!r} is known; name a row of the docs/DEPENDENCY-STRATEGY.md lane table exactly")
+        return
+    matches = lane_matches(profile, target, status, findings)
+    if status == "not-assessed" and not synthetic and matches:
+        findings.error("support-claim", "/support/status", "a real profile whose platform and interpreter are what its docs/DEPENDENCY-STRATEGY.md lane covers copies the lane's status")
     if strategy_lanes is None:
         if status == "checked":
             findings.warning("support-claim-unverified", "/support/status", "checked claim not compared with docs/DEPENDENCY-STRATEGY.md; pass --dependency-strategy")
@@ -859,6 +987,42 @@ def check_support(profile, strategy_lanes, findings):
     elif status != "not-assessed" and status not in strategy_lanes[lane]:
         recorded = " or ".join(sorted(strategy_lanes[lane])) or "no status this validator reads"
         findings.error("support-claim", "/support/status", f"docs/DEPENDENCY-STRATEGY.md records {lane!r} as {recorded}, not {status}")
+
+
+def lane_matches(profile, target, status, findings):
+    """Compare a profile with what its lane covers; return whether every axis and the interpreter match.
+
+    A declared value that contradicts the lane is an error whatever the status. A status other than
+    not-assessed also needs each axis the lane names, and the lock's interpreter, to be declared.
+    """
+    layers = layers_of(profile)
+    python = profile["workload"]["runtimes"]["python"]
+    kinds = [known(layer["kind"]) for layer in layers]
+    axes = (
+        ("os", known(layers[-1]["os"]["family"]), f"/environment/layers/{len(layers) - 1}/os/family", "OS family"),
+        ("arch", known(python["arch"]), "/workload/runtimes/python/arch", "Python architecture"),
+        ("libc", libc_family(python), "/workload/runtimes/python/soabi", "C library"),
+        ("wsl2", True if "wsl2" in kinds else False if None not in kinds else None, "/environment/layers", "WSL2 layer"),
+    )
+    matches = True
+    for axis, value, path, what in axes:
+        if target[axis] is None:
+            continue
+        if value is not None and value != target[axis]:
+            findings.error("support-claim", path, f"the profile's {what} is {value!r}; lane {profile['support']['lane']!r} covers {target[axis]!r}")
+            matches = False
+        elif value is None:
+            matches = False
+            if status != "not-assessed":
+                findings.error("support-claim", path, f"a {status} claim declares the {what} its lane covers ({target[axis]!r})")
+    version = known(python["version"])
+    minor = re.match(r"[0-9]+\.[0-9]+", version).group(0) if isinstance(version, str) and re.match(r"[0-9]+\.[0-9]+", version) else None
+    interpreter = (known(python["implementation"]), minor, known(python["free_threaded_build"]))
+    if interpreter != LOCK_INTERPRETER:
+        matches = False
+        if status != "not-assessed":
+            findings.error("support-claim", "/workload/runtimes/python", f"the lane table's statuses are for the backend lock's interpreter, CPython {LOCK_INTERPRETER[1]} with the GIL; this profile declares {interpreter[0]} {interpreter[1]} (free-threaded build: {interpreter[2]}), so it records not-assessed")
+    return matches
 
 
 def check_accelerator(profile, findings):
@@ -911,6 +1075,8 @@ def check_against_profile(result, profile, findings):
         findings.error("profile-link", "/synthetic", "a real result is checked against a real profile, and a synthetic one against a synthetic one")
     ci = result["run"]["ci"]
     job = known(ci["job"])
+    if not profile["synthetic"] and measured(ci["system"]) != "github-actions":
+        findings.error("profile-link", "/run/ci/system", f"profile {profile['id']} is recorded by GitHub Actions jobs; this record was not shown to come from one")
     if known(ci["system"]) == "github-actions":
         # GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>; the job is compared with the workflow it ran in when both are known.
         repository, workflow_ref = known(ci["repository"]), known(ci["workflow_ref"])
@@ -924,11 +1090,14 @@ def check_against_profile(result, profile, findings):
             findings.error("profile-link", "/run/ci/job", f"job {job!r} is not an evidence source of profile {profile['id']}")
 
     def compare(path, declared_fact, observed_fact):
-        declared, observed = known(declared_fact), known(observed_fact)
+        # Only a measured value establishes what the profile declares; a declared value in the result does not.
+        declared, observed = known(declared_fact), measured(observed_fact)
         if declared is None:
+            if is_fact(declared_fact) and declared_fact["provenance"] == "not-applicable" and observed is not None:
+                findings.error("profile-mismatch", path, f"the profile declares this not applicable, the result has {observed!r}")
             return
         if observed is None:
-            findings.error("profile-unverified", path, f"the profile declares {declared!r}, but the run did not establish it; declare only what the evidence-source job can observe")
+            findings.error("profile-unverified", path, f"the profile declares {declared!r}, but the run did not measure it; declare only what the evidence-source job can observe")
         elif not json_equal(declared, observed):
             findings.error("profile-mismatch", path, f"the profile declares {declared!r}, the result has {observed!r}")
 
@@ -952,6 +1121,8 @@ def check_against_profile(result, profile, findings):
             for keys, fact in facts_of(backend):
                 compare(f"/compute/backends/{index}/{'/'.join(keys)}", fact, dig(other, keys))
     compare("/compute/accelerator_inventory", profile["compute"]["accelerator_inventory"], result["compute"]["accelerator_inventory"])
+    for name, fact in profile.get("runner", {}).items():
+        compare(f"/run/ci/{name}", fact, ci[name])
     accelerator = profile.get("accelerator_backend")
     for name in profile["required_stages"]:
         stage = result["stages"][name]
@@ -1038,6 +1209,8 @@ def validate_document(document, schema, profile=None, strategy_lanes=None, evalu
         findings.warning("profile-unchecked", "/profile_id", f"the result names a profile that was not given{policy}")
     if evaluate_policy:
         check_policy(document, profile, findings)
+    else:
+        findings.warning("policy-skipped", "/", "the privilege policy was not evaluated (--no-policy), so this verdict says nothing about it")
     return findings
 
 
@@ -1070,26 +1243,26 @@ def main(argv=None):
 
     try:
         schema = load_schema(args.schema)
-    except (OSError, ValueError, SchemaError) as exc:
-        print(f"error: cannot use schema {args.schema}: {exc}", file=sys.stderr)
+    except (OSError, ValueError, SchemaError, RecursionError, TypeError) as exc:
+        print(plain(f"error: cannot use schema {args.schema}: {exc}"), file=sys.stderr)
         return 2
     strategy_lanes = None
     if args.dependency_strategy:
         try:
             strategy_lanes = read_strategy_lanes(args.dependency_strategy)
         except (OSError, ValueError) as exc:
-            print(f"error: cannot read lanes from {args.dependency_strategy}: {exc}", file=sys.stderr)
+            print(plain(f"error: cannot read lanes from {args.dependency_strategy}: {exc}"), file=sys.stderr)
             return 2
     profile = None
     if args.profile:
         try:
             profile = load_json(args.profile)
         except (OSError, ValueError) as exc:
-            print(f"error: cannot read profile {args.profile}: {exc}", file=sys.stderr)
+            print(plain(f"error: cannot read profile {args.profile}: {exc}"), file=sys.stderr)
             return 2
         profile_findings = validate_document(profile, schema, strategy_lanes=strategy_lanes) if isinstance(profile, dict) else None
         if not isinstance(profile, dict) or profile.get("kind") != "profile" or profile_findings.errors:
-            print(f"error: {args.profile} is not a valid profile", file=sys.stderr)
+            print(plain(f"error: {args.profile} is not a valid profile"), file=sys.stderr)
             for level, code, path, message in (profile_findings.items if profile_findings else []):
                 print(plain(f"  {level.upper()} {code} {path}: {message}"), file=sys.stderr)
             return 2
@@ -1101,7 +1274,7 @@ def main(argv=None):
         try:
             document = load_json(path)
         except OSError as exc:
-            print(f"error: cannot read {path}: {exc.strerror or exc}", file=sys.stderr)
+            print(plain(f"error: cannot read {path}: {exc.strerror or exc}"), file=sys.stderr)
             return 2
         except (ValueError, UnicodeDecodeError) as exc:
             findings = Findings()
@@ -1121,7 +1294,10 @@ def main(argv=None):
         lines.append(f"| {markdown_cell(path.name)} | {markdown_cell(kind)} | {verdict} | {len(errors)} | {len(warnings)} |")
 
     if args.summary:
-        lines += [""] + details[:200] + [
+        shown = details[:200]
+        if len(details) > len(shown):
+            shown.append(f"- {len(details) - len(shown)} more findings are in the job log")
+        lines += [""] + shown + [
             "",
             "A valid record shows that the schema, the validator and the probe worked on this runner for this commit. It is not a support claim for this or any other platform; support status is recorded only in docs/DEPENDENCY-STRATEGY.md.",
             "",
@@ -1130,7 +1306,7 @@ def main(argv=None):
             with open(args.summary, "a", encoding="utf-8") as handle:
                 handle.write("\n".join(lines))
         except OSError as exc:
-            print(f"error: cannot write the summary {args.summary}: {exc.strerror or exc}", file=sys.stderr)
+            print(plain(f"error: cannot write the summary {args.summary}: {exc.strerror or exc}"), file=sys.stderr)
             return 2
     return 1 if invalid else 0
 

@@ -261,6 +261,20 @@
           "synthetic:/proc/self/status Uid"
         ]
       },
+      "real_uid": {
+        "value": 1001,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "saved_uid": {
+        "value": 1001,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
       "gid": {
         "value": 118,
         "provenance": "observed",
@@ -305,6 +319,13 @@
           "provenance": "observed",
           "evidence": [
             "synthetic:/proc/self/status CapEff"
+          ]
+        },
+        "permitted": {
+          "value": [],
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/status CapPrm"
           ]
         },
         "bounding": {

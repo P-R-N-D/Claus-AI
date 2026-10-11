@@ -316,21 +316,30 @@
             "value": "rootless",
             "provenance": "observed",
             "evidence": [
-              "synthetic:/run/.containerenv rootless=1"
+              "synthetic:engine-side podman info: host.security.rootless"
             ]
           },
           "privileged": {
             "value": false,
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side podman inspect: HostConfig.Privileged"
+            ]
           },
           "devices": {
             "value": [],
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:engine-side podman inspect: HostConfig.Devices"
+            ]
           },
           "orchestration": {
             "name": {
               "value": "none",
-              "provenance": "declared"
+              "provenance": "inferred",
+              "evidence": [
+                "synthetic:engine-side podman inspect: no orchestrator labels"
+              ]
             },
             "version": {
               "value": null,
@@ -357,6 +366,20 @@
         ]
       },
       "uid": {
+        "value": 1000,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "real_uid": {
+        "value": 1000,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:/proc/self/status Uid"
+        ]
+      },
+      "saved_uid": {
         "value": 1000,
         "provenance": "observed",
         "evidence": [
@@ -412,6 +435,13 @@
           "provenance": "observed",
           "evidence": [
             "synthetic:/proc/self/status CapEff"
+          ]
+        },
+        "permitted": {
+          "value": [],
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:/proc/self/status CapPrm"
           ]
         },
         "bounding": {

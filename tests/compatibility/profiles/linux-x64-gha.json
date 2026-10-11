@@ -16,6 +16,24 @@
       "job": "compatibility"
     }
   ],
+  "runner": {
+    "runner_environment": {
+      "value": "github-hosted",
+      "provenance": "declared"
+    },
+    "runner_os": {
+      "value": "Linux",
+      "provenance": "declared"
+    },
+    "runner_arch": {
+      "value": "X64",
+      "provenance": "declared"
+    },
+    "image_os": {
+      "value": "ubuntu24",
+      "provenance": "declared"
+    }
+  },
   "required_stages": [
     "detect"
   ],

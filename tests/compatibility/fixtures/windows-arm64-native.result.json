@@ -110,7 +110,10 @@
         "label": "Windows on Arm PC",
         "kind": {
           "value": "host",
-          "provenance": "declared"
+          "provenance": "inferred",
+          "evidence": [
+            "synthetic:Win32_ComputerSystem HypervisorPresent false"
+          ]
         },
         "technology": {
           "value": null,
@@ -157,17 +160,26 @@
           },
           "execution": {
             "value": "native",
-            "provenance": "declared"
+            "provenance": "inferred",
+            "evidence": [
+              "synthetic:IsWow64Process2 native machine"
+            ]
           }
         },
         "service_manager": {
           "name": {
             "value": "windows-scm",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:service control manager"
+            ]
           },
           "scope": {
             "value": "system",
-            "provenance": "declared"
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:service control manager"
+            ]
           }
         }
       }
@@ -186,6 +198,16 @@
         "value": null,
         "provenance": "not-applicable",
         "reason": "Windows has no POSIX user ID or user namespace"
+      },
+      "real_uid": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "Windows has no POSIX user IDs"
+      },
+      "saved_uid": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "Windows has no POSIX user IDs"
       },
       "gid": {
         "value": null,
@@ -213,6 +235,11 @@
       },
       "capabilities": {
         "effective": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        },
+        "permitted": {
           "value": null,
           "provenance": "not-applicable",
           "reason": "a Linux interface; not applicable on Windows"

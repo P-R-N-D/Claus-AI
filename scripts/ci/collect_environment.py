@@ -73,6 +73,7 @@ import subprocess
 import sys
 import sysconfig
 import threading
+import time
 
 COLLECTOR = {"name": "collect-environment", "version": 1}
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -900,11 +901,18 @@ class Probe:
                 pass
 
         # Read at most one byte more than the limit, and stop node if it runs too long or writes too much.
-        expired = threading.Event()
+        # The timer stops node only while this thread reads. This thread ends that under the lock, so a
+        # timer that already fired has sent its signal by then, and only this thread reaps node: no signal
+        # can reach a process ID that was reaped and perhaps reused.
+        expired, lock = threading.Event(), threading.Lock()
+        deadline = time.monotonic() + NODE_TIMEOUT
+        reading = True
 
         def expire():
-            expired.set()
-            stop()
+            with lock:
+                if reading:
+                    expired.set()
+                    stop()
 
         timer = threading.Timer(NODE_TIMEOUT, expire)
         timer.start()
@@ -913,8 +921,17 @@ class Probe:
                 output = process.stdout.read(NODE_OUTPUT_LIMIT + 1)
                 if len(output) > NODE_OUTPUT_LIMIT:
                     stop()
-            status = process.wait()
+            with lock:
+                reading = False
+            try:
+                status = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                expired.set()
+                stop()
+                status = process.wait()
         finally:
+            with lock:
+                reading = False
             timer.cancel()
             if process.poll() is None:
                 stop()

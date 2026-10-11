@@ -1043,6 +1043,53 @@ class NodeTests(Case):
         self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 0.5 seconds", []))
         self.assertLess(time.monotonic() - started, 20)
 
+    @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
+    def test_a_late_timer_does_not_signal_a_reaped_node(self):
+        # A timer that fires after node was reaped must not signal its process ID, which may already be in use again.
+        timers = []
+
+        class Timer:
+            def __init__(self, interval, function):
+                self.function = function
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        with mock.patch.object(collector.threading, "Timer", Timer), mock.patch.object(collector.os, "killpg") as killpg:
+            facts, errors = self.node('{"v":"24.21.0","m":"137","n":"10","a":"x64","p":"linux"}')
+            self.assertEqual((value(facts["version"]), errors), ("24.21.0", []))
+            timers.pop().function()
+        killpg.assert_not_called()
+
+        # The same after the read fails and node is stopped and reaped on the way out.
+        class Popen(subprocess.Popen):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                pipe = self.stdout
+
+                class Broken:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *exc):
+                        pipe.close()
+
+                    def read(self, size):
+                        raise OSError("read failed")
+
+                self.stdout = Broken()
+
+        with mock.patch.object(collector.threading, "Timer", Timer), mock.patch.object(collector.subprocess, "Popen", Popen):
+            facts, errors = self.node('{"v":"24.21.0"}', after="sleep 30\n")
+            self.assertEqual(errors, [{"probe": "node", "error": "OSError raised by the node probe"}])
+            with mock.patch.object(collector.os, "killpg") as killpg:
+                timers.pop().function()
+        killpg.assert_not_called()
+
     def test_node_absent_or_skipped(self):
         with tempfile.TemporaryDirectory() as directory, FakeMachine(env={"PATH": directory}) as machine:
             self.assertEqual(machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"], "node is not on PATH")
@@ -1309,7 +1356,7 @@ class SourceTests(unittest.TestCase):
                 imported.update(alias.name.split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 imported.add((node.module or "").split(".")[0])
-        allowed = {"argparse", "datetime", "json", "os", "pathlib", "platform", "re", "shutil", "signal", "stat", "struct", "subprocess", "sys", "sysconfig", "threading"}
+        allowed = {"argparse", "datetime", "json", "os", "pathlib", "platform", "re", "shutil", "signal", "stat", "struct", "subprocess", "sys", "sysconfig", "threading", "time"}
         self.assertEqual(imported - allowed, set())
 
     def test_no_forbidden_calls(self):

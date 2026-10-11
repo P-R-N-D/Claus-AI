@@ -672,6 +672,14 @@ class EnvironmentRuleTests(Case):
         amd64_tag = changed(result, lambda d: python(d).update(soabi=fact("cp312-win_amd64", "synthetic:x")))
         self.assertFinding(check(amd64_tag), "abi-contradiction", "/workload/runtimes/python/soabi")
         self.assertEqual(validator.python_platform_target("macosx-14.0-universal2"), ("macos", None))
+        # glibc and musl are C libraries for Linux, so they contradict a Windows or macOS Python whatever its ABI tag names.
+        for document in (result, fixture("windows-arm64-native.profile")):
+            for libc in ("glibc 2.39", "GLIBC 2.39", "musl 1.2.5"):
+                with self.subTest(document=document["kind"], libc=libc):
+                    self.assertFinding(check(changed(document, lambda d: python(d).update(libc=fact(libc, provenance="declared")))), "abi-contradiction", "/workload/runtimes/python/libc")
+        self.assertValid(check(changed(result, lambda d: python(d).update(libc=fact("ucrt", "synthetic:x")))))
+        macos = changed(fixture("linux-x64-vm.result"), lambda d: python(d).update(platform=fact("macosx-14.0-arm64", "synthetic:x"), soabi=fact("cpython-312-darwin", "synthetic:x")))
+        self.assertFinding(check(macos), "abi-contradiction", "/workload/runtimes/python/libc")
 
     def test_32_bit_code_on_a_64_bit_kernel_of_its_family_is_native(self):
         def thirty_two_bit(d):
@@ -1414,6 +1422,12 @@ class ProfileTests(Case):
         # The job must also be in the workflow the profile names.
         other_workflow = changed(result, lambda d: d["run"]["ci"].update(workflow_ref=fact("P-R-N-D/Claus-AI/.github/workflows/other.yml@refs/pull/1/merge", "env:GITHUB_WORKFLOW_REF")))
         self.assertCodes(check(other_workflow, profile), "profile-link")
+        # A known workflow ref in another repository is a mismatch, not a missing ref, even when the job matches.
+        for ref in ("Other/Repo/.github/workflows/ci.yml@refs/heads/main", "P-R-N-D/Claus-AI-fork/.github/workflows/ci.yml@refs/heads/main"):
+            with self.subTest(workflow_ref=ref):
+                elsewhere = changed(result, lambda d: d["run"]["ci"].update(workflow_ref=fact(ref, "env:GITHUB_WORKFLOW_REF")))
+                self.assertCodes(check(elsewhere, profile), "profile-link")
+                self.assertFinding(check(elsewhere, profile), "profile-link", "/run/ci/workflow_ref")
         self.assertFinding(check(other_workflow, profile), "profile-link", "/run/ci/workflow_ref")
         self.assertValid(check(changed(result, lambda d: d["run"]["ci"].update(workflow_ref=unknown())), profile))
         # Without a workflow_ref, only the job is compared.
@@ -1438,6 +1452,13 @@ class ProfileTests(Case):
         ):
             with self.subTest(label):
                 self.assertCodes(check(changed(result, change), profile), "ci-evidence")
+        # A declared run or commit is a claim the record cannot back, so each must be observed or inferred.
+        for group, names in ((ci, ("event", "repository", "run_id", "run_attempt", "run_url", "job")), (revision, ("tested_sha", "event_sha", "pr_head_sha", "pr_base_sha"))):
+            for name in names:
+                with self.subTest(declared=name):
+                    path = f"/run/{'ci' if group is ci else 'revision'}/{name}"
+                    declared = changed(result, lambda d: group(d).update({name: fact(group(d)[name]["value"], provenance="declared")}))
+                    self.assertFinding(check(declared, profile), "ci-evidence", path)
         self.assertFinding(check(changed(result, lambda d: ci(d).update(job=unknown())), profile), "ci-evidence", "/run/ci/job")
         push = changed(result, lambda d: (ci(d).update(event=fact("push", "env:GITHUB_EVENT_NAME")),
                                           revision(d).update(pr_head_sha={"value": None, "provenance": "not-applicable", "reason": "push"},

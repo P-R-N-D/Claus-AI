@@ -766,6 +766,11 @@ def check_workload(document, findings):
             findings.error("abi-contradiction", f"{base}/libc", f"the ABI tag is for {tag_libc}, the libc fact {known(python['libc'])!r} names {names}")
         if known(python["free_threaded_build"]) is False and known(python["gil_enabled"]) is False:
             findings.error("abi-contradiction", f"{base}/gil_enabled", "a build without free threading always holds the GIL")
+    # glibc and musl are C libraries for Linux, whatever the ABI tag names.
+    libc = libc_of_fact(known(python["libc"]))
+    elsewhere = {family, platform_family, soabi_target(known(python["soabi"]))[0]} & {"windows", "macos", "freebsd"}
+    if libc in ("glibc", "musl") and elsewhere:
+        findings.error("abi-contradiction", f"{base}/libc", f"{libc} is a C library for Linux, and this Python is for {' and '.join(sorted(elsewhere))}")
 
 
 def check_compute(document, findings):
@@ -857,20 +862,21 @@ def check_run(document, findings):
     ci, revision = document["run"]["ci"], document["run"]["revision"]
     if known(ci["system"]) != "github-actions":
         return
+    # The run and the commits are evidence only when measured; a declared value is a claim the record cannot back.
     for name in ("event", "repository", "run_id", "run_attempt", "run_url", "job"):
-        if known(ci[name]) is None:
-            findings.error("ci-evidence", f"/run/ci/{name}", "a GitHub Actions record names its run")
-    repository, run_id, url = known(ci["repository"]), known(ci["run_id"]), known(ci["run_url"])
+        if measured(ci[name]) is None:
+            findings.error("ci-evidence", f"/run/ci/{name}", "a GitHub Actions record names its run, as observed or inferred")
+    repository, run_id, url = measured(ci["repository"]), measured(ci["run_id"]), measured(ci["run_url"])
     if repository and run_id and url and not re.fullmatch(rf"https://[A-Za-z0-9.-]+/{re.escape(repository)}/actions/runs/{re.escape(run_id)}(/attempts/[1-9][0-9]*)?", url):
         findings.error("ci-evidence", "/run/ci/run_url", "the run URL does not point at this repository's run")
-    if known(revision["tested_sha"]) is None:
-        findings.error("ci-evidence", "/run/revision/tested_sha", "a GitHub Actions record names the commit its checkout holds")
-    if known(revision["event_sha"]) is None:
-        findings.error("ci-evidence", "/run/revision/event_sha", "a GitHub Actions record keeps GITHUB_SHA")
-    if known(ci["event"]) in ("pull_request", "pull_request_target"):
+    if measured(revision["tested_sha"]) is None:
+        findings.error("ci-evidence", "/run/revision/tested_sha", "a GitHub Actions record names the commit its checkout holds, as observed or inferred")
+    if measured(revision["event_sha"]) is None:
+        findings.error("ci-evidence", "/run/revision/event_sha", "a GitHub Actions record keeps GITHUB_SHA, as observed or inferred")
+    if measured(ci["event"]) in ("pull_request", "pull_request_target"):
         for name in ("pr_head_sha", "pr_base_sha"):
-            if known(revision[name]) is None:
-                findings.error("ci-evidence", f"/run/revision/{name}", "a pull request run records the head and base it compared")
+            if measured(revision[name]) is None:
+                findings.error("ci-evidence", f"/run/revision/{name}", "a pull request run records the head and base it compared, as observed or inferred")
 
 
 # ---------------------------------------------------------------------------
@@ -1151,13 +1157,16 @@ def check_against_profile(result, profile, findings):
     if known(ci["system"]) == "github-actions":
         # GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>; the job is compared with the workflow it ran in when both are known.
         repository, workflow_ref = known(ci["repository"]), known(ci["workflow_ref"])
-        workflow = None
-        if isinstance(repository, str) and isinstance(workflow_ref, str) and workflow_ref.startswith(repository + "/"):
-            workflow = workflow_ref[len(repository) + 1:].partition("@")[0] or None
         sources = [(source["workflow"], source["job"]) for source in profile["evidence_sources"]]
-        if workflow is not None and (workflow, job) not in sources:
-            findings.error("profile-link", "/run/ci/workflow_ref", f"job {job!r} of {workflow!r} is not an evidence source of profile {profile['id']}")
-        elif workflow is None and job not in [source_job for _, source_job in sources]:
+        if isinstance(repository, str) and isinstance(workflow_ref, str):
+            # A known workflow ref is compared; only an unknown one leaves the job to be compared alone.
+            if not workflow_ref.startswith(repository + "/"):
+                findings.error("profile-link", "/run/ci/workflow_ref", f"the workflow ref {workflow_ref!r} is not in repository {repository!r}")
+            else:
+                workflow = workflow_ref[len(repository) + 1:].partition("@")[0]
+                if (workflow, job) not in sources:
+                    findings.error("profile-link", "/run/ci/workflow_ref", f"job {job!r} of {workflow!r} is not an evidence source of profile {profile['id']}")
+        elif job not in [source_job for _, source_job in sources]:
             findings.error("profile-link", "/run/ci/job", f"job {job!r} is not an evidence source of profile {profile['id']}")
 
     def compare(path, declared_fact, observed_fact):

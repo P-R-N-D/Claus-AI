@@ -1354,7 +1354,7 @@ def main(argv=None):
     parser.add_argument("--no-policy", action="store_true", help="skip the privilege policy (for records of machines it is not meant for)")
     parser.add_argument("--summary", type=pathlib.Path, help="append a Markdown summary to this file")
     args = parser.parse_args(argv)
-    # The summary is appended to, so it must not be one of the files named on the command line.
+    # The summary is appended to, so it must not be the schema, the profile, the lane table or a document.
     if args.summary and any(same_file(args.summary, path) for path in (args.schema, args.profile, args.dependency_strategy, *args.documents) if path):
         print(plain(f"error: the summary {args.summary} is the schema, the profile, the lane table or a document of this run"), file=sys.stderr)
         return 2

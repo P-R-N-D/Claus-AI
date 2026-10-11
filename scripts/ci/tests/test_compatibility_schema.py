@@ -15,6 +15,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "ci" / "validate_compatibility.py"
@@ -388,6 +389,7 @@ class ProvenanceTests(Case):
         for label, text, code in (
             ("newline", "a\nb", "control-character"),
             ("bidirectional override", "a\u202eb", "control-character"),
+            ("lone surrogate", "a\ud800b", "control-character"),
             ("GitHub token", "token ghp_" + "A" * 36, "secret-like-value"),
             ("fine-grained token", "github_pat_" + "a" * 30, "secret-like-value"),
             ("AWS key", "AKIA" + "ABCDEFGHIJKLMNOP", "secret-like-value"),
@@ -491,6 +493,11 @@ class EnvironmentRuleTests(Case):
         for soabi in ("cpython-312-x86_64-linux-musl", "cpython-312-x86_64-linux-gnu"):
             with self.subTest(soabi):
                 self.assertValid(check(changed(result, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact(soabi, "synthetic:x")))))
+        # The platform part of the tag is checked even when the version is not known.
+        no_version = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(version=unknown()))
+        for soabi, code in (("cpython-312-aarch64-linux-gnu", "abi-contradiction"), ("cp312-win_amd64", "os-contradiction")):
+            with self.subTest(soabi=soabi, version="unknown"):
+                self.assertFinding(check(changed(no_version, lambda d: d["workload"]["runtimes"]["python"].update(soabi=fact(soabi, "synthetic:x")))), code, "/workload/runtimes/python/soabi")
         self.assertEqual(validator.soabi_target("cpython-312-arm-linux-gnueabihf"), ("linux", "armv7"))
         self.assertEqual(validator.soabi_target("cpython-313t-powerpc64le-linux-gnu"), ("linux", "ppc64le"))
         self.assertEqual(validator.soabi_target("cp313t-win_arm64"), ("windows", "aarch64"))
@@ -600,6 +607,7 @@ class StageRuleTests(Case):
         for name, evidence, valid in (
             ("install", ["doc:README.md"], False),
             ("install", ["tool:collect-environment"], False),
+            ("install", ["file:/proc/self/status"], False),
             ("install", ["log:uv pip sync"], True),
             ("install", ["artifact:install-log"], True),
             ("detect", ["doc:README.md"], False),
@@ -679,6 +687,16 @@ class StageRuleTests(Case):
                 findings = check(changed(result, change), profile)
                 self.assertFinding(findings, "required-stage", "/stages/execute/compute")
                 self.assertFinding(findings, "required-stage", "/stages/correctness/compute")
+        # The CPU was asked for, so this is no fallback, but the stage still did not request the accelerator.
+        cpu_requested = changed(result, lambda d: d["stages"]["execute"]["compute"].update(requested="cpu"))
+        self.assertCodes(check(cpu_requested, profile), "required-stage")
+        self.assertFinding(check(cpu_requested, profile), "required-stage", "/stages/execute/compute")
+
+        def performance_on_cpu(d):
+            d["stages"]["performance"] = {"status": "passed", "evidence": ["synthetic:benchmark log"], "privilege": {"escalation": {"value": "none", "provenance": "declared"}},
+                                          "compute": {"requested": "cpu", "effective": "cpu"}}
+        performance_profile = changed(profile, lambda d: d["required_stages"].append("performance"))
+        self.assertFinding(check(changed(result, performance_on_cpu), performance_profile), "required-stage", "/stages/performance/compute")
         for label, name in (("missing backend", "rocm"), ("CPU backend", "cpu")):
             with self.subTest(label):
                 self.assertFinding(check(changed(profile, lambda d: d.update(accelerator_backend=name))), "backend-reference", "/accelerator_backend")
@@ -729,6 +747,10 @@ class PolicyTests(Case):
         self.assertFinding(findings, "policy-minimal-capabilities", "/workload/isolation/capabilities/effective")
         # Windows has no Linux capabilities.
         self.assertValid(check(fixture("windows-arm64-native.result")))
+        # An unknown OS family is not shown to be one without them.
+        unknown_family = changed(result, lambda d: (d["environment"]["layers"][-1]["os"].update(family=unknown()),
+                                                    d["workload"]["isolation"]["capabilities"].update(effective=not_applicable)))
+        self.assertFinding(check(unknown_family), "policy-minimal-capabilities", "/workload/isolation/capabilities/effective")
 
     def test_a_workload_not_shown_outside_a_container_does_not_pass_the_container_rules(self):
         result = fixture("linux-x64-vm.result")
@@ -740,6 +762,16 @@ class PolicyTests(Case):
                 self.assertFinding(findings, "policy-no-privileged-container", path)
                 self.assertFinding(findings, "policy-engine-rootless", path, level="warning")
         self.assertValid(check(result))
+        # An unknown OS family fails closed, like Linux.
+        unknown_family = changed(result, lambda d: (d["environment"]["layers"][-1]["os"].update(family=unknown()),
+                                                    d["workload"]["isolation"]["pid_namespace"].update(initial=fact(False, "synthetic:x"))))
+        self.assertFinding(check(unknown_family), "policy-no-privileged-container", path)
+        # WSL 2 gives every distribution its own PID namespace, so there the namespace does not suggest a container.
+        wsl2 = fixture("windows-arm64-wsl2-podman.result")
+        distribution = changed(wsl2, lambda d: (d["environment"]["layers"].pop(2), d.update(profile_id=None),
+                                                d["workload"]["isolation"]["pid_namespace"].update(initial=fact(False, "synthetic:x"))))
+        self.assertValid(check(distribution))
+        self.assertCodes(check(distribution), level="warning")
 
     def test_rootless_engine_and_non_root_workload_are_independent(self):
         result, profile = pair("windows-arm64-wsl2-podman")
@@ -849,6 +881,15 @@ class ProfileTests(Case):
         self.assertFinding(check(unsourced), "evidence-source", "/evidence_sources")
         # A synthetic profile is recorded by no job.
         self.assertValid(check(changed(fixture("linux-x64-vm.profile"), lambda d: d.update(evidence_sources=[]))))
+        # A comment at the start of a line does not end the jobs block.
+        with tempfile.TemporaryDirectory() as directory:
+            workflow = pathlib.Path(directory) / ".github" / "workflows" / "ci.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("on: push\njobs:\n  backend:\n    runs-on: x\n# Compatibility\n  compatibility:\n    runs-on: x\n", encoding="utf-8")
+            with mock.patch.object(validator, "ROOT", pathlib.Path(directory)):
+                self.assertValid(check(profile))
+                workflow.write_text("on: push\njobs:\n  backend:\n    runs-on: x\nenv:\n  compatibility: x\n", encoding="utf-8")
+                self.assertCodes(check(profile), "evidence-source")
 
     def test_a_result_is_checked_against_what_its_profile_declares(self):
         result, profile = pair("windows-arm64-wsl2-podman")
@@ -894,6 +935,14 @@ class ProfileTests(Case):
         self.assertFinding(check(result, synthetic), "profile-link", "/synthetic")
         other_job = changed(result, lambda d: d["run"]["ci"].update(job=fact("backend", "env:GITHUB_JOB")))
         self.assertCodes(check(other_job, profile), "profile-link")
+        # The job must also be in the workflow the profile names.
+        other_workflow = changed(result, lambda d: d["run"]["ci"].update(workflow_ref=fact("P-R-N-D/Claus-AI/.github/workflows/other.yml@refs/pull/1/merge", "env:GITHUB_WORKFLOW_REF")))
+        self.assertCodes(check(other_workflow, profile), "profile-link")
+        self.assertFinding(check(other_workflow, profile), "profile-link", "/run/ci/workflow_ref")
+        self.assertValid(check(changed(result, lambda d: d["run"]["ci"].update(workflow_ref=unknown())), profile))
+        # Without a workflow_ref, only the job is compared.
+        no_ref = changed(other_job, lambda d: d["run"]["ci"].update(workflow_ref=unknown()))
+        self.assertFinding(check(no_ref, profile), "profile-link", "/run/ci/job")
 
     def test_a_github_actions_record_names_its_run_and_commits(self):
         result, profile = real_result()
@@ -961,6 +1010,20 @@ class CommandTests(Case):
             code, output = self.run_main("--summary", pathlib.Path(directory) / "missing" / "summary.md", FIXTURES / "linux-x64-vm.profile.json")
         self.assertEqual(code, 2)
         self.assertIn("cannot write the summary", output)
+
+    def test_document_text_cannot_forge_output_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            for label, tag in (("newline", "cpython-31\n::error title=x::forged"), ("lone surrogate", "cpython-31\ud800")):
+                with self.subTest(label):
+                    path = directory / "result.json"
+                    path.write_text(json.dumps(changed(fixture("linux-x64-vm.result"), lambda d: d["workload"]["runtimes"]["python"].update(cache_tag=fact(tag, "synthetic:x")))), encoding="utf-8")
+                    summary = directory / "summary.md"
+                    code, output = self.run_main("--summary", summary, path)
+                    self.assertEqual(code, 1)
+                    self.assertIn("control-character", output)
+                    self.assertFalse([line for line in output.splitlines() if line.startswith("::")], output)
+                    self.assertNotRegex(output + summary.read_text(encoding="utf-8"), "[\ud800-\udfff]")
 
     def test_summary_cells_escape_markdown(self):
         self.assertEqual(validator.markdown_cell("a|b`c\nd"), "a\\|b\\`c d")

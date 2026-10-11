@@ -107,8 +107,8 @@ KNOWN_ORCHESTRATION = frozenset({"none", "kubernetes", "k3s", "openshift", "noma
 KNOWN_SERVICE_MANAGERS = frozenset({"none", "systemd", "launchd", "windows-scm", "openrc"})
 NODE_PLATFORMS = {"linux": "linux", "win32": "windows", "darwin": "macos", "freebsd": "freebsd"}
 
-# C0 and C1 controls, DEL, and the Unicode bidirectional controls.
-CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+# C0 and C1 controls, DEL, the Unicode bidirectional controls, and lone surrogates.
+CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
 SECRET_SHAPES = (
     ("GitHub token", re.compile(r"\bgh[opsur]_[A-Za-z0-9]{30,}")),
     ("GitHub token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}")),
@@ -433,7 +433,7 @@ def check_strings(document, findings):
         texts = [value] if isinstance(value, str) else list(value) if isinstance(value, dict) else []
         for text in texts:
             if CONTROL.search(text):
-                findings.error("control-character", path or "/", "contains a control or bidirectional formatting character")
+                findings.error("control-character", path or "/", "contains a control character, a bidirectional formatting character or a lone surrogate")
             for label, shape in SECRET_SHAPES:
                 if shape.search(text):
                     findings.error("secret-like-value", path or "/", f"looks like a {label}; records are published as CI artifacts")
@@ -597,19 +597,20 @@ def check_workload(document, findings):
             major, minor = match.groups()
             cache_tag = known(python["cache_tag"])
             if cache_tag is not None and cache_tag != f"cpython-{major}{minor}":
-                findings.error("abi-contradiction", f"{base}/cache_tag", f"CPython {major}.{minor} has cache tag cpython-{major}{minor}, not {cache_tag}")
+                findings.error("abi-contradiction", f"{base}/cache_tag", f"CPython {major}.{minor} has cache tag cpython-{major}{minor}, not {cache_tag!r}")
             soabi = re.match(r"(?:cpython-|cp)(\d)(\d+)(t?)", known(python["soabi"]) or "")
             if soabi:
                 if soabi.group(1) != major or soabi.group(2) != minor:
-                    findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for another version than {version}")
+                    findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for another version than {version!r}")
                 free_threaded = known(python["free_threaded_build"])
                 if free_threaded is not None and free_threaded != bool(soabi.group(3)):
                     findings.error("abi-contradiction", f"{base}/free_threaded_build", "the free-threaded flag disagrees with the ABI tag's t suffix")
-            soabi_family, soabi_arch = soabi_target(known(python["soabi"]))
-            if soabi_family and family and soabi_family != family:
-                findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the innermost layer is {family}")
-            if soabi_arch in ARCH_BITS and python_arch in ARCH_BITS and soabi_arch != python_arch:
-                findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_arch}, the arch fact says {python_arch}")
+        # The platform part of the ABI tag is checked even when the version is unknown.
+        soabi_family, soabi_arch = soabi_target(known(python["soabi"]))
+        if soabi_family and family and soabi_family != family:
+            findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the innermost layer is {family}")
+        if soabi_arch in ARCH_BITS and python_arch in ARCH_BITS and soabi_arch != python_arch:
+            findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_arch}, the arch fact says {python_arch}")
         if known(python["free_threaded_build"]) is False and known(python["gil_enabled"]) is False:
             findings.error("abi-contradiction", f"{base}/gil_enabled", "a build without free threading always holds the GIL")
 
@@ -878,11 +879,11 @@ def check_evidence_sources(profile, findings):
         workflow = ROOT / source["workflow"]
         base = f"/evidence_sources/{index}"
         if not source["workflow"].startswith(".github/workflows/") or ".." in source["workflow"] or not workflow.is_file():
-            findings.error("evidence-source", f"{base}/workflow", f"no workflow file {source['workflow']}")
+            findings.error("evidence-source", f"{base}/workflow", f"no workflow file {source['workflow']!r}")
             continue
-        jobs = re.search(r"^jobs:[ \t]*\n(.*?)(?=^\S|\Z)", workflow.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL)
+        jobs = re.search(r"^jobs:[ \t]*\n(.*?)(?=^[^\s#]|\Z)", workflow.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL)
         if not jobs or not re.search(rf"^  {re.escape(source['job'])}:[ \t]*$", jobs.group(1), re.MULTILINE):
-            findings.error("evidence-source", f"{base}/job", f"{source['workflow']} has no job {source['job']!r}")
+            findings.error("evidence-source", f"{base}/job", f"{source['workflow']!r} has no job {source['job']!r}")
 
 
 def facts_of(node, keys=()):
@@ -908,9 +909,19 @@ def check_against_profile(result, profile, findings):
         findings.error("profile-link", "/profile_id", f"the result names profile {result['profile_id']!r}, not {profile['id']!r}")
     if result["synthetic"] != profile["synthetic"]:
         findings.error("profile-link", "/synthetic", "a real result is checked against a real profile, and a synthetic one against a synthetic one")
-    job = known(result["run"]["ci"]["job"])
-    if known(result["run"]["ci"]["system"]) == "github-actions" and job not in [source["job"] for source in profile["evidence_sources"]]:
-        findings.error("profile-link", "/run/ci/job", f"job {job!r} is not an evidence source of profile {profile['id']}")
+    ci = result["run"]["ci"]
+    job = known(ci["job"])
+    if known(ci["system"]) == "github-actions":
+        # GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>; the job is compared with the workflow it ran in when both are known.
+        repository, workflow_ref = known(ci["repository"]), known(ci["workflow_ref"])
+        workflow = None
+        if isinstance(repository, str) and isinstance(workflow_ref, str) and workflow_ref.startswith(repository + "/"):
+            workflow = workflow_ref[len(repository) + 1:].partition("@")[0] or None
+        sources = [(source["workflow"], source["job"]) for source in profile["evidence_sources"]]
+        if workflow is not None and (workflow, job) not in sources:
+            findings.error("profile-link", "/run/ci/workflow_ref", f"job {job!r} of {workflow!r} is not an evidence source of profile {profile['id']}")
+        elif workflow is None and job not in [source_job for _, source_job in sources]:
+            findings.error("profile-link", "/run/ci/job", f"job {job!r} is not an evidence source of profile {profile['id']}")
 
     def compare(path, declared_fact, observed_fact):
         declared, observed = known(declared_fact), known(observed_fact)
@@ -1036,9 +1047,14 @@ def load_schema(path=DEFAULT_SCHEMA):
     return schema
 
 
+def plain(text):
+    """Text for a terminal line: control characters and lone surrogates become spaces."""
+    return CONTROL.sub(" ", str(text))
+
+
 def markdown_cell(text):
     """Text for one Markdown table cell: control characters become spaces, and Markdown and HTML syntax is escaped."""
-    return re.sub(r"([\\`*_~\[\]()<>!|])", r"\\\1", CONTROL.sub(" ", str(text)))
+    return re.sub(r"([\\`*_~\[\]()<>!|])", r"\\\1", plain(text))
 
 
 def main(argv=None):
@@ -1075,7 +1091,7 @@ def main(argv=None):
         if not isinstance(profile, dict) or profile.get("kind") != "profile" or profile_findings.errors:
             print(f"error: {args.profile} is not a valid profile", file=sys.stderr)
             for level, code, path, message in (profile_findings.items if profile_findings else []):
-                print(f"  {level.upper()} {code} {path}: {message}", file=sys.stderr)
+                print(plain(f"  {level.upper()} {code} {path}: {message}"), file=sys.stderr)
             return 2
 
     invalid = 0
@@ -1098,9 +1114,9 @@ def main(argv=None):
         verdict = "invalid" if errors else "valid"
         invalid += bool(errors)
         kind = document.get("kind") if isinstance(document, dict) else "?"
-        print(f"{path}: {verdict} {kind} ({len(errors)} errors, {len(warnings)} warnings)")
+        print(plain(f"{path}: {verdict} {kind} ({len(errors)} errors, {len(warnings)} warnings)"))
         for level, code, where, message in findings.items:
-            print(f"  {level.upper()} {code} {where}: {message}")
+            print(plain(f"  {level.upper()} {code} {where}: {message}"))
             details.append(f"- {level} `{markdown_cell(code)}` {markdown_cell(path.name)} {markdown_cell(where)}: {markdown_cell(message)}")
         lines.append(f"| {markdown_cell(path.name)} | {markdown_cell(kind)} | {verdict} | {len(errors)} | {len(warnings)} |")
 

@@ -1625,7 +1625,7 @@ class CommandTests(Case):
             directory = pathlib.Path(directory)
             schema, document = directory / "schema.json", directory / "record.json"
             schema.write_text(json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}), encoding="utf-8")
-            for content in ({}, {"kind": "result", "run": {}}):
+            for content in ({}, {"kind": "result", "run": {}}, {"kind": "profile"}):
                 with self.subTest(content=content):
                     document.write_text(json.dumps(content), encoding="utf-8")
                     for argv in (("--schema", schema, document), ("--schema", schema, "--profile", document, FIXTURES / "linux-x64-vm.result.json")):
@@ -1633,6 +1633,14 @@ class CommandTests(Case):
                         self.assertEqual(code, 2)
                         self.assertIn("accepts a document the rules across fields cannot read", output)
                         self.assertNotIn("Traceback", output)
+
+    def test_a_rule_that_fails_under_the_default_schema_is_not_hidden(self):
+        # With the default schema, however its path is written, an exception in a rule is a bug, not a usage error.
+        result = FIXTURES / "linux-x64-vm.result.json"
+        with mock.patch.object(validator, "check_strings", side_effect=KeyError("injected")), contextlib.chdir(validator.ROOT):
+            for argv in ((result,), ("--schema", validator.DEFAULT_SCHEMA, result), ("--schema", validator.DEFAULT_SCHEMA.relative_to(validator.ROOT), result)):
+                with self.subTest(argv=argv[:2]), self.assertRaises(KeyError):
+                    self.run_main(*argv)
 
     def test_summary_lists_at_most_200_findings(self):
         with tempfile.TemporaryDirectory() as directory:

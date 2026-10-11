@@ -1340,11 +1340,12 @@ def main(argv=None):
 
     def validate(document, *rest, **options):
         # The rules across fields read the shape the default schema requires. Another schema can accept a document
-        # they cannot read: that is a usage error, not a verdict. With the default schema it would be a bug.
+        # they cannot read: that is a usage error, not a verdict. With the default schema, however its path is
+        # written, it would be a bug.
         try:
             return validate_document(document, schema, *rest, **options)
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
-            if args.schema == DEFAULT_SCHEMA:
+            if args.schema.resolve() == DEFAULT_SCHEMA.resolve():
                 raise
             print(plain(f"error: schema {args.schema} accepts a document the rules across fields cannot read ({type(exc).__name__})"), file=sys.stderr)
             return None

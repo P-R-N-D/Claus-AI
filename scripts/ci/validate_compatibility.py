@@ -47,7 +47,7 @@ JSON_TYPES = frozenset({"object", "array", "string", "integer", "number", "boole
 DIALECT = "https://json-schema.org/draft/2020-12/schema"
 # Pattern syntax that Python's re and ECMA-262 read differently: shorthand classes and anchors that
 # follow Unicode or another definition, and (? groups other than (?:. Only an unescaped one counts.
-NON_PORTABLE_PATTERN = re.compile(r"(?<!\\)(?:\\\\)*(?:\\[dDwWsSbBAZz]|\(\?(?!:))")
+NON_PORTABLE_PATTERN = re.compile(r"(?<!\\)(?:\\\\)*(?:\\[dDwWsSbBAZz]|\(\?(?!:)|\{,|[*+?}]\+)")
 # Keywords whose subschema applies to the same value, so a $ref cycle through them never ends.
 SAME_VALUE_KEYWORDS = ("if", "then", "else")
 
@@ -470,7 +470,7 @@ def python_platform_target(platform):
     if match:
         arch = match.group(1)
         return "macos", None if arch in ("universal2", "intel", "fat", "fat3", "fat64") else normalize_arch(arch)
-    match = re.fullmatch(r"freebsd-[^-]+-([A-Za-z0-9_]+)", platform)
+    match = re.fullmatch(r"freebsd-.+-([A-Za-z0-9_]+)", platform)
     if match:
         return "freebsd", normalize_arch(match.group(1))
     return None, None
@@ -1221,8 +1221,10 @@ def load_schema(path=DEFAULT_SCHEMA):
 
 
 def plain(text):
-    """Text for a terminal line: control characters and lone surrogates become spaces."""
-    return CONTROL.sub(" ", str(text))
+    """Text for a terminal line: control characters and lone surrogates become spaces, and "##[", which the
+    GitHub Actions runner reads as a workflow command anywhere in a line, becomes "## [".
+    """
+    return CONTROL.sub(" ", str(text)).replace("##[", "## [")
 
 
 def markdown_cell(text):

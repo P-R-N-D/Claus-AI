@@ -780,8 +780,14 @@ class OtherSystemTests(Case):
 
     def test_user_ids_off_linux(self):
         with FakeMachine(system="FreeBSD") as machine:
-            identity = machine.result()["workload"]["identity"]
+            result = machine.result()
+        identity = result["workload"]["identity"]
         self.assertEqual([identity[name]["evidence"] for name in ("uid", "real_uid", "saved_uid")], [["python:os.getresuid"]] * 3)
+        self.assertFact(result["workload"]["runtimes"]["python"]["platform"], "freebsd-14.1-RELEASE-amd64", "observed")
+        # Under Cygwin or MSYS2 user ID 0 does not name the Windows administrator, so nothing is read.
+        with FakeMachine(system="CYGWIN_NT-10.0-19045") as machine:
+            identity = machine.result()["workload"]["identity"]
+        self.assertEqual({identity[name]["provenance"] for name in ("superuser", "uid", "real_uid", "saved_uid")}, {"unknown"})
         # macOS has no getresuid: execve(2) saved the effective user ID, so the saved one is inferred.
         with without(collector.os, "getresuid"), mock.patch.object(collector.os, "geteuid", return_value=501), \
                 mock.patch.object(collector.os, "getuid", return_value=501), FakeMachine(system="Darwin", interpreter="aarch64") as machine:
@@ -924,21 +930,21 @@ class RunEvidenceTests(Case):
 
 
 class NodeTests(Case):
-    def fake_node(self, directory, output, status=0, before=""):
+    def fake_node(self, directory, output, status=0, before="", after=""):
         script = pathlib.Path(directory) / "node"
         leak = pathlib.Path(directory) / "leak"
         script.write_text(
             "#!/bin/sh\n"
             f'if [ -n "${{SENTINEL_SECRET+x}}" ] || [ -n "${{HOME+x}}" ]; then echo leaked > "{leak}"; fi\n'
-            f"{before}printf '%s' '{output}'\nexit {status}\n",
+            f"{before}printf '%s' '{output}'\n{after}exit {status}\n",
             encoding="utf-8",
         )
         script.chmod(0o755)
         return leak
 
-    def node(self, output, status=0, reference=("x86_64", "x86"), before=""):
+    def node(self, output, status=0, reference=("x86_64", "x86"), before="", after=""):
         with tempfile.TemporaryDirectory() as directory, FakeMachine(env={"PATH": directory}) as machine:
-            leak = self.fake_node(directory, output, status, before)
+            leak = self.fake_node(directory, output, status, before, after)
             with mock.patch.dict(os.environ, {"SENTINEL_SECRET": "x", "HOME": "/home/private"}):
                 probe = machine.probe(probe_node=True)
                 facts = probe.guard("node", lambda: probe.node(reference), collector.node_fallback)
@@ -974,9 +980,11 @@ class NodeTests(Case):
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
     def test_node_output_and_time_are_bounded(self):
-        # Only one byte past the limit is read; node is then stopped.
-        facts, errors = self.node("x" * (collector.NODE_OUTPUT_LIMIT + 1) + "y" * 1000000)
+        # Only one byte past the limit is read; node is then stopped, even when it ignores the closed pipe and keeps running.
+        started = time.monotonic()
+        facts, errors = self.node("x" * (collector.NODE_OUTPUT_LIMIT + 1), before="trap '' PIPE\n", after="sleep 30\n")
         self.assertEqual((facts["version"]["reason"], errors), (f"node wrote more than {collector.NODE_OUTPUT_LIMIT} bytes", []))
+        self.assertLess(time.monotonic() - started, 20)
         # The shell's own child holds stdout open, so stopping only the shell would leave the read waiting.
         started = time.monotonic()
         with mock.patch.object(collector, "NODE_TIMEOUT", 0.5):
@@ -1176,6 +1184,10 @@ class SharedTableTests(unittest.TestCase):
                      "freebsd-14.1-RELEASE-arm64", "cygwin-3.5.4-x86_64", "linux"):
             with self.subTest(plat=plat):
                 self.assertEqual(collector.split_platform(plat), validator.python_platform_target(plat))
+        for plat, target in (("freebsd-14.1-RELEASE-amd64", ("freebsd", "x86_64")), ("freebsd-14.1-RELEASE-p6-arm64", ("freebsd", "aarch64")),
+                             ("macosx-11.0-arm64", ("macos", "aarch64")), ("win-arm64", ("windows", "aarch64")), ("linux-x86_64", ("linux", "x86_64"))):
+            with self.subTest(plat=plat):
+                self.assertEqual(collector.split_platform(plat), target)
 
     def test_stages_and_the_overall_verdict(self):
         self.assertEqual(collector.STAGES, validator.STAGES)

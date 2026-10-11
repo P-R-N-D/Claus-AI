@@ -258,6 +258,9 @@ class SchemaSubsetTests(Case):
             {"pattern": "a\\Z"},
             {"pattern": "(?i)a"},
             {"pattern": "(?P<name>a)"},
+            {"pattern": "^a{,3}$"},
+            {"pattern": "^a*+b$"},
+            {"pattern": "^a{2}+$"},
             {"$defs": {"a": {"if": {"$ref": "#/$defs/a"}}}, "$ref": "#/$defs/a"},
             {"$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"else": {"$ref": "#/$defs/a"}}}},
         ):
@@ -269,6 +272,7 @@ class SchemaSubsetTests(Case):
         for good in (
             {"$schema": validator.DIALECT, "$id": "https://example.invalid/s", "title": "t", "$comment": "c"},
             {"pattern": "^(?:a|b)[0-9]\\\\d$"},
+            {"pattern": "^\\*+a{0,3}$"},
             {"$defs": {"a": {"properties": {"x": {"$ref": "#/$defs/a"}}, "items": {"$ref": "#/$defs/a"}}}, "$ref": "#/$defs/a"},
         ):
             with self.subTest(schema=good):
@@ -631,6 +635,11 @@ class EnvironmentRuleTests(Case):
         self.assertIn("identity-contradiction", check(superuser, policy=False).codes())
         initial = changed(result, lambda d: identity(d)["user_namespace"].update(initial=fact(True, "synthetic:x")))
         self.assertCodes(check(initial), "identity-contradiction")
+        for family in ("macos", "freebsd"):
+            with self.subTest(family):
+                root = changed(fixture("linux-x64-vm.result"), lambda d, family=family: (
+                    d["environment"]["layers"][-1]["os"].update(family=fact(family, "synthetic:x")), identity(d).update(uid=fact(0, "synthetic:x"))))
+                self.assertIn("identity-contradiction", check(root, policy=False).codes())
         nested_full_map = changed(fixture("linux-x64-vm.result"), lambda d: identity(d)["user_namespace"].update(initial=fact(False, "synthetic:x")))
         self.assertValid(check(nested_full_map))
 
@@ -1370,8 +1379,20 @@ class CommandTests(Case):
                     code, output = self.run_main("--summary", summary, path)
                     self.assertEqual(code, 1)
                     self.assertIn("control-character", output)
-                    self.assertFalse([line for line in output.splitlines() if line.startswith("::")], output)
+                    self.assertFalse([line for line in output.splitlines() if line.lstrip().startswith("::")], output)
                     self.assertNotRegex(output + summary.read_text(encoding="utf-8"), "[\ud800-\udfff]")
+
+    def test_document_text_cannot_start_a_legacy_workflow_command(self):
+        # The runner reads "##[name]" anywhere in a line, so the value is echoed with "##[" broken up.
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "result.json"
+            version = "24.04 ##[stop-commands]token"
+            path.write_text(json.dumps(changed(fixture("linux-x64-vm.result"), lambda d: d["environment"]["layers"][1]["os"].update(version=fact(version, "synthetic:x")))), encoding="utf-8")
+            code, output = self.run_main("--profile", FIXTURES / "linux-x64-vm.profile.json", path)
+            self.assertEqual(code, 1)
+            self.assertIn("profile-mismatch", output)
+            self.assertIn("24.04 ## [stop-commands]token", output)
+            self.assertNotIn("##[", output)
 
     def test_file_names_cannot_forge_output_lines(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1380,7 +1401,7 @@ class CommandTests(Case):
                 with self.subTest(argv=argv[0]):
                     code, output = self.run_main(*argv)
                     self.assertEqual(code, 2)
-                    self.assertFalse([line for line in output.splitlines() if line.startswith("::")], output)
+                    self.assertFalse([line for line in output.splitlines() if line.lstrip().startswith("::")], output)
 
     def test_an_unusable_schema_is_a_usage_error(self):
         with tempfile.TemporaryDirectory() as directory:

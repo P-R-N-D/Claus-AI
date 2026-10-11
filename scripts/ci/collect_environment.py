@@ -97,6 +97,8 @@ STAGES = ("detect", "install", "initialize", "execute", "correctness", "security
 STATUSES = ("passed", "failed", "blocked", "not-run", "not-applicable")
 ESCALATIONS = ("none", "sudo", "root-login", "setuid", "other")
 SLUG = re.compile(r"[a-z0-9][a-z0-9._+-]{0,63}")
+# sysconfig.get_platform(), which on FreeBSD carries the release in capitals, such as freebsd-14.1-RELEASE-amd64.
+PLATFORM_TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
 SHA = re.compile(r"[0-9a-f]{40}")
 EVIDENCE = re.compile(r"(file|env|python|cmd|event|git|tool|doc|profile|workflow|log|artifact):[!-~][ -~]{0,299}")
 PRINTABLE = re.compile(r"[ -~]{1,200}")
@@ -640,19 +642,20 @@ class Probe:
             identity["real_uid"] = not_applicable("Windows has no POSIX user IDs")
             identity["saved_uid"] = not_applicable("Windows has no POSIX user IDs")
             return identity
-        elif hasattr(os, "getresuid"):
+        elif self.system == "FreeBSD" and hasattr(os, "getresuid"):
             real_uid, uid, saved_uid = os.getresuid()
             source = "python:os.getresuid"
             ids = {"uid": observed(uid, source), "real_uid": observed(real_uid, source), "saved_uid": observed(saved_uid, source)}
             gid_fact = observed(os.getegid(), "python:os.getegid")
-        elif hasattr(os, "geteuid"):
+        elif self.system == "Darwin" and hasattr(os, "geteuid"):
             # macOS has no getresuid. execve(2) saves the effective user ID, and this script never changes it.
             uid = os.geteuid()
             source = "python:os.geteuid"
             ids = {"uid": observed(uid, source), "real_uid": observed(os.getuid(), "python:os.getuid"), "saved_uid": inferred(uid, source)}
             gid_fact = observed(os.getegid(), "python:os.getegid")
         else:
-            return identity_fallback("this probe reads POSIX user IDs only")
+            # Elsewhere, such as Cygwin or MSYS2 on Windows, user ID 0 does not name the administrator.
+            return identity_fallback("this probe reads user IDs on Linux, FreeBSD, and macOS only")
         identity = {"superuser": observed(uid == 0, source), **ids, "gid": gid_fact}
         if self.system != "Linux":
             reason = "user namespaces are a Linux interface"
@@ -810,7 +813,7 @@ class Probe:
             plat_fact, soabi, raw_gil_disabled = unknown(why), None, None
         else:
             plat = sysconfig.get_platform()
-            plat_fact = observed(plat, "python:sysconfig.get_platform") if isinstance(plat, str) and SLUG.fullmatch(plat) else unknown("sysconfig.get_platform() gave an unexpected value")
+            plat_fact = observed(plat, "python:sysconfig.get_platform") if isinstance(plat, str) and PLATFORM_TAG.fullmatch(plat) else unknown("sysconfig.get_platform() gave an unexpected value")
             soabi = sysconfig.get_config_var("SOABI")
             raw_gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
         if self.system == "Linux":
@@ -869,6 +872,7 @@ class Probe:
 
         def stop():
             # The whole group, so that a child holding stdout open cannot keep the read below waiting.
+            # A descendant that starts a session of its own can, until it exits or the job times out.
             try:
                 if hasattr(os, "killpg"):
                     os.killpg(process.pid, signal.SIGKILL)
@@ -1074,7 +1078,7 @@ def split_platform(plat):
     match = re.fullmatch(r"macosx-[0-9.]+-([A-Za-z0-9_]+)", plat)
     if match:
         return "macos", None if match.group(1) in ("universal2", "intel", "fat", "fat3", "fat64") else normalize_arch(match.group(1))
-    match = re.fullmatch(r"freebsd-[^-]+-([A-Za-z0-9_]+)", plat)
+    match = re.fullmatch(r"freebsd-.+-([A-Za-z0-9_]+)", plat)
     if match:
         return "freebsd", normalize_arch(match.group(1))
     return None, None

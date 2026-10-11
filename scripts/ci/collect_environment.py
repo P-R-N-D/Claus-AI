@@ -774,10 +774,15 @@ class Probe:
         directory = self.path("/sys/fs/cgroup") / relative
         if ".." in relative.split("/") or not directory.is_dir():
             return {"version": version, "delegated": unknown("this process's cgroup directory is not visible here")}
-        # access(2) reports permission bits only; nothing is written to find out. Without write access to
-        # cgroup.subtree_control a process cannot enable controllers for its children, so that is not delegation.
-        delegated = os.access(directory, os.W_OK) and os.access(directory / "cgroup.procs", os.W_OK) and os.access(directory / "cgroup.subtree_control", os.W_OK)
-        return {"version": version, "delegated": observed(delegated, "file:/sys/fs/cgroup/<own-cgroup>/cgroup.procs#writable")}
+        # access(2) reports permission bits only; nothing is written to find out. The kernel's delegation model grants write
+        # access to the directory and its cgroup.procs, cgroup.threads (Linux 4.14 and later) and cgroup.subtree_control;
+        # without the last a process cannot enable controllers for its children, so that is not delegation.
+        names = ["cgroup.procs", "cgroup.subtree_control"]
+        if (directory / "cgroup.threads").exists():
+            names.append("cgroup.threads")
+        delegated = os.access(directory, os.W_OK) and all(os.access(directory / name, os.W_OK) for name in names)
+        evidence = ["file:/sys/fs/cgroup/<own-cgroup>#writable"] + [f"file:/sys/fs/cgroup/<own-cgroup>/{name}#writable" for name in names]
+        return {"version": version, "delegated": observed(delegated, *evidence)}
 
     def sysconfig_overrides(self):
         return [name for name in SYSCONFIG_OVERRIDES if self.env(name) is not None]

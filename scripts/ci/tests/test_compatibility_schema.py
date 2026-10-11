@@ -567,7 +567,8 @@ class EnvironmentRuleTests(Case):
             with self.subTest(libc=libc, soabi=soabi):
                 libc_fact = unknown() if libc is None else fact(libc, "synthetic:x")
                 self.assertValid(check(changed(result, lambda d: d["workload"]["runtimes"]["python"].update(libc=libc_fact, soabi=fact(soabi, "synthetic:x")))))
-        for libc, soabi in (("glibc 2.39", "cpython-312-x86_64-linux-musl"), ("musl 1.2.5", "cpython-312-x86_64-linux-gnu")):
+        for libc, soabi in (("glibc 2.39", "cpython-312-x86_64-linux-musl"), ("musl 1.2.5", "cpython-312-x86_64-linux-gnu"),
+                            ("musl 1.2.5", "cpython-312-x86_64-linux-gnux32")):
             with self.subTest(libc=libc, soabi=soabi):
                 mixed = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(libc=fact(libc, "synthetic:x"), soabi=fact(soabi, "synthetic:x")))
                 self.assertCodes(check(mixed), "abi-contradiction")

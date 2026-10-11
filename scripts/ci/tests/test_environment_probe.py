@@ -663,9 +663,16 @@ class IsolationTests(Case):
             self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), True)
         with mock.patch.object(collector.os, "access", return_value=False):
             self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), False)
-        # The directory and cgroup.procs are writable, but without cgroup.subtree_control no controller can be enabled below.
-        with mock.patch.object(collector.os, "access", side_effect=lambda path, mode: not str(path).endswith("cgroup.subtree_control")):
-            self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), False)
+        # Write access to each of the directory, cgroup.procs, cgroup.threads and cgroup.subtree_control is needed; without
+        # cgroup.subtree_control no controller can be enabled below. A file that only exists is not enough.
+        threaded = dict(files, **{"sys/fs/cgroup/system.slice/runner.service/cgroup.threads": ""})
+        for withheld in ("runner.service", "cgroup.procs", "cgroup.threads", "cgroup.subtree_control"):
+            writable = lambda path, mode: not (str(path).endswith(withheld) and mode == collector.os.W_OK)
+            with self.subTest(withheld=withheld), mock.patch.object(collector.os, "access", side_effect=writable):
+                self.assertIs(value(self.isolation(threaded)["cgroup"]["delegated"]), False)
+        # A kernel before 4.14 has no cgroup.threads, so the other three decide.
+        with mock.patch.object(collector.os, "access", side_effect=lambda path, mode: not str(path).endswith("cgroup.threads")):
+            self.assertIs(value(self.isolation(files)["cgroup"]["delegated"]), True)
         # access(2) checks the real user ID, so root in any of the IDs, or a capability, says nothing about delegation.
         for label, text in (("root", status(uid=0, cap_eff=FULL)), ("real root", status(real_uid=0)), ("saved root", status(saved_uid=0)),
                             ("permitted capability", status(cap_prm="0000000000000001"))):

@@ -84,6 +84,7 @@ npm ci
 npx next typegen
 npx playwright install chromium
 npm run lint
+npm run test:unit
 npm run test:visual
 npm run dev -- --port 3000
 ```
@@ -91,6 +92,8 @@ npm run dev -- --port 3000
 `--managed-python`은 시스템 인터프리터 대신 uv가 관리하는 CPython 빌드를 사용하게 합니다. 시스템 인터프리터의 SQLite는 Django 6.1이 요구하는 3.37.0보다 오래되었을 수 있습니다. Windows PowerShell에서는 `source .venv/bin/activate` 대신 `.venv\Scripts\Activate.ps1`로 환경을 활성화하지만, 현재 네이티브 Windows에서는 이 잠금 파일로 동작하는 환경을 만들 수 없으므로 표에 적은 대로 WSL2를 사용하세요.
 
 `npm install --global npm@11.21.0` 단계는 필수입니다. Node 24.21.0에는 npm 11.19.0이 포함되어 있고, `package.json`의 `engines` 고정은 설치를 막지 않고 경고(`EBADENGINE`)만 출력합니다. `npx next typegen`은 추적되지 않는 `frontend/next-env.d.ts`를 생성하며, 새로 clone한 저장소에서 `tsc`나 편집기 타입 검사 전에 실행하는 것을 권장합니다. `npm run dev`와 `npm run build`도 이 파일을 생성합니다.
+
+`npm run test:unit`은 Vitest 단위 테스트를 실행하며 backend나 브라우저가 필요하지 않습니다. backend 테스트는 별도의 테스트 잠금 파일로 pytest에서도 실행할 수 있습니다. 자세한 내용은 [TESTING.md](TESTING.md#current-scaffold-checks)를 참고하세요.
 
 `npm run test:visual`은 backend와 `next dev`를 직접 시작하므로 먼저 `npm run build`를 실행할 필요가 없습니다. CI가 아닐 때는 8000번과 3000번 포트에서 이미 실행 중인 서버를 재사용합니다. `PLAYWRIGHT_NEXT_SERVER=production npm run test:visual`은 앱을 다시 빌드한 뒤 대신 `next start`로 실행하며, 실행 중인 서버를 재사용하지 않습니다. 근거로 남길 실행에는 `CI=1`을 추가해 Playwright가 실행 중인 서버를 재사용하지 않게 하고 서버 모드를 기록하세요. 자세한 내용은 [TESTING.md](TESTING.md#current-scaffold-checks)를 참고하세요.
 

@@ -1,0 +1,5 @@
+# Test-only direct inputs, resolved together with requirements.txt into
+# locks/cp312-linux-x86_64-test.txt. Install that lock, not this file; see
+# locks/README.md.
+pytest>=9.1.1,<10
+pytest-django>=4.14.0,<5

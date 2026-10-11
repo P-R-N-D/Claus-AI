@@ -16,13 +16,14 @@ The primary collaboration direction is topic- and thread-based rather than chat-
 
 ## Current application scaffold
 
-- Frontend: Next.js user UI at `/`, product Console at `/console` (reserved as the `/console/*` surface; only the index page exists today), React, TypeScript, Tailwind CSS, axios, SweetAlert2, and Node Playwright tests.
+- Frontend: Next.js user UI at `/`, product Console at `/console` (reserved as the `/console/*` surface; only the index page exists today), React, TypeScript, Tailwind CSS, axios, SweetAlert2, Node Playwright tests, and Vitest unit tests with React Testing Library.
 - Backend: Django 6.1 using one Django project (`config`) with Django apps `core` and `agent`. The checked lane is CPython 3.12.15 on Linux x86-64. Other lanes, including Linux arm64, Windows on Arm, macOS, and Arm devices with or without CUDA, have static evidence only or are unsupported; see [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes) "Platform and accelerator lanes". Every other Python/ABI/platform combination needs separate qualification.
 - `/core/*`: Django REST Framework control-plane APIs; `/agent/*`: Agent FastAPI; `/admin/*`: Django Admin.
 - `config.asgi.application` composes Django and FastAPI and is served by both Daphne-backed `manage.py runserver` and direct Uvicorn.
 - `config/database.py` builds the Django database setting from `DATABASE_URL` (PostgreSQL only, strict parsing) and falls back to SQLite when it is unset or blank.
 - `core/storage/s3.py` is the default Django file storage: a private S3-compatible backend with name validation, conditional (no-overwrite) saves, and presigned download URLs.
 - Python Playwright under `agent/runtime/browser` is the async Browser Computer Use foundation, separate from frontend Playwright testing.
+- Tests: the Django suite runs under both `manage.py test` and pytest with pytest-django, which installs from a separate hashed test lock; [TESTING.md](TESTING.md) lists every test and check.
 
 Implemented today, each with tests in the repository: the health APIs, the ASGI composition, the `DATABASE_URL` configuration with SQLite fallback, and the S3-compatible storage backend. Not implemented: collaboration domain models, authentication and authorization for product features, RAG, LLM orchestration, background execution, Browser sessions, Terminal, Workspace, realtime transport, WebMCP, and frontend i18n. [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) keeps the implemented versus planned breakdown.
 
@@ -117,7 +118,7 @@ Retrieval must respect the current user's and AI participant's effective permiss
 - Playwright is the primary browser automation and browser validation tool.
 - Browser-based Computer Use may combine deterministic Playwright/CDP actions with visual interaction only when needed.
 - Terminal and Workspace execution should run in isolated task runtimes when implemented.
-- Newman/Postman CLI is used for API verification when API collection testing is in scope.
+- Newman/Postman CLI is the intended tool for API collection verification when that testing is in scope. Adopting the Postman CLI is blocked today; see [TESTING.md](TESTING.md) "API collection testing".
 - Local or online LLMs may support planning, retrieval, generation, summarization, and tool use.
 - Existing specialized scanner/compliance skills remain task-level experiments and are not the top-level Claus product definition.
 

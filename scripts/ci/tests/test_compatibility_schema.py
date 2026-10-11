@@ -1585,6 +1585,11 @@ class ProfileTests(Case):
         self.assertValid(check(changed(result, attempt(2, run)), profile))
         self.assertValid(check(changed(result, attempt(2, run + "/attempts/2")), profile))
         self.assertFinding(check(changed(result, attempt(2, run + "/attempts/1")), profile), "ci-evidence", "/run/ci/run_url")
+        # An attempt longer than any run_attempt names no run, also under a schema that lets such a URL through.
+        loose = copy.deepcopy(SCHEMA)
+        loose["$defs"]["fact_string"]["properties"]["value"]["maxLength"] = 10000
+        long_attempt = changed(result, attempt(2, run + "/attempts/" + "1" * 5000))
+        self.assertFinding(validator.validate_document(long_attempt, loose, profile, LANES), "ci-evidence", "/run/ci/run_url")
         self.assertFinding(check(changed(result, lambda d: ci(d).update(run_attempt=fact(0, "env:GITHUB_RUN_ATTEMPT"))), profile), "ci-evidence", "/run/ci/run_attempt")
         push = changed(result, lambda d: (ci(d).update(event=fact("push", "env:GITHUB_EVENT_NAME")),
                                           revision(d).update(pr_head_sha={"value": None, "provenance": "not-applicable", "reason": "push"},

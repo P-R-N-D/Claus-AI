@@ -1246,10 +1246,14 @@ class NodeTests(Case):
             for place in (checkout, installed):
                 (place / "node").write_text("", encoding="utf-8")
                 (place / "node").chmod(0o755)
-            for search_path, expected in ((str(installed), str(installed / "node")), (os.pathsep + str(installed), str(installed / "node")), (str(empty), None)):
-                with self.subTest(path=search_path), FakeMachine(env={"PATH": search_path}) as machine, contextlib.chdir(checkout), \
-                        mock.patch.object(collector.shutil, "which", windows_which), mock.patch.object(collector.subprocess, "Popen", popen), \
-                        mock.patch.object(collector.os, "name", "nt"):
+            # With no PATH the default directories are searched, but not the current directory that Windows lists first.
+            default = os.curdir + os.pathsep + str(installed)
+            cases = ((str(installed), str(installed / "node")), (os.pathsep + str(installed), str(installed / "node")), (str(empty), None), (None, str(installed / "node")))
+            for search_path, expected in cases:
+                with self.subTest(path=search_path), FakeMachine(env={} if search_path is None else {"PATH": search_path}) as machine, \
+                        contextlib.chdir(checkout), mock.patch.object(collector.shutil, "which", windows_which), \
+                        mock.patch.object(collector.subprocess, "Popen", popen), mock.patch.object(collector.os, "name", "nt"), \
+                        mock.patch.object(collector.os, "defpath", default):
                     started.clear()
                     reason = machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"]
                     self.assertEqual((started, reason), ([expected], "node could not be run (OSError)") if expected else ([], "node is not on PATH"))

@@ -893,10 +893,11 @@ def check_run(document, findings):
         findings.error("ci-evidence", "/run/ci/run_attempt", "GitHub numbers a run's attempts from 1")
     repository, run_id, url = measured(ci["repository"]), measured(ci["run_id"]), measured(ci["run_url"])
     if repository and run_id and url:
-        match = re.fullmatch(rf"https://[A-Za-z0-9.-]+/{re.escape(repository)}/actions/runs/{re.escape(run_id)}(?:/attempts/([1-9][0-9]*))?", url)
+        match = re.fullmatch(rf"https://[A-Za-z0-9.-]+/{re.escape(repository)}/actions/runs/{re.escape(run_id)}(?:/attempts/([1-9][0-9]{{0,9}}))?", url)
         if not match:
             findings.error("ci-evidence", "/run/ci/run_url", "the run URL does not point at this repository's run")
-        # A URL without an attempt names the run; one with an attempt names that attempt only.
+        # A URL without an attempt names the run; one with an attempt names that attempt only. An attempt has at
+        # most 10 digits, as run_attempt has in the schema, so a longer one names no run and int() never reads it.
         elif match.group(1) is not None and measured(ci["run_attempt"]) is not None and int(match.group(1)) != measured(ci["run_attempt"]):
             findings.error("ci-evidence", "/run/ci/run_url", "the run URL names another attempt than run_attempt")
     if measured(revision["tested_sha"]) is None:

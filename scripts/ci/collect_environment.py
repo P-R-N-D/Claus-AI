@@ -12,7 +12,8 @@ The collector reads the following, and nothing else:
 - The checkout's .git/HEAD, and the loose ref or packed-refs line it points to.
 - The first 4 KiB that `node -p` writes, run with an empty environment (on
   Windows, SystemRoot only) and stopped after 30 seconds. node is looked for in
-  the PATH directories only, so on Windows not in the current directory.
+  the PATH directories only, so on Windows not in the current directory, also
+  when PATH is unset; there this needs CPython 3.12 or later.
 
 Files are read only when they are regular files, and are opened so that a FIFO
 cannot block the probe.
@@ -249,7 +250,9 @@ def find_on_path(name, search_path):
     """The program `name` in the directories of `search_path`, or None.
 
     On Windows shutil.which also looks in the current directory first, which the path does not name, so
-    there each directory is looked in by itself; an empty entry names no directory."""
+    there each directory is looked in by itself; an empty entry names no directory. That needs CPython 3.12 or
+    later on Windows: an older shutil.which adds no PATHEXT extension to a name with a directory, so it finds
+    no node.exe and the node facts are unknown."""
     if os.name != "nt":
         return shutil.which(name, path=search_path)
     for directory in search_path.split(os.pathsep):
@@ -896,9 +899,12 @@ class Probe:
 
         if not self.probe_node:
             return all_unknown("not probed (--no-node)")
-        # An unset PATH searches the default directories; an empty one, as shutil.which reads it, finds nothing.
+        # An unset PATH searches the default directories, but not the current directory that Windows lists first
+        # in them; an empty one, as shutil.which reads it, finds nothing.
         search_path = self.env("PATH")
-        executable = find_on_path("node", os.defpath if search_path is None else search_path)
+        if search_path is None:
+            search_path = os.pathsep.join(entry for entry in os.defpath.split(os.pathsep) if os.name != "nt" or entry != os.curdir)
+        executable = find_on_path("node", search_path)
         if executable is None:
             return all_unknown("node is not on PATH")
         # Windows needs SystemRoot to start a program that loads side-by-side assemblies; nothing else is passed.

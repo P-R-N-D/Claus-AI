@@ -139,7 +139,9 @@ SECRET_SHAPES = (
     ("AWS access key ID", re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("Slack token", re.compile(r"xox[abposr]-[A-Za-z0-9-]{10,}")),
-    ("JSON Web Token", re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.")),
+    # A JSON Web Token: "eyJ", at least 8 more base64url characters and ".", twice. The run that holds the first
+    # "eyJ" is matched from its start, so each run is tested once and a long run does not make the search quadratic.
+    ("JSON Web Token", re.compile(r"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*?eyJ[A-Za-z0-9_-]{8})[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]{8,}\.")),
 )
 # DMI sys_vendor or product_name prefixes that name a hypervisor, as systemd-detect-virt reads them.
 DMI_VENDORS = (

@@ -14,6 +14,7 @@ import io
 import json
 import pathlib
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -470,12 +471,18 @@ class ProvenanceTests(Case):
             ("fine-grained token", "github_pat_" + "a" * 30, "secret-like-value"),
             ("AWS key", "AKIA" + "ABCDEFGHIJKLMNOP", "secret-like-value"),
             ("private key", "-----BEGIN OPENSSH PRIVATE KEY-----", "secret-like-value"),
+            ("JSON Web Token after a letter", "xeyJ" + "A" * 10 + ".eyJ" + "B" * 10 + ".", "secret-like-value"),
         ):
             with self.subTest(label):
                 document = changed(result, lambda d: d["stages"]["install"].update(reason=text))
                 self.assertCodes(check(document), code)
         document = changed(result, lambda d: d["extensions"].update({"x-data": {"ghp_" + "A" * 36: 1}}))
         self.assertCodes(check(document), "secret-like-value")
+        # A long run with many "eyJ" in it is searched in linear time; a quadratic search takes seconds here.
+        started = time.perf_counter()
+        for text in ("eyJ" * 40000, "-eyJ" * 30000, "eyJ" * 20000 + "." + "eyJ" * 20000):
+            self.assertFalse([label for label, shape in validator.SECRET_SHAPES if shape.search(text)])
+        self.assertLess(time.perf_counter() - started, 2)
 
 
 class EnvironmentRuleTests(Case):

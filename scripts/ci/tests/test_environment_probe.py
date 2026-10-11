@@ -1098,6 +1098,7 @@ class CommandTests(Case):
             output = pathlib.Path(directory) / "result.json"
             for sample in self.SECRET_SAMPLES:
                 with self.subTest(sample=sample[:6]):
+                    output.unlink(missing_ok=True)
                     code, text = self.run_main("--output", output, "--no-node", "--stage", "install=failed", "--stage-reason", f"install=see {sample}")
                     self.assertEqual(code, 2)
                     self.assertNotIn(sample, text)
@@ -1109,6 +1110,7 @@ class CommandTests(Case):
             for prefix in ("\n", "\u200e"):
                 for sample in self.SECRET_SAMPLES:
                     with self.subTest(prefix=prefix, sample=sample[:6]):
+                        output.unlink(missing_ok=True)
                         document = json.loads(json.dumps(record))
                         document["stages"]["install"]["reason"] = prefix + sample
                         with mock.patch.object(collector, "build_result", return_value=document):

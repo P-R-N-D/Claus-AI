@@ -724,13 +724,6 @@ def check_workload(document, findings):
     python_arch = known(python["arch"])
     if platform_disagrees(python_arch):
         findings.error("abi-contradiction", f"{base}/arch", f"the platform tag says {platform_arch}, the arch fact says {python_arch}")
-    # The platform tag and the ABI tag are each compared with the innermost layer's OS family and with the arch fact
-    # below; when that fact is unknown or not a listed name, they are compared with each other.
-    tag_family, tag_arch = soabi_target(known(python["soabi"]))
-    if family is None and platform_family and tag_family and platform_family != tag_family:
-        findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {tag_family}, the platform tag is for {platform_family}")
-    elif python_arch not in ARCH_BITS and platform_disagrees(tag_arch):
-        findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {tag_arch}, the platform tag says {platform_arch}")
     bits = known(python["pointer_bits"])
     if python_arch in ARCH_BITS and bits is not None and bits != ARCH_BITS[python_arch]:
         findings.error("abi-contradiction", f"{base}/pointer_bits", f"{python_arch} has {ARCH_BITS[python_arch]}-bit pointers, not {bits}")
@@ -768,6 +761,12 @@ def check_workload(document, findings):
             findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the innermost layer is {family}")
         if soabi_arch in ARCH_BITS and python_arch in ARCH_BITS and soabi_arch != python_arch:
             findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_arch}, the arch fact says {python_arch}")
+        # The ABI tag, like the platform tag, is compared with the innermost layer's OS family and with the arch fact. When
+        # the family is unknown, or the arch fact is unknown or not a listed name, the two tags are compared with each other.
+        if family is None and platform_family and soabi_family and platform_family != soabi_family:
+            findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the platform tag is for {platform_family}")
+        elif python_arch not in ARCH_BITS and platform_family == soabi_family and platform_disagrees(soabi_arch):
+            findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_arch}, the platform tag says {platform_arch}")
         tag_libc, fact_libc = libc_of_tag(known(python["soabi"])), libc_of_fact(known(python["libc"]))
         # Two names neither of which is glibc or musl (android and bionic) are not compared.
         if tag_libc and fact_libc and tag_libc != fact_libc and {tag_libc, fact_libc} & {"glibc", "musl"}:
@@ -1355,9 +1354,9 @@ def main(argv=None):
     parser.add_argument("--no-policy", action="store_true", help="skip the privilege policy (for records of machines it is not meant for)")
     parser.add_argument("--summary", type=pathlib.Path, help="append a Markdown summary to this file")
     args = parser.parse_args(argv)
-    # The summary is appended to, so it must not be a file this run reads.
+    # The summary is appended to, so it must not be one of the files named on the command line.
     if args.summary and any(same_file(args.summary, path) for path in (args.schema, args.profile, args.dependency_strategy, *args.documents) if path):
-        print(plain(f"error: the summary {args.summary} is a file this run reads"), file=sys.stderr)
+        print(plain(f"error: the summary {args.summary} is the schema, the profile, the lane table or a document of this run"), file=sys.stderr)
         return 2
 
     try:

@@ -702,7 +702,7 @@ class EnvironmentRuleTests(Case):
                 self.assertFinding(check(changed(fixture("linux-x64-vm.result"), change)), "abi-contradiction", "/workload/runtimes/python/libc")
 
     def test_the_platform_tag_and_the_abi_tag_are_compared_with_each_other(self):
-        # Each tag is compared with the innermost layer and the arch fact; when one of those is unknown, with the other tag.
+        # Each CPython tag is compared with the innermost layer and the arch fact; when one of those is unknown, with the other tag.
         python = lambda d: d["workload"]["runtimes"]["python"]  # noqa: E731
 
         def tags(document, platform, soabi, family=None, arch=None):
@@ -731,9 +731,15 @@ class EnvironmentRuleTests(Case):
         # A 32-bit build on a 64-bit Linux kernel agrees with its platform tag, and tags that agree pass without the other facts.
         self.assertValid(check(tags("linux-x64-vm.result", "linux-x86_64", "cpython-312-i386-linux-gnu", arch=unknown())))
         self.assertValid(check(tags("linux-x64-vm.result", "linux-x86_64", "cpython-312-x86_64-linux-gnu", family=unknown(), arch=unknown()), policy=False))
-        # When the layer is known, a tag that disagrees is reported against it, once.
-        findings = check(tags("linux-x64-vm.result", "win-amd64", "cpython-312-x86_64-linux-gnu"))
-        self.assertEqual([path for _, code, path, _ in findings.errors if code == "os-contradiction"], ["/workload/runtimes/python/platform"])
+        # When the layer is known, a tag that disagrees is reported against it, once, and tags of two OSes are not compared by architecture.
+        for arch in (None, unknown()):
+            with self.subTest(arch=arch):
+                findings = check(tags("linux-x64-vm.result", "win32", "cpython-312-x86_64-linux-gnu", arch=arch))
+                self.assertEqual([(code, path) for _, code, path, _ in findings.errors], [("os-contradiction", "/workload/runtimes/python/platform")] if arch else
+                                 [("os-contradiction", "/workload/runtimes/python/platform"), ("abi-contradiction", "/workload/runtimes/python/arch")])
+        # As with the layer and the arch fact, the ABI tag is read for CPython only.
+        other = changed(tags("linux-x64-vm.result", "win-amd64", "cpython-312-x86_64-linux-gnu", family=unknown()), lambda d: python(d).update(implementation=unknown()))
+        self.assertNotIn("/workload/runtimes/python/soabi", [path for _, _, path, _ in check(other, policy=False).errors])
 
     def test_32_bit_code_on_a_64_bit_kernel_of_its_family_is_native(self):
         def thirty_two_bit(d):
@@ -1594,7 +1600,7 @@ class CommandTests(Case):
                     before = {path: path.read_bytes() for path in copies.values()}
                     code, output = self.run_main(*argv, "--summary", summary)
                     self.assertEqual(code, 2)
-                    self.assertIn("is a file this run reads", output)
+                    self.assertIn("is the schema, the profile, the lane table or a document of this run", output)
                     self.assertEqual({path: path.read_bytes() for path in copies.values()}, before)
 
     def test_argparse_errors_cannot_forge_output_lines(self):

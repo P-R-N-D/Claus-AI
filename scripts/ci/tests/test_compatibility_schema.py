@@ -617,12 +617,14 @@ class EnvironmentRuleTests(Case):
         self.assertCodes(check(other), "abi-contradiction")
         self.assertFinding(check(other), "abi-contradiction", "/workload/runtimes/python/soabi")
         # The C library in the tag must agree with the libc fact when both are known.
-        for libc, soabi in ((None, "cpython-312-x86_64-linux-musl"), ("glibc 2.39", "cpython-312-x86_64-linux-gnu"), ("musl 1.2.5", "cpython-312-x86_64-linux-musl")):
+        for libc, soabi in ((None, "cpython-312-x86_64-linux-musl"), ("glibc 2.39", "cpython-312-x86_64-linux-gnu"), ("musl 1.2.5", "cpython-312-x86_64-linux-musl"),
+                            ("GLIBC 2.39", "cpython-312-x86_64-linux-gnu"), ("bionic", "cpython-312-x86_64-linux-android")):
             with self.subTest(libc=libc, soabi=soabi):
                 libc_fact = unknown() if libc is None else fact(libc, "synthetic:x")
                 self.assertValid(check(changed(result, lambda d: d["workload"]["runtimes"]["python"].update(libc=libc_fact, soabi=fact(soabi, "synthetic:x")))))
         for libc, soabi in (("glibc 2.39", "cpython-312-x86_64-linux-musl"), ("musl 1.2.5", "cpython-312-x86_64-linux-gnu"),
-                            ("musl 1.2.5", "cpython-312-x86_64-linux-gnux32")):
+                            ("musl 1.2.5", "cpython-312-x86_64-linux-gnux32"), ("uclibc-ng 1.0.45", "cpython-312-x86_64-linux-gnu"),
+                            ("glibc 2.39", "cpython-312-x86_64-linux-android")):
             with self.subTest(libc=libc, soabi=soabi):
                 mixed = changed(result, lambda d: d["workload"]["runtimes"]["python"].update(libc=fact(libc, "synthetic:x"), soabi=fact(soabi, "synthetic:x")))
                 self.assertCodes(check(mixed), "abi-contradiction")
@@ -1211,19 +1213,30 @@ class ProfileTests(Case):
                 if label in ("Python 3.15 free-threaded", "Python 3.13", "PyPy"):
                     # The lane table does not assess this interpreter, so the profile records not-assessed.
                     self.assertValid(check(changed(claimed, lambda d: d["support"].update(status="not-assessed"))))
-        # The C library comes from the libc fact before the ABI tag, and an error names that fact. A libc fact that
-        # names another C library contradicts the lane whatever the status.
-        at_libc = ["/workload/runtimes/python/libc"]
+        # The C library comes from the libc fact before the ABI tag, and an error names that fact. glibc and musl are
+        # read in any letter case; a libc fact or ABI tag that names another C library contradicts the lane whatever the status.
+        at_libc, at_soabi = ["/workload/runtimes/python/libc"], ["/workload/runtimes/python/soabi"]
         for status, lane, libc, abi_tag, errors in (
-            ("not-supported", "Linux musl (Alpine)", "musl 1.2.5", False, []),
-            ("not-supported", "Linux musl (Alpine)", "glibc 2.39", False, at_libc),
-            ("not-supported", "Linux musl (Alpine)", "glibc 2.39", True, at_libc),
-            ("not-assessed", "Linux x86-64 glibc", "uclibc-ng 1.0.45", False, at_libc),
+            ("not-supported", "Linux musl (Alpine)", "musl 1.2.5", None, []),
+            ("not-supported", "Linux musl (Alpine)", "Musl 1.2.5", None, []),
+            ("not-supported", "Linux musl (Alpine)", "musl1.2.5", None, []),
+            ("not-supported", "Linux musl (Alpine)", "glibc 2.39", None, at_libc),
+            ("not-supported", "Linux musl (Alpine)", "glibc 2.39", "cpython-312-x86_64-linux-gnu", at_libc),
+            ("not-assessed", "Linux x86-64 glibc", "uclibc-ng 1.0.45", None, at_libc),
+            ("not-assessed", "Linux x86-64 glibc", None, "cpython-312-x86_64-linux-android", at_soabi),
         ):
             with self.subTest(lane=lane, libc=libc, abi_tag=abi_tag):
-                claimed = changed(real, lambda d: (d["support"].update(status=status, lane=lane), python(d).update(libc=fact(libc, provenance="declared")),
-                                                   None if abi_tag else python(d).update(soabi=unknown())))
+                claimed = changed(real, lambda d: (d["support"].update(status=status, lane=lane), python(d).update(libc=fact(libc, provenance="declared") if libc else unknown(),
+                                                   soabi=fact(abi_tag, provenance="declared") if abi_tag else unknown())))
                 self.assertEqual([path for _, code, path, _ in check(claimed).errors if code == "support-claim"], errors)
+        for libc, soabi, family in (("uclibc-ng 1.0.45", None, ("uclibc-ng 1.0.45", "/workload/runtimes/python/libc")),
+                                    ("GLIBC 2.39", None, ("glibc", "/workload/runtimes/python/libc")),
+                                    ("Ubuntu GLIBC 2.39", None, ("Ubuntu GLIBC 2.39", "/workload/runtimes/python/libc")),
+                                    (None, "cpython-312-aarch64-linux-android", ("android", "/workload/runtimes/python/soabi")),
+                                    (None, "cpython-312-arm-linux-gnueabihf", ("glibc", "/workload/runtimes/python/soabi"))):
+            with self.subTest(libc=libc, soabi=soabi):
+                facts = {"libc": fact(libc, provenance="declared") if libc else unknown(), "soabi": fact(soabi, provenance="declared") if soabi else unknown()}
+                self.assertEqual(validator.libc_family(facts), family)
         # A WSL2 lane needs a WSL2 layer, and a native Windows lane none.
         wsl = fixture("windows-arm64-wsl2-podman.profile")
         self.assertValid(check(wsl))

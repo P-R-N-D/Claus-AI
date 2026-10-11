@@ -492,10 +492,13 @@ class LinuxProbeTests(Case):
                         with self.subTest(machine=machine, order=order), mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
                                 mock.patch.object(collector.sys, "executable", str(executable)):
                             self.assertEqual(probe.build_arch()[0], expected)
-                    # The class tells a 32-bit build from the 64-bit name that shares its e_machine (riscv32, x32, aarch64 ILP32).
-                    for machine, elf_class, expected in ((3, 1, "x86"), (40, 1, "armv7"), (3, 2, None), (243, 1, None), (62, 1, None), (183, 1, None)):
-                        executable.write_bytes(b"\x7fELF" + bytes([elf_class, 1]) + bytes(12) + machine.to_bytes(2, "little"))
-                        with self.subTest(machine=machine, elf_class=elf_class), mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
+                    # The class tells a 32-bit build from the 64-bit name that shares its e_machine (x32, aarch64 ILP32, riscv32,
+                    # loongarch32, 31-bit s390).
+                    for machine, elf_class, order, expected in ((3, 1, 1, "x86"), (40, 1, 1, "armv7"), (3, 2, 1, None), (62, 2, 1, "x86_64"), (62, 1, 1, None),
+                                                                (183, 1, 1, None), (243, 2, 1, "riscv64"), (243, 1, 1, None), (258, 2, 1, "loongarch64"),
+                                                                (258, 1, 1, None), (22, 1, 2, None)):
+                        executable.write_bytes(b"\x7fELF" + bytes([elf_class, order]) + bytes(12) + machine.to_bytes(2, "little" if order == 1 else "big"))
+                        with self.subTest(machine=machine, elf_class=elf_class, order=order), mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
                                 mock.patch.object(collector.sys, "executable", str(executable)):
                             self.assertEqual(probe.build_arch()[0], expected)
                     executable.write_bytes(b"#!/bin/sh\n")
@@ -1252,6 +1255,9 @@ class SharedTableTests(unittest.TestCase):
 
     def test_architecture_names(self):
         self.assertEqual(collector.ARCH_ALIASES, validator.ARCH_ALIASES)
+        # The names the ELF header can give, and which of them are 32-bit, match the validator's pointer widths.
+        self.assertEqual(collector.KNOWN_ARCHES, set(validator.ARCH_BITS))
+        self.assertEqual(collector.ELF_32_BIT, {arch for arch, bits in validator.ARCH_BITS.items() if bits == 32})
 
     def test_platform_tags(self):
         for plat in ("linux-x86_64", "linux-aarch64", "linux-armv7l", "linux-i686", "win32", "win-amd64", "win-arm64", "win-arm32",

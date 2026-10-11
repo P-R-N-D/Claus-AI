@@ -521,21 +521,36 @@ def soabi_target(soabi):
     return None, None
 
 
+def libc_of_fact(libc):
+    """The C library a libc fact names: glibc or musl when it starts with that name in any letter case and no
+    letter follows, otherwise the fact as written; None for no value."""
+    if not isinstance(libc, str):
+        return None
+    name = re.match(r"(glibc|musl)(?![a-z])", libc, re.IGNORECASE)
+    return name.group(1).lower() if name else libc
+
+
+def libc_of_tag(soabi):
+    """The C library a Linux ABI tag names: glibc for gnu (gnueabihf, gnux32), musl, or the tag's own word,
+    such as android; None for a tag that names none."""
+    match = re.search(r"-linux-([a-z]+)[a-z0-9]*$", soabi) if isinstance(soabi, str) else None
+    if not match:
+        return None
+    word = match.group(1)
+    return "glibc" if word.startswith("gnu") else "musl" if word.startswith("musl") else word
+
+
 def libc_family(python):
     """(the C library, the path of the fact it came from), from a Python's libc fact or else its SOABI; (None, None) if neither shows it.
 
-    A libc fact that starts with neither glibc nor musl is returned as written, so it contradicts a glibc or musl lane.
+    A C library other than glibc or musl is returned as named, so it contradicts a glibc or musl lane.
     """
     base = "/workload/runtimes/python"
-    libc, soabi = known(python["libc"]), known(python["soabi"])
-    if isinstance(libc, str):
-        name = re.match(r"(glibc|musl)\b", libc)
-        return (name.group(1) if name else libc), f"{base}/libc"
-    if isinstance(soabi, str):
-        match = re.search(r"-linux-(gnu|musl)[a-z0-9]*$", soabi)
-        if match:
-            return {"gnu": "glibc", "musl": "musl"}[match.group(1)], f"{base}/soabi"
-    return None, None
+    libc = libc_of_fact(known(python["libc"]))
+    if libc:
+        return libc, f"{base}/libc"
+    libc = libc_of_tag(known(python["soabi"]))
+    return (libc, f"{base}/soabi") if libc else (None, None)
 
 
 def layers_of(document):
@@ -742,11 +757,10 @@ def check_workload(document, findings):
             findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_family}, the innermost layer is {family}")
         if soabi_arch in ARCH_BITS and python_arch in ARCH_BITS and soabi_arch != python_arch:
             findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {soabi_arch}, the arch fact says {python_arch}")
-        tag_libc = re.search(r"-linux-(gnu|musl)[a-z0-9]*$", known(python["soabi"]) or "")
-        libc = known(python["libc"])
-        libc_name = re.match(r"(glibc|musl)\b", libc) if isinstance(libc, str) else None
-        if tag_libc and libc_name and {"gnu": "glibc", "musl": "musl"}[tag_libc.group(1)] != libc_name.group(1):
-            findings.error("abi-contradiction", f"{base}/libc", f"the ABI tag is for {tag_libc.group(1)}, the libc fact says {libc!r}")
+        tag_libc, fact_libc = libc_of_tag(known(python["soabi"])), libc_of_fact(known(python["libc"]))
+        # Two names neither of which is glibc or musl (android and bionic) are not compared.
+        if tag_libc and fact_libc and tag_libc != fact_libc and {tag_libc, fact_libc} & {"glibc", "musl"}:
+            findings.error("abi-contradiction", f"{base}/libc", f"the ABI tag is for {tag_libc}, the libc fact says {known(python['libc'])!r}")
         if known(python["free_threaded_build"]) is False and known(python["gil_enabled"]) is False:
             findings.error("abi-contradiction", f"{base}/gil_enabled", "a build without free threading always holds the GIL")
 

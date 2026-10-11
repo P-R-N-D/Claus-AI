@@ -713,15 +713,24 @@ def check_workload(document, findings):
     platform_family, platform_arch = python_platform_target(known(python["platform"]))
     if platform_family and family and platform_family != family:
         findings.error("os-contradiction", f"{base}/platform", f"a {platform_family} Python cannot run on {family} in the innermost layer")
-    python_arch = known(python["arch"])
-    if platform_family == "linux":
-        # On Linux the platform tag follows uname, so a 32-bit build on a 64-bit kernel is not a contradiction.
-        disagree = runs_natively_on(python_arch, platform_arch) is False and runs_natively_on(platform_arch, python_arch) is False
-    else:
+
+    def platform_disagrees(build_arch):
+        if platform_family == "linux":
+            # On Linux the platform tag follows uname, so a 32-bit build on a 64-bit kernel is not a contradiction.
+            return runs_natively_on(build_arch, platform_arch) is False and runs_natively_on(platform_arch, build_arch) is False
         # Windows and macOS tags name the build itself.
-        disagree = platform_arch in ARCH_BITS and python_arch in ARCH_BITS and platform_arch != python_arch
-    if disagree:
+        return platform_arch in ARCH_BITS and build_arch in ARCH_BITS and platform_arch != build_arch
+
+    python_arch = known(python["arch"])
+    if platform_disagrees(python_arch):
         findings.error("abi-contradiction", f"{base}/arch", f"the platform tag says {platform_arch}, the arch fact says {python_arch}")
+    # The platform tag and the ABI tag are each compared with the innermost layer's OS family and with the arch fact
+    # below; when that fact is unknown or not a listed name, they are compared with each other.
+    tag_family, tag_arch = soabi_target(known(python["soabi"]))
+    if family is None and platform_family and tag_family and platform_family != tag_family:
+        findings.error("os-contradiction", f"{base}/soabi", f"the ABI tag is for {tag_family}, the platform tag is for {platform_family}")
+    elif python_arch not in ARCH_BITS and platform_disagrees(tag_arch):
+        findings.error("abi-contradiction", f"{base}/soabi", f"the ABI tag is for {tag_arch}, the platform tag says {platform_arch}")
     bits = known(python["pointer_bits"])
     if python_arch in ARCH_BITS and bits is not None and bits != ARCH_BITS[python_arch]:
         findings.error("abi-contradiction", f"{base}/pointer_bits", f"{python_arch} has {ARCH_BITS[python_arch]}-bit pointers, not {bits}")
@@ -1321,8 +1330,23 @@ def markdown_cell(text):
     return re.sub(r"([\\`*_~\[\]()<>!|])", r"\\\1", plain(text))
 
 
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse repeats the argument it rejects, so its lines are written as every other line is.
+        usage = "".join(plain(line) + "\n" for line in self.format_usage().splitlines())
+        self.exit(2, usage + plain(f"{self.prog}: error: {message}") + "\n")
+
+
+def same_file(path, other):
+    """Whether two paths name one existing file, however each is written."""
+    try:
+        return path.samefile(other)
+    except (OSError, ValueError):
+        return False
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser = ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("documents", nargs="+", type=pathlib.Path, help="profile or result JSON files")
     parser.add_argument("--schema", type=pathlib.Path, default=DEFAULT_SCHEMA)
     parser.add_argument("--profile", type=pathlib.Path, help="profile that every result document is checked against")
@@ -1331,6 +1355,10 @@ def main(argv=None):
     parser.add_argument("--no-policy", action="store_true", help="skip the privilege policy (for records of machines it is not meant for)")
     parser.add_argument("--summary", type=pathlib.Path, help="append a Markdown summary to this file")
     args = parser.parse_args(argv)
+    # The summary is appended to, so it must not be a file this run reads.
+    if args.summary and any(same_file(args.summary, path) for path in (args.schema, args.profile, args.dependency_strategy, *args.documents) if path):
+        print(plain(f"error: the summary {args.summary} is a file this run reads"), file=sys.stderr)
+        return 2
 
     try:
         schema = load_schema(args.schema)

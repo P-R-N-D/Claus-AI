@@ -878,7 +878,9 @@ class Probe:
 
         if not self.probe_node:
             return all_unknown("not probed (--no-node)")
-        executable = shutil.which("node", path=self.env("PATH") or os.defpath)
+        # An unset PATH searches the default directories; an empty one, as shutil.which reads it, finds nothing.
+        search_path = self.env("PATH")
+        executable = shutil.which("node", path=os.defpath if search_path is None else search_path)
         if executable is None:
             return all_unknown("node is not on PATH")
         # Windows needs SystemRoot to start a program that loads side-by-side assemblies; nothing else is passed.
@@ -1313,8 +1315,23 @@ def summary_lines(result):
     return lines
 
 
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse repeats the argument it rejects, so its lines are written as every other line is.
+        usage = "".join(plain(line) + "\n" for line in self.format_usage().splitlines())
+        self.exit(2, usage + plain(f"{self.prog}: error: {message}") + "\n")
+
+
+def same_file(path, other):
+    """Whether two paths name one existing file, however each is written."""
+    try:
+        return path.samefile(other)
+    except (OSError, ValueError):
+        return False
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser = ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--output", required=True, type=pathlib.Path, help="where to write the result JSON")
     parser.add_argument("--profile-id", help="id of the profile this lane declares")
     parser.add_argument("--summary", type=pathlib.Path, help="append a Markdown summary to this file")
@@ -1342,6 +1359,10 @@ def main(argv=None):
         print(f"error: cannot write the record: {type(exc).__name__}", file=sys.stderr)
         return 2
     if args.summary:
+        # Checked once the record exists, so that a link or another spelling of its name is found too.
+        if same_file(args.summary, args.output):
+            print("error: the record was written; --summary names the same file, so no summary was appended to it", file=sys.stderr)
+            return 2
         try:
             with open(args.summary, "a", encoding="utf-8") as handle:
                 handle.write("\n".join(summary_lines(result)))

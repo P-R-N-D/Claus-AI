@@ -1205,6 +1205,19 @@ class NodeTests(Case):
             self.assertEqual(machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"], "node is not on PATH")
             self.assertEqual(machine.probe(probe_node=False).node(("x86_64", "x86"))["version"]["reason"], "not probed (--no-node)")
 
+    def test_node_is_looked_for_only_on_the_path_given(self):
+        # An unset PATH searches the default directories; an empty one finds nothing, as shutil.which reads it.
+        searched = []
+
+        def which(name, path=None):
+            searched.append(path)
+            return None
+
+        for env in ({}, {"PATH": ""}, {"PATH": "/x"}):
+            with FakeMachine(env=env) as machine, mock.patch.object(collector.shutil, "which", which):
+                self.assertEqual(machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"], "node is not on PATH")
+        self.assertEqual(searched, [os.defpath, "", "/x"])
+
 
 class CommandTests(Case):
     def run_main(self, *argv):
@@ -1341,6 +1354,38 @@ class CommandTests(Case):
             self.assertTrue(output.is_file())
             code, text = self.run_main("--output", output, "--no-node")
         self.assertNotIn(directory, text)
+
+    def test_a_summary_that_names_the_record_leaves_the_record_as_written(self):
+        # The summary is appended, so naming the record, by any spelling or link, would make it invalid JSON.
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            output = directory / "result.json"
+            output.write_text("{}", encoding="utf-8")
+            (directory / "linked").hardlink_to(output)
+            for label, summary in (("same name", output), ("another spelling", directory / ".." / directory.name / "result.json"), ("hard link", directory / "linked")):
+                with self.subTest(summary=label):
+                    code, text = self.run_main("--output", output, "--summary", summary, "--no-node")
+                    self.assertEqual(code, 2)
+                    self.assertIn("--summary names the same file, so no summary was appended", text)
+                    self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["kind"], "result")
+            summary = directory / "summary.md"
+            self.assertIn(self.run_main("--output", output, "--summary", summary, "--no-node")[0], (0, 1))
+            self.assertIn("### Compatibility record", summary.read_text(encoding="utf-8"))
+
+    def test_argparse_errors_cannot_forge_output_lines(self):
+        # argparse repeats an argument it rejects, and the program name, in its usage line too; both are written as every other line is.
+        token = "ghp_" + "A" * 36
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(sys, "argv", ["::program##[error]forged"]):
+            output = pathlib.Path(directory) / "result.json"
+            code, text = self.run_main("--output", output, "--no-node", "--bad=##[error]forged", "--x=a\n::error::forged", f"--worse={token}")
+            self.assertFalse(output.exists())
+        self.assertEqual(code, 2)
+        self.assertIn("unrecognized arguments", text)
+        self.assertIn("looks like a GitHub token", text)
+        self.assertNotIn("##[", text)
+        self.assertNotIn(token, text)
+        self.assertFalse([line for line in text.splitlines() if line.lstrip().startswith("::")], text)
+        self.assertIn("usage:", text)
 
     def test_the_summary_escapes_table_cells(self):
         self.assertEqual(collector.markdown_cell("a|b`c\nd"), "a\\|b\\`c d")

@@ -13,6 +13,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import sys
 import tempfile
 import time
 import unittest
@@ -699,6 +700,40 @@ class EnvironmentRuleTests(Case):
         ):
             with self.subTest(source=source):
                 self.assertFinding(check(changed(fixture("linux-x64-vm.result"), change)), "abi-contradiction", "/workload/runtimes/python/libc")
+
+    def test_the_platform_tag_and_the_abi_tag_are_compared_with_each_other(self):
+        # Each tag is compared with the innermost layer and the arch fact; when one of those is unknown, with the other tag.
+        python = lambda d: d["workload"]["runtimes"]["python"]  # noqa: E731
+
+        def tags(document, platform, soabi, family=None, arch=None):
+            def change(d):
+                if family is not None:
+                    d["environment"]["layers"][-1]["os"]["family"] = family
+                if arch is not None:
+                    python(d).update(arch=arch, pointer_bits=unknown())
+                python(d).update(platform=fact(platform, "synthetic:x"), soabi=fact(soabi, "synthetic:x"), libc=unknown())
+            return changed(fixture(document), change)
+
+        for platform, soabi in (("win-amd64", "cpython-312-x86_64-linux-gnu"), ("linux-x86_64", "cp312-win_amd64"), ("macosx-14.0-x86_64", "cp312-win_amd64")):
+            with self.subTest(platform=platform, soabi=soabi):
+                findings = check(tags("linux-x64-vm.result", platform, soabi, family=unknown()), policy=False)
+                self.assertCodes(findings, "os-contradiction")
+                self.assertFinding(findings, "os-contradiction", "/workload/runtimes/python/soabi")
+        for document, platform, soabi, arch in (
+            ("linux-x64-vm.result", "linux-aarch64", "cpython-312-x86_64-linux-gnu", unknown()),
+            ("linux-x64-vm.result", "linux-aarch64", "cpython-312-x86_64-linux-gnu", fact("vax", "synthetic:x")),
+            ("windows-arm64-native.result", "win-amd64", "cp312-win_arm64", unknown()),
+        ):
+            with self.subTest(platform=platform, soabi=soabi, arch=arch["value"]):
+                findings = check(tags(document, platform, soabi, arch=arch))
+                self.assertCodes(findings, "abi-contradiction")
+                self.assertFinding(findings, "abi-contradiction", "/workload/runtimes/python/soabi")
+        # A 32-bit build on a 64-bit Linux kernel agrees with its platform tag, and tags that agree pass without the other facts.
+        self.assertValid(check(tags("linux-x64-vm.result", "linux-x86_64", "cpython-312-i386-linux-gnu", arch=unknown())))
+        self.assertValid(check(tags("linux-x64-vm.result", "linux-x86_64", "cpython-312-x86_64-linux-gnu", family=unknown(), arch=unknown()), policy=False))
+        # When the layer is known, a tag that disagrees is reported against it, once.
+        findings = check(tags("linux-x64-vm.result", "win-amd64", "cpython-312-x86_64-linux-gnu"))
+        self.assertEqual([path for _, code, path, _ in findings.errors if code == "os-contradiction"], ["/workload/runtimes/python/platform"])
 
     def test_32_bit_code_on_a_64_bit_kernel_of_its_family_is_native(self):
         def thirty_two_bit(d):
@@ -1510,7 +1545,10 @@ class ProfileTests(Case):
 class CommandTests(Case):
     def run_main(self, *argv):
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
-            code = validator.main([str(arg) for arg in argv])
+            try:
+                code = validator.main([str(arg) for arg in argv])
+            except SystemExit as exc:
+                code = exc.code
         return code, out.getvalue() + err.getvalue()
 
     def test_exit_status(self):
@@ -1539,6 +1577,38 @@ class CommandTests(Case):
             code, output = self.run_main("--summary", pathlib.Path(directory) / "missing" / "summary.md", FIXTURES / "linux-x64-vm.profile.json")
         self.assertEqual(code, 2)
         self.assertIn("cannot write the summary", output)
+
+    def test_a_summary_that_is_a_file_this_run_reads_is_a_usage_error(self):
+        # The summary is appended to, so naming an input, by any spelling or link, would change that input.
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            sources = {"result": FIXTURES / "linux-x64-vm.result.json", "profile": FIXTURES / "linux-x64-vm.profile.json", "schema": validator.DEFAULT_SCHEMA, "strategy": STRATEGY}
+            copies = {name: directory / f"{name}{path.suffix}" for name, path in sources.items()}
+            for name, path in sources.items():
+                copies[name].write_bytes(path.read_bytes())
+            argv = ("--schema", copies["schema"], "--profile", copies["profile"], "--dependency-strategy", copies["strategy"], copies["result"])
+            self.assertEqual(self.run_main(*argv, "--summary", directory / "summary.md")[0], 0)
+            (directory / "linked").hardlink_to(copies["result"])
+            for name, summary in (*copies.items(), ("hard link", directory / "linked"), ("another spelling", directory / ".." / directory.name / "result.json")):
+                with self.subTest(summary=name):
+                    before = {path: path.read_bytes() for path in copies.values()}
+                    code, output = self.run_main(*argv, "--summary", summary)
+                    self.assertEqual(code, 2)
+                    self.assertIn("is a file this run reads", output)
+                    self.assertEqual({path: path.read_bytes() for path in copies.values()}, before)
+
+    def test_argparse_errors_cannot_forge_output_lines(self):
+        # argparse repeats an argument it rejects, and the program name, in its usage line too; both are written as every other line is.
+        token = "ghp_" + "A" * 36
+        with mock.patch.object(sys, "argv", ["::program##[error]forged"]):
+            code, output = self.run_main("--bad=##[error]forged", "--x=a\n::error::forged", f"--worse={token}", FIXTURES / "linux-x64-vm.result.json")
+        self.assertEqual(code, 2)
+        self.assertIn("unrecognized arguments", output)
+        self.assertIn("looks like a GitHub token", output)
+        self.assertNotIn("##[", output)
+        self.assertNotIn(token, output)
+        self.assertFalse([line for line in output.splitlines() if line.lstrip().startswith("::")], output)
+        self.assertIn("usage:", output)
 
     def test_document_text_cannot_forge_output_lines(self):
         with tempfile.TemporaryDirectory() as directory:

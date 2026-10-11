@@ -392,6 +392,13 @@ class JsonLoadingTests(Case):
                 with self.subTest(label), self.assertRaises(ValueError):
                     validator.load_json(self.write(directory, content))
 
+    def test_a_document_is_read_only_up_to_the_size_limit(self):
+        handle = mock.MagicMock()
+        handle.__enter__.return_value.read.return_value = b" " * (validator.MAX_DOCUMENT_BYTES + 1)
+        with mock.patch.object(validator, "open", create=True, return_value=handle), self.assertRaisesRegex(ValueError, "larger than"):
+            validator.load_json("large.json")
+        handle.__enter__.return_value.read.assert_called_once_with(validator.MAX_DOCUMENT_BYTES + 1)
+
     def test_the_command_reports_unparsable_documents_as_invalid(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write(directory, b'{"a": 1, "a": 2}')
@@ -936,6 +943,11 @@ class PolicyTests(Case):
         ):
             with self.subTest(label):
                 self.assertIn("policy-exception", check(changed(profile, change)).codes())
+        # The schema checks only the date's shape; the day must exist.
+        for date in ("2026-99-99", "2026-02-30", "2026-00-10", "2025-02-29"):
+            with self.subTest(date=date):
+                self.assertFinding(check(changed(profile, lambda d: exception(d)["approval"].update(date=date))), "policy-exception", "/policy/exceptions/0/approval/date")
+        self.assertValid(check(changed(profile, lambda d: exception(d)["approval"].update(date="2024-02-29"))))
         for label, change in (
             ("no reason", lambda d: exception(d).pop("reason")),
             ("no end condition", lambda d: exception(d).pop("end_condition")),
@@ -1411,6 +1423,22 @@ class CommandTests(Case):
             self.assertIn("profile-mismatch", output)
             self.assertIn("24.04 ## [stop-commands]token", output)
             self.assertNotIn("##[", output)
+
+    def test_secret_shaped_values_are_not_shown(self):
+        # A value the schema rejects is echoed in its finding, and a file name is printed; neither may show a token.
+        token = "gh" + "p_" + "A" * 36
+        document = changed(fixture("linux-x64-vm.result"), lambda d: d.update(kind=token))
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("record.json", token + ".json"):
+                with self.subTest(name=name[:6]):
+                    path = pathlib.Path(directory) / name
+                    path.write_text(json.dumps(document), encoding="utf-8")
+                    summary = pathlib.Path(directory) / "summary.md"
+                    code, output = self.run_main("--summary", summary, path)
+                    self.assertEqual(code, 1)
+                    self.assertIn("not shown: looks like a GitHub token", output)
+                    self.assertNotIn(token, output + summary.read_text(encoding="utf-8"))
+        self.assertEqual(validator.plain("a " + token + " b ::c"), "a [not shown: looks like a GitHub token]")
 
     def test_file_names_cannot_forge_output_lines(self):
         with tempfile.TemporaryDirectory() as directory:

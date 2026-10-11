@@ -25,6 +25,7 @@ document is invalid, 2 on a usage error or a file or schema that cannot be used.
 """
 
 import argparse
+import datetime
 import json
 import math
 import pathlib
@@ -177,7 +178,8 @@ class Findings:
 
 def load_json(path):
     """Read a JSON file strictly: no duplicate keys, NaN or Infinity, and a size limit."""
-    data = pathlib.Path(path).read_bytes()
+    with open(path, "rb") as handle:
+        data = handle.read(MAX_DOCUMENT_BYTES + 1)
     if len(data) > MAX_DOCUMENT_BYTES:
         raise ValueError(f"larger than {MAX_DOCUMENT_BYTES} bytes")
     text = data.decode("utf-8")
@@ -332,6 +334,15 @@ def json_equal(a, b):
 
 def pointer(path, key):
     return f"{path}/{str(key).replace('~', '~0').replace('/', '~1')}"
+
+
+def calendar_date(text):
+    """Whether a YYYY-MM-DD string (the shape the schema checks) names a real day."""
+    try:
+        datetime.date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
 
 
 def validate_schema(instance, schema, root, path, findings):
@@ -843,6 +854,8 @@ def effective_policy(profile, findings):
         approval = exception["approval"]
         if approval["status"] == "approved" and not (approval.get("reference") and approval.get("date")):
             findings.error("policy-exception", f"{base}/approval", "an approved exception records where and when it was approved")
+        if approval.get("date") and not calendar_date(approval["date"]):
+            findings.error("policy-exception", f"{base}/approval/date", f"{approval['date']!r} is not a calendar date")
         exceptions.append(exception)
     return rules, exceptions
 
@@ -1229,11 +1242,17 @@ def load_schema(path=DEFAULT_SCHEMA):
 
 
 def plain(text):
-    """Text for a terminal line: control characters and lone surrogates become spaces, "##[", which the
-    GitHub Actions runner reads as a workflow command anywhere in a line, becomes "## [", and "::", which
+    """Text for a terminal line or a summary cell: control characters and lone surrogates become spaces; a value
+    shaped like a secret, and the rest of the line after it, is replaced by a note naming the shape; "##[", which
+    the GitHub Actions runner reads as a workflow command anywhere in a line, becomes "## [", and "::", which
     starts a workflow command at the start of a line (as a file name can), becomes ": :".
     """
-    return CONTROL.sub(" ", str(text)).replace("##[", "## [").replace("::", ": :")
+    text = CONTROL.sub(" ", str(text))
+    for label, shape in SECRET_SHAPES:
+        match = shape.search(text)
+        if match:
+            text = text[:match.start()] + f"[not shown: looks like a {label}]"
+    return text.replace("##[", "## [").replace("::", ": :")
 
 
 def markdown_cell(text):

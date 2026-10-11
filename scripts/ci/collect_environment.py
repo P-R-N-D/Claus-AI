@@ -129,6 +129,8 @@ SECCOMP = {"0": "disabled", "1": "strict", "2": "filter"}
 USER_NS_INIT_INO = 0xEFFFFFFD
 # The fixed inode of the initial PID namespace (PROC_PID_INIT_INO).
 PID_NS_INIT_INO = 0xEFFFFFFC
+# The same characters as CONTROL in validate_compatibility.py; a test keeps plain() equal to the validator's.
+CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]")
 # The same shapes as SECRET_SHAPES in validate_compatibility.py; a test keeps them equal.
 SECRET_SHAPES = (
     ("GitHub token", re.compile(r"\bgh[opsur]_[A-Za-z0-9]{30,}")),
@@ -1227,6 +1229,18 @@ def parse_stage_args(args):
     return stages
 
 
+def plain(text):
+    """Text for a terminal line, written as the validator's plain() writes it, so that no value (the output file's
+    name, for one) can start a GitHub Actions workflow command or show a value shaped like a secret.
+    """
+    text = CONTROL.sub(" ", str(text))
+    for label, shape in SECRET_SHAPES:
+        match = shape.search(text)
+        if match:
+            text = text[:match.start()] + f"[not shown: looks like a {label}]"
+    return text.replace("##[", "## [").replace("::", ": :")
+
+
 def markdown_cell(value):
     """Text for one Markdown table cell: control characters become spaces, and Markdown and HTML syntax is escaped."""
     return re.sub(r"([\\`*_~\[\]()<>!|])", r"\\\1", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value)))
@@ -1306,9 +1320,9 @@ def main(argv=None):
             print(f"error: the record was written, but the summary could not be: {type(exc).__name__}", file=sys.stderr)
             return 2
     detect = result["stages"]["detect"]["status"]
-    print(f"{args.output.name}: detect {detect}, overall {result['overall']}, {len(result['probe_errors'])} probe error(s)")
+    print(plain(f"{args.output.name}: detect {detect}, overall {result['overall']}, {len(result['probe_errors'])} probe error(s)"))
     for error in result["probe_errors"]:
-        print(f"  probe error: {error['probe']}: {error['error']}")
+        print(plain(f"  probe error: {error['probe']}: {error['error']}"))
     return 0 if detect == "passed" else 1
 
 

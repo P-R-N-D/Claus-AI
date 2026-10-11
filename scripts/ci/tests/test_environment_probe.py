@@ -1117,6 +1117,19 @@ class CommandTests(Case):
         self.assertEqual(result["stages"]["detect"]["status"], "failed")
         self.assertEqual(result["probe_errors"][0]["probe"], "identity")
 
+    def test_the_output_name_cannot_forge_output_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("::warning title=forged::x.json", "x##[warning]y.json", "gh" + "p_" + "A" * 36 + ".json"):
+                with self.subTest(name=name[:6]):
+                    code, text = self.run_main("--output", pathlib.Path(directory) / name, "--no-node")
+                    self.assertIn("not shown: looks like a GitHub token" if "A" * 36 in name else ": detect ", text)
+                    self.assertFalse([line for line in text.splitlines() if line.lstrip().startswith("::") or "##[" in line], text)
+                    self.assertNotIn("A" * 36, text)
+        # The collector writes its lines as the validator does.
+        for sample in ("::a##[b", "a\nb\u2028c", *self.SECRET_SAMPLES):
+            with self.subTest(sample=sample[:6]):
+                self.assertEqual(collector.plain(sample), validator.plain(sample))
+
     def test_an_unwritable_output_is_a_usage_error(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(self.run_main("--output", pathlib.Path(directory) / "missing" / "r.json", "--no-node")[0], 2)

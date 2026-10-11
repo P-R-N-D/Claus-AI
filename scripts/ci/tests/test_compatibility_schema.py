@@ -1452,6 +1452,11 @@ class ProfileTests(Case):
         # Without a workflow_ref, only the job is compared.
         no_ref = changed(other_job, lambda d: d["run"]["ci"].update(workflow_ref=unknown()))
         self.assertFinding(check(no_ref, profile), "profile-link", "/run/ci/job")
+        # Nor is a known workflow_ref compared without the repository: only the job is, and the record fails as CI evidence.
+        no_repository = changed(other_workflow, lambda d: d["run"]["ci"].update(repository=unknown()))
+        self.assertCodes(check(no_repository, profile), "ci-evidence")
+        no_repository_job = changed(no_repository, lambda d: d["run"]["ci"].update(job=fact("backend", "env:GITHUB_JOB")))
+        self.assertFinding(check(no_repository_job, profile), "profile-link", "/run/ci/job")
 
     def test_a_github_actions_record_names_its_run_and_commits(self):
         result, profile = real_result()

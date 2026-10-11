@@ -1045,19 +1045,24 @@ class NodeTests(Case):
         self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 0.5 seconds", []))
         self.assertLess(time.monotonic() - started, 20)
         # node closes its output and keeps running: the wait after the read stops it, by the deadline the read had.
-        timeouts = []
+        timeouts, readings = [], []
 
         class Waiting(subprocess.Popen):
             def wait(self, timeout=None):
                 timeouts.append(timeout)
                 return super().wait(timeout)
 
+        def clock():
+            # The collector's clock runs a second ahead after its first reading, the one that sets the deadline.
+            readings.append(None)
+            return time.monotonic() + (1.0 if len(readings) > 1 else 0.0)
+
         started = time.monotonic()
-        with mock.patch.object(collector, "NODE_TIMEOUT", 2.0), mock.patch.object(collector.subprocess, "Popen", Waiting):
+        with mock.patch.object(collector, "NODE_TIMEOUT", 2.0), mock.patch.object(collector.subprocess, "Popen", Waiting), mock.patch.object(collector, "time", types.SimpleNamespace(monotonic=clock)):
             facts, errors = self.node('{"v":"24.21.0"}', before="sleep 0.5\n", after="exec >&-\nsleep 30\n")
         self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 2.0 seconds", []))
-        # The wait gets what is left of the read's deadline, never a fresh timeout of its own.
-        self.assertLess(timeouts[0], 2.0)
+        # The wait gets what is left of the read's deadline, under a second here, never a fresh timeout of about two.
+        self.assertLess(timeouts[0], 1.0)
         self.assertLess(time.monotonic() - started, 20)
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")

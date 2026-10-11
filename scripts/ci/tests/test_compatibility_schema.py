@@ -678,8 +678,20 @@ class EnvironmentRuleTests(Case):
                 with self.subTest(document=document["kind"], libc=libc):
                     self.assertFinding(check(changed(document, lambda d: python(d).update(libc=fact(libc, provenance="declared")))), "abi-contradiction", "/workload/runtimes/python/libc")
         self.assertValid(check(changed(result, lambda d: python(d).update(libc=fact("ucrt", "synthetic:x")))))
-        macos = changed(fixture("linux-x64-vm.result"), lambda d: python(d).update(platform=fact("macosx-14.0-arm64", "synthetic:x"), soabi=fact("cpython-312-darwin", "synthetic:x")))
-        self.assertFinding(check(macos), "abi-contradiction", "/workload/runtimes/python/libc")
+
+        # Each of the innermost layer, the platform tag and the ABI tag is enough on its own.
+        def freebsd_layer(d):
+            d["environment"]["layers"][-1]["os"]["family"] = fact("freebsd", "synthetic:x")
+            python(d).update(platform=unknown(), soabi=unknown())
+
+        for source, change in (
+            ("layer", freebsd_layer),
+            ("platform", lambda d: python(d).update(platform=fact("macosx-14.0-x86_64", "synthetic:x"), soabi=unknown())),
+            ("soabi", lambda d: python(d).update(platform=unknown(), soabi=fact("cpython-312-darwin", "synthetic:x"))),
+            ("both tags", lambda d: python(d).update(platform=fact("macosx-14.0-arm64", "synthetic:x"), soabi=fact("cpython-312-darwin", "synthetic:x"))),
+        ):
+            with self.subTest(source=source):
+                self.assertFinding(check(changed(fixture("linux-x64-vm.result"), change)), "abi-contradiction", "/workload/runtimes/python/libc")
 
     def test_32_bit_code_on_a_64_bit_kernel_of_its_family_is_native(self):
         def thirty_two_bit(d):

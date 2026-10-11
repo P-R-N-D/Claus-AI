@@ -24,7 +24,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import types
 import unittest
 from unittest import mock
 
@@ -1042,6 +1044,12 @@ class NodeTests(Case):
             facts, errors = self.node('{"v":"24.21.0"}', before="sleep 30\n")
         self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 0.5 seconds", []))
         self.assertLess(time.monotonic() - started, 20)
+        # node closes its output and keeps running: the wait after the read stops it at the same deadline.
+        started = time.monotonic()
+        with mock.patch.object(collector, "NODE_TIMEOUT", 0.5):
+            facts, errors = self.node('{"v":"24.21.0"}', after="exec >&-\nsleep 30\n")
+        self.assertEqual((facts["version"]["reason"], errors), ("node did not finish within 0.5 seconds", []))
+        self.assertLess(time.monotonic() - started, 20)
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
     def test_a_late_timer_does_not_signal_a_reaped_node(self):
@@ -1089,6 +1097,74 @@ class NodeTests(Case):
             with mock.patch.object(collector.os, "killpg") as killpg:
                 timers.pop().function()
         killpg.assert_not_called()
+
+        # The same when the timer fires right after the wait reaped node, before the probe returns.
+        signalled = []
+
+        class Reaping(subprocess.Popen):
+            def wait(self, timeout=None):
+                status = super().wait(timeout)
+                with mock.patch.object(collector.os, "killpg") as killpg:
+                    timers[-1].function()
+                signalled.append(killpg.called)
+                return status
+
+        with mock.patch.object(collector.threading, "Timer", Timer), mock.patch.object(collector.subprocess, "Popen", Reaping):
+            facts, errors = self.node('{"v":"24.21.0","m":"137","n":"10","a":"x64","p":"linux"}')
+        self.assertEqual((value(facts["version"]), errors, signalled), ("24.21.0", [], [False]))
+
+    @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
+    def test_a_timer_that_fires_as_the_read_ends_holds_back_the_reap(self):
+        # The timer passes its check just as the read ends. node must not be reaped before its signal is sent.
+        timers, nodes, entered, at_signal = [], [], threading.Event(), []
+
+        class Timer:
+            def __init__(self, interval, function):
+                self.function = function
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        class SlowEvent(threading.Event):
+            def set(self):
+                # The timer calls this between its check and its signal; wait there long enough for a reap.
+                entered.set()
+                time.sleep(0.3)
+                super().set()
+
+        class Popen(subprocess.Popen):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                nodes.append(self)
+                pipe = self.stdout
+
+                class Reader:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *exc):
+                        pipe.close()
+
+                    def read(self, size):
+                        output = pipe.read(size)
+                        fire.start()
+                        entered.wait(10)
+                        return output
+
+                self.stdout = Reader()
+
+        fire = threading.Thread(target=lambda: timers[-1].function())
+        names = types.SimpleNamespace(Event=SlowEvent, Lock=threading.Lock, Timer=Timer)
+        with mock.patch.object(collector, "threading", names), mock.patch.object(collector.subprocess, "Popen", Popen), \
+                mock.patch.object(collector.os, "killpg", lambda pid, sig: at_signal.append(nodes[-1].returncode)):
+            facts, errors = self.node('{"v":"24.21.0"}')
+            fire.join(10)
+        self.assertEqual(at_signal, [None])
+        self.assertEqual((facts["version"]["reason"], errors), (f"node did not finish within {collector.NODE_TIMEOUT} seconds", []))
 
     def test_node_absent_or_skipped(self):
         with tempfile.TemporaryDirectory() as directory, FakeMachine(env={"PATH": directory}) as machine:

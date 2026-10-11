@@ -483,6 +483,15 @@ class ProvenanceTests(Case):
                 self.assertCodes(check(document), *([code] if code else []))
         document = changed(result, lambda d: d["extensions"].update({"x-data": {"ghp_" + "A" * 36: 1}}))
         self.assertCodes(check(document), "secret-like-value")
+        # A sample for every shape, found on its own and right after a letter, also one outside ASCII.
+        samples = ("ghp_" + "A" * 36, "github_pat_" + "a" * 30, "AKIA" + "ABCDEFGHIJKLMNOP", "-----BEGIN OPENSSH PRIVATE KEY-----", "xoxb-" + "A" * 12, "eyJ" + "A" * 10 + ".eyJ" + "B" * 10 + ".")
+        for label, shape in validator.SECRET_SHAPES:
+            self.assertTrue(any(shape.search(sample) for sample in samples), f"no sample for {label}")
+        for sample in samples:
+            for before in ("", "x", "\u00e9"):
+                with self.subTest(sample=sample[:6], before=before):
+                    document = changed(result, lambda d: d["stages"]["install"].update(reason=before + sample))
+                    self.assertCodes(check(document), "secret-like-value")
         # A long run with many "eyJ" in it is searched in linear time; a quadratic search takes seconds here.
         started = time.perf_counter()
         for text in ("eyJ" * 40000, "-eyJ" * 30000, "eyJ" * 20000 + "." + "eyJ" * 20000):

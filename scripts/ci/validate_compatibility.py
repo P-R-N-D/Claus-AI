@@ -522,12 +522,15 @@ def soabi_target(soabi):
 
 
 def libc_family(python):
-    """(glibc or musl, the path of the fact it came from), from a Python's libc fact or else its SOABI; (None, None) if neither shows it."""
+    """(the C library, the path of the fact it came from), from a Python's libc fact or else its SOABI; (None, None) if neither shows it.
+
+    A libc fact that starts with neither glibc nor musl is returned as written, so it contradicts a glibc or musl lane.
+    """
     base = "/workload/runtimes/python"
     libc, soabi = known(python["libc"]), known(python["soabi"])
-    name = re.match(r"(glibc|musl)\b", libc) if isinstance(libc, str) else None
-    if name:
-        return name.group(1), f"{base}/libc"
+    if isinstance(libc, str):
+        name = re.match(r"(glibc|musl)\b", libc)
+        return (name.group(1) if name else libc), f"{base}/libc"
     if isinstance(soabi, str):
         match = re.search(r"-linux-(gnu|musl)[a-z0-9]*$", soabi)
         if match:

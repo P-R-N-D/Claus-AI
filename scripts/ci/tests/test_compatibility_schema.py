@@ -544,6 +544,9 @@ class EnvironmentRuleTests(Case):
         engine_vm = changed(fixture("linux-x64-vm.result"), lambda d: layers(d)[1].update(technology=fact("podman", "synthetic:x")))
         self.assertCodes(check(engine_vm), "layer-structure")
         self.assertFinding(check(engine_vm), "layer-structure", at + "1/technology")
+        unmade_vm = changed(fixture("linux-x64-vm.result"), lambda d: layers(d)[1].update(technology={"value": None, "provenance": "not-applicable", "reason": "x"}))
+        self.assertCodes(check(unmade_vm), "layer-structure")
+        self.assertFinding(check(unmade_vm), "layer-structure", at + "1/technology")
 
     def test_emulation_reaches_every_inner_layer(self):
         result = fixture("vm-podman-quadlet-systemd.result")
@@ -1208,12 +1211,19 @@ class ProfileTests(Case):
                 if label in ("Python 3.15 free-threaded", "Python 3.13", "PyPy"):
                     # The lane table does not assess this interpreter, so the profile records not-assessed.
                     self.assertValid(check(changed(claimed, lambda d: d["support"].update(status="not-assessed"))))
-        # The C library comes from the libc fact when the ABI tag is not declared, and an error names that fact.
-        for libc, errors in (("musl 1.2.5", []), ("glibc 2.39", ["/workload/runtimes/python/libc"])):
-            with self.subTest(libc=libc):
-                alpine = changed(real, lambda d: (d["support"].update(status="not-supported", lane="Linux musl (Alpine)"),
-                                                  python(d).update(libc=fact(libc, provenance="declared"), soabi=unknown())))
-                self.assertEqual([path for _, code, path, _ in check(alpine).errors if code == "support-claim"], errors)
+        # The C library comes from the libc fact before the ABI tag, and an error names that fact. A libc fact that
+        # names another C library contradicts the lane whatever the status.
+        at_libc = ["/workload/runtimes/python/libc"]
+        for status, lane, libc, abi_tag, errors in (
+            ("not-supported", "Linux musl (Alpine)", "musl 1.2.5", False, []),
+            ("not-supported", "Linux musl (Alpine)", "glibc 2.39", False, at_libc),
+            ("not-supported", "Linux musl (Alpine)", "glibc 2.39", True, at_libc),
+            ("not-assessed", "Linux x86-64 glibc", "uclibc-ng 1.0.45", False, at_libc),
+        ):
+            with self.subTest(lane=lane, libc=libc, abi_tag=abi_tag):
+                claimed = changed(real, lambda d: (d["support"].update(status=status, lane=lane), python(d).update(libc=fact(libc, provenance="declared")),
+                                                   None if abi_tag else python(d).update(soabi=unknown())))
+                self.assertEqual([path for _, code, path, _ in check(claimed).errors if code == "support-claim"], errors)
         # A WSL2 lane needs a WSL2 layer, and a native Windows lane none.
         wsl = fixture("windows-arm64-wsl2-podman.profile")
         self.assertValid(check(wsl))

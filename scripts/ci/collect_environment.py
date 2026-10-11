@@ -113,9 +113,12 @@ ARCH_ALIASES = {
 COMPATIBLE = frozenset({("x86", "x86_64")})
 # ELF e_machine values (elf.h) for the architectures in docs/CI-MATRIX.md.
 ELF_MACHINES = {3: "x86", 40: "armv7", 62: "x86_64", 183: "aarch64", 243: "riscv64", 22: "s390x", 258: "loongarch64", 21: "ppc64le"}
-# Each name above is for one byte order: s390x is big-endian and the others little-endian (ppc64 and
-# aarch64_be share their e_machine with ppc64le and aarch64).
+# Each name above is for one byte order and one ELF class. s390x is big-endian and the others
+# little-endian (ppc64 and aarch64_be share their e_machine with ppc64le and aarch64); x86 and armv7 are
+# 32-bit and the others 64-bit (riscv32, 31-bit s390, loongarch32, x32 and aarch64 ILP32 share theirs
+# with a 64-bit name).
 ELF_BIG_ENDIAN = frozenset({"s390x"})
+ELF_32_BIT = frozenset({"x86", "armv7"})
 KNOWN_ARCHES = frozenset(ELF_MACHINES.values())
 OS_FAMILIES = {"Linux": "linux", "Windows": "windows", "Darwin": "macos", "FreeBSD": "freebsd"}
 # Capability numbers from linux/capability.h.
@@ -815,8 +818,9 @@ class Probe:
             return None, None
         if len(header) == 20 and header[:4] == b"\x7fELF" and header[5] in (1, 2):
             machine = int.from_bytes(header[18:20], "little" if header[5] == 1 else "big")
-            if machine in ELF_MACHINES and (header[5] == 2) == (ELF_MACHINES[machine] in ELF_BIG_ENDIAN):
-                return ELF_MACHINES[machine], "file:sys.executable#e_machine"
+            name = ELF_MACHINES.get(machine)
+            if name and header[4] == (1 if name in ELF_32_BIT else 2) and header[5] == (2 if name in ELF_BIG_ENDIAN else 1):
+                return name, "file:sys.executable#e_machine"
         return None, None
 
     def python(self, reference):

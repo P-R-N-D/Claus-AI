@@ -492,6 +492,12 @@ class LinuxProbeTests(Case):
                         with self.subTest(machine=machine, order=order), mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
                                 mock.patch.object(collector.sys, "executable", str(executable)):
                             self.assertEqual(probe.build_arch()[0], expected)
+                    # The class tells a 32-bit build from the 64-bit name that shares its e_machine (riscv32, x32, aarch64 ILP32).
+                    for machine, elf_class, expected in ((3, 1, "x86"), (40, 1, "armv7"), (3, 2, None), (243, 1, None), (62, 1, None), (183, 1, None)):
+                        executable.write_bytes(b"\x7fELF" + bytes([elf_class, 1]) + bytes(12) + machine.to_bytes(2, "little"))
+                        with self.subTest(machine=machine, elf_class=elf_class), mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
+                                mock.patch.object(collector.sys, "executable", str(executable)):
+                            self.assertEqual(probe.build_arch()[0], expected)
                     executable.write_bytes(b"#!/bin/sh\n")
                     with mock.patch.object(collector.sysconfig, "get_config_var", return_value=None), \
                             mock.patch.object(collector.sys, "executable", str(executable)):

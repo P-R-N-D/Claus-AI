@@ -18,6 +18,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -983,11 +984,22 @@ class NodeTests(Case):
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
     def test_node_on_little_endian_power(self):
-        with mock.patch.object(collector.sys, "byteorder", "little"):
-            facts, _ = self.node('{"v":"24.21.0","m":"137","n":"10","a":"ppc64","p":"linux"}', reference=("ppc64le", None))
-        self.assertEqual((value(facts["arch"]), value(facts["execution"])), ("ppc64le", "native"))
-        self.assertEqual(facts["arch"]["provenance"], "inferred")
-        self.assertIn("python:sys.byteorder", facts["execution"]["evidence"])
+        # Node reports ppc64 for both byte orders; the name follows Node's own byte order, not this Python's.
+        for endianness, arch, byteorder in (("LE", "ppc64le", "big"), ("BE", "ppc64", "little"), (None, "ppc64", "little")):
+            output = json.dumps({"v": "24.21.0", "m": "137", "n": "10", "a": "ppc64", "p": "linux", "e": endianness})
+            with self.subTest(endianness=endianness), mock.patch.object(collector.sys, "byteorder", byteorder):
+                facts, _ = self.node(output, reference=("ppc64le", None))
+                self.assertEqual((value(facts["arch"]), facts["arch"]["provenance"]), (arch, "observed"))
+                self.assertEqual(value(facts["execution"]), "native" if arch == "ppc64le" else None)
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("node"), "needs node on PATH")
+    def test_the_expression_runs_on_a_real_node(self):
+        # Run as the probe runs it, with an empty environment: every key the probe reads is there.
+        output = subprocess.run([shutil.which("node"), "-p", collector.NODE_EXPRESSION], env={}, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=30, check=True).stdout
+        values = json.loads(output)
+        self.assertEqual(set(values), {"v", "m", "n", "a", "p", "e"})
+        self.assertIn(values["e"], ("LE", "BE"))
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
     def test_node_failures(self):

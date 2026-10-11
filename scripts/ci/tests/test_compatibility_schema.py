@@ -458,6 +458,13 @@ class ProvenanceTests(Case):
         undated = check(changed(measured, lambda d: d.update(generated_at=None)))
         self.assertCodes(undated, "synthetic-marking")
         self.assertFinding(undated, "synthetic-marking", "/generated_at")
+        # The collection time has the schema's shape and is also a day and time of day that exist.
+        for generated_at in ("2026-99-99T99:99:99Z", "2026-02-30T12:00:00Z", "2025-02-29T12:00:00Z", "2026-10-11T24:00:00Z", "2026-10-11T23:60:00Z", "2026-10-11T23:59:60Z"):
+            with self.subTest(generated_at=generated_at):
+                impossible = check(changed(measured, lambda d: d.update(generated_at=generated_at)))
+                self.assertCodes(impossible, "synthetic-marking")
+                self.assertFinding(impossible, "synthetic-marking", "/generated_at")
+        self.assertValid(check(changed(measured, lambda d: d.update(generated_at="2024-02-29T23:59:59Z"))))
 
     def test_strings_with_control_characters_or_secrets_are_rejected(self):
         result = fixture("linux-x64-vm.result")
@@ -470,6 +477,10 @@ class ProvenanceTests(Case):
             ("GitHub token", "token ghp_" + "A" * 36, "secret-like-value"),
             ("fine-grained token", "github_pat_" + "a" * 30, "secret-like-value"),
             ("AWS key", "AKIA" + "ABCDEFGHIJKLMNOP", "secret-like-value"),
+            # A key ID ends where its alphabet does, so a word character after it does not hide it.
+            ("AWS key before an underscore", "AKIA" + "ABCDEFGHIJKLMNOP" + "_suffix", "secret-like-value"),
+            ("AWS key before a lowercase letter", "ASIA" + "ABCDEFGHIJKLMNOP" + "abc", "secret-like-value"),
+            ("run of 17 key characters", "AKIA" + "ABCDEFGHIJKLMNOPQ", None),
             ("private key", "-----BEGIN OPENSSH PRIVATE KEY-----", "secret-like-value"),
             ("JSON Web Token after a letter", "xeyJ" + "A" * 10 + ".eyJ" + "B" * 10 + ".", "secret-like-value"),
             # The shortest JSON Web Token shape has 8 characters after each "eyJ"; one fewer on either side is not one.
@@ -483,6 +494,7 @@ class ProvenanceTests(Case):
                 self.assertCodes(check(document), *([code] if code else []))
         document = changed(result, lambda d: d["extensions"].update({"x-data": {"ghp_" + "A" * 36: 1}}))
         self.assertCodes(check(document), "secret-like-value")
+        self.assertNotIn("ABCDEFGHIJKLMNOP", validator.plain("key AKIA" + "ABCDEFGHIJKLMNOP" + "_suffix"))
         # A sample for every shape, found on its own and right after a letter, also one outside ASCII.
         samples = ("ghp_" + "A" * 36, "github_pat_" + "a" * 30, "AKIA" + "ABCDEFGHIJKLMNOP", "-----BEGIN OPENSSH PRIVATE KEY-----", "xoxb-" + "A" * 12, "eyJ" + "A" * 10 + ".eyJ" + "B" * 10 + ".")
         for label, shape in validator.SECRET_SHAPES:
@@ -512,6 +524,11 @@ class EnvironmentRuleTests(Case):
             ("container without container facts", lambda d: layers(d)[2].pop("container"), "layer-structure", at + "2"),
             ("container facts on a VM", lambda d: layers(d)[1].update(container=layers(d)[2]["container"]), "layer-structure", at + "1/container"),
             ("container with its own kernel", lambda d: layers(d)[2]["os"].update(kernel=fact("6.6", "synthetic:x")), "layer-structure", at + "2/os/kernel"),
+            ("hypervisor on a container layer", lambda d: layers(d)[2].update(technology=fact("kvm", "synthetic:x")), "layer-structure", at + "2/technology"),
+            ("engine on a WSL2 layer", lambda d: layers(d)[1].update(technology=fact("docker", "synthetic:x")), "layer-structure", at + "1/technology"),
+            ("unlisted technology on a WSL2 layer", lambda d: layers(d)[1].update(technology=fact("wsl3", "synthetic:x")), "layer-structure", at + "1/technology"),
+            ("WSL2 on a container layer", lambda d: layers(d)[2].update(technology=fact("wsl2", "synthetic:x")), "layer-structure", at + "2/technology"),
+            ("technology on the host", lambda d: layers(d)[0].update(technology=fact("hyper-v", "synthetic:x")), "layer-structure", at + "0/technology"),
             ("WSL2 on Linux", lambda d: layers(d)[0]["os"].update(family=fact("linux", "synthetic:x")), "os-contradiction", at + "1/kind"),
             ("WSL2 running Windows", lambda d: (layers(d)[1]["os"].update(family=fact("windows", "synthetic:x")), layers(d)[2]["os"].update(family=fact("windows", "synthetic:x"))), "os-contradiction", at + "1/os/family"),
             ("Windows container on a Linux kernel", lambda d: layers(d)[2]["os"].update(family=fact("windows", "synthetic:x")), "os-contradiction", at + "2/os/family"),
@@ -521,6 +538,9 @@ class EnvironmentRuleTests(Case):
         ):
             with self.subTest(label):
                 self.assertFinding(check(changed(result, change), policy=False), code, path)
+        engine_vm = changed(fixture("linux-x64-vm.result"), lambda d: layers(d)[1].update(technology=fact("podman", "synthetic:x")))
+        self.assertCodes(check(engine_vm), "layer-structure")
+        self.assertFinding(check(engine_vm), "layer-structure", at + "1/technology")
 
     def test_emulation_reaches_every_inner_layer(self):
         result = fixture("vm-podman-quadlet-systemd.result")
@@ -1185,6 +1205,12 @@ class ProfileTests(Case):
                 if label in ("Python 3.15 free-threaded", "Python 3.13", "PyPy"):
                     # The lane table does not assess this interpreter, so the profile records not-assessed.
                     self.assertValid(check(changed(claimed, lambda d: d["support"].update(status="not-assessed"))))
+        # The C library comes from the libc fact when the ABI tag is not declared.
+        for libc, errors in (("musl 1.2.5", []), ("glibc 2.39", ["/workload/runtimes/python/soabi"])):
+            with self.subTest(libc=libc):
+                alpine = changed(real, lambda d: (d["support"].update(status="not-supported", lane="Linux musl (Alpine)"),
+                                                  python(d).update(libc=fact(libc, provenance="declared"), soabi=unknown())))
+                self.assertEqual([path for _, code, path, _ in check(alpine).errors if code == "support-claim"], errors)
         # A WSL2 lane needs a WSL2 layer, and a native Windows lane none.
         wsl = fixture("windows-arm64-wsl2-podman.profile")
         self.assertValid(check(wsl))

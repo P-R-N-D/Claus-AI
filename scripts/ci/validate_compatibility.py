@@ -125,11 +125,14 @@ ARCH_BITS = {
 # (inner, outer) architecture pairs that run without emulation: 32-bit code on a 64-bit kernel of the same family.
 COMPATIBLE = frozenset({("x86", "x86_64"), ("armv7", "aarch64")})
 KNOWN_OS_FAMILIES = frozenset({"linux", "windows", "macos", "freebsd"})
-KNOWN_TECHNOLOGIES = frozenset({
-    "kvm", "qemu", "hyper-v", "vmware", "virtualbox", "xen", "parallels", "apple-virtualization",
-    "firecracker", "amazon", "google", "wsl2",
-    "docker", "podman", "containerd", "cri-o", "lxc", "systemd-nspawn", "apptainer",
-})
+# The layer kind each documented technology makes.
+TECHNOLOGY_KINDS = {
+    **dict.fromkeys(("kvm", "qemu", "hyper-v", "vmware", "virtualbox", "xen", "parallels", "apple-virtualization",
+                     "firecracker", "amazon", "google"), "vm"),
+    "wsl2": "wsl2",
+    **dict.fromkeys(("docker", "podman", "containerd", "cri-o", "lxc", "systemd-nspawn", "apptainer"), "container"),
+}
+KNOWN_TECHNOLOGIES = frozenset(TECHNOLOGY_KINDS)
 KNOWN_BACKEND_APIS = frozenset({
     "cpu", "cuda", "rocm", "oneapi", "level-zero", "opencl", "vulkan-compute", "directcompute",
     "directml", "metal", "mps", "coreml", "qnn", "wasm", "webgpu", "webgl", "webnn",
@@ -145,7 +148,7 @@ CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\
 SECRET_SHAPES = (
     ("GitHub token", re.compile(r"gh[opsur]_[A-Za-z0-9]{30,}")),
     ("GitHub token", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
-    ("AWS access key ID", re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("AWS access key ID", re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])")),
     ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("Slack token", re.compile(r"xox[abposr]-[A-Za-z0-9-]{10,}")),
     # A JSON Web Token: "eyJ", at least 8 more base64url characters and ".", twice. The run that holds the first
@@ -349,6 +352,15 @@ def calendar_date(text):
     return True
 
 
+def calendar_time(text):
+    """Whether a YYYY-MM-DDTHH:MM:SSZ string (the shape the schema checks) names a real day and time of day."""
+    try:
+        datetime.datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
 def validate_schema(instance, schema, root, path, findings):
     """Apply `schema` to `instance`, adding one "schema" finding per failed keyword."""
     if schema is True:
@@ -512,8 +524,9 @@ def soabi_target(soabi):
 def libc_family(python):
     """glibc or musl, from a Python's libc or SOABI fact (observed, inferred or declared); None if neither shows it."""
     libc, soabi = known(python["libc"]), known(python["soabi"])
-    if isinstance(libc, str) and libc.startswith("glibc "):
-        return "glibc"
+    name = re.match(r"(glibc|musl)\b", libc) if isinstance(libc, str) else None
+    if name:
+        return name.group(1)
     if isinstance(soabi, str):
         match = re.search(r"-linux-(gnu|musl)[a-z0-9]*$", soabi)
         if match:
@@ -592,6 +605,8 @@ def check_synthetic(document, findings):
             findings.error("synthetic-marking", "/generated_at", "a synthetic result has no collection time")
         if not synthetic and document["generated_at"] is None:
             findings.error("synthetic-marking", "/generated_at", "a result that is not synthetic records when it was collected")
+        if document["generated_at"] is not None and not calendar_time(document["generated_at"]):
+            findings.error("synthetic-marking", "/generated_at", "the collection time is not a day and time of day that exist")
 
 
 def check_names(document, findings):
@@ -636,6 +651,11 @@ def check_layers(document, findings):
             findings.error("layer-structure", f"{base}/kind", f"a {kind} needs an enclosing layer; add the host, with unknown facts if they cannot be seen")
         if "container" in layer and kind != "container":
             findings.error("layer-structure", f"{base}/container", "only a layer whose kind is container has container facts")
+        technology = known(layer["technology"])
+        if kind == "wsl2" and technology is not None and technology != "wsl2":
+            findings.error("layer-structure", f"{base}/technology", f"a WSL2 layer is made by wsl2, not {technology!r}")
+        elif kind is not None and technology in TECHNOLOGY_KINDS and TECHNOLOGY_KINDS[technology] != kind:
+            findings.error("layer-structure", f"{base}/technology", f"{technology!r} makes a {TECHNOLOGY_KINDS[technology]} layer, not a {kind}")
         if kind == "container" and "container" not in layer:
             findings.error("layer-structure", base, "a container layer records its engine mode, privileged state, devices and orchestration")
         if kind == "container" and known(layer["os"]["kernel"]) is not None:

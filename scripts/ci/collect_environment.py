@@ -136,7 +136,7 @@ CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\
 SECRET_SHAPES = (
     ("GitHub token", re.compile(r"gh[opsur]_[A-Za-z0-9]{30,}")),
     ("GitHub token", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
-    ("AWS access key ID", re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("AWS access key ID", re.compile(r"(AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])")),
     ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("Slack token", re.compile(r"xox[abposr]-[A-Za-z0-9-]{10,}")),
     # A JSON Web Token: "eyJ", at least 8 more base64url characters and ".", twice. The run that holds the first
@@ -151,7 +151,7 @@ DMI_VENDORS = (
     ("Apple Virtualization", "apple-virtualization"), ("Firecracker", "firecracker"),
 )
 CONTAINER_TECHNOLOGIES = {"docker": "docker", "podman": "podman", "lxc": "lxc", "lxc-libvirt": "lxc", "systemd-nspawn": "systemd-nspawn", "oci": None}
-NODE_EXPRESSION = "JSON.stringify({v:process.versions.node,m:process.versions.modules,n:process.versions.napi||null,a:process.arch,p:process.platform})"
+NODE_EXPRESSION = "JSON.stringify({v:process.versions.node,m:process.versions.modules,n:process.versions.napi||null,a:process.arch,p:process.platform,e:require('os').endianness()})"
 NODE_OUTPUT_LIMIT = 4096
 NODE_TIMEOUT = 30
 
@@ -919,19 +919,18 @@ class Probe:
         if status != 0:
             return all_unknown(f"node exited with status {status}")
         values = json.loads(output.decode("utf-8"))
-        evidence = "cmd:node -p process.versions,process.arch,process.platform"
+        evidence = "cmd:node -p process.versions,process.arch,process.platform,os.endianness()"
 
         def checked(key, pattern):
             value = values.get(key)
             return observed(str(value), evidence) if value is not None and re.fullmatch(pattern, str(value)) else unknown(f"node reported no usable {key}")
 
         arch = normalize_arch(values.get("a"))
+        if arch == "ppc64" and values.get("e") == "LE":
+            # Node reports ppc64 for both byte orders; its own os.endianness() tells them apart.
+            arch = "ppc64le"
         arch_evidence = [evidence]
         arch_fact = observed(arch, evidence) if arch else unknown("node reported no usable architecture")
-        if arch == "ppc64" and sys.byteorder == "little":
-            # Node reports ppc64 for both byte orders, so the little-endian name is derived.
-            arch, arch_evidence = "ppc64le", [evidence, "python:sys.byteorder"]
-            arch_fact = inferred(arch, *arch_evidence)
         platform_name = values.get("p")
         return {
             "version": checked("v", r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}"),

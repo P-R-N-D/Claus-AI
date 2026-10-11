@@ -164,6 +164,9 @@ class LinuxProbeTests(Case):
         self.assertEqual(value(vm["technology"]), "hyper-v")
         self.assertEqual(value(vm["os"]["name"]), "ubuntu")
         self.assertEqual(value(vm["os"]["version"]), "24.04")
+        # Inferred: an undetected container in the initial PID namespace would give the same files.
+        self.assertEqual(vm["os"]["name"], {"value": "ubuntu", "provenance": "inferred", "evidence": ["file:/etc/os-release#ID", "file:/proc/self/ns/pid#inode"]})
+        self.assertEqual(vm["service_manager"]["name"]["provenance"], "inferred")
         self.assertEqual(value(vm["os"]["kernel"]), "6.17.0-1022-azure")
         self.assertEqual(value(vm["cpu"]["arch"]), "x86_64")
         self.assertEqual(vm["cpu"]["execution"]["provenance"], "unknown")
@@ -269,6 +272,19 @@ class LinuxProbeTests(Case):
         self.assertEqual(value(result["environment"]["layers"][0]["os"]["family"]), "windows")
         self.assertNotIn("PrivateDistroName", json.dumps(result))
         self.assertValidRecord(result)
+        # WSL 2 runs each distribution in its own PID namespace, so that namespace does not hide its os-release.
+        with FakeMachine(files, env=env, release="6.6.87.2-microsoft-standard-WSL2") as machine:
+            result = machine.result(pid_inode=4026532001)
+        wsl = result["environment"]["layers"][1]
+        self.assertEqual(wsl["os"]["name"], {"value": "ubuntu", "provenance": "inferred", "evidence": ["file:/etc/os-release#ID", "file:/proc/sys/kernel/osrelease"]})
+        self.assertEqual(wsl["service_manager"]["name"]["provenance"], "inferred")
+        self.assertValidRecord(result)
+        # Older WSL 2 kernels have no WSL2 suffix; a Microsoft kernel that matches neither form stays unknown.
+        for release, expected in (("4.19.128-microsoft-standard", ["host", "wsl2"]), ("6.1.0-custom-microsoft", [None])):
+            with self.subTest(release=release), FakeMachine(dict(files, **{"proc/sys/kernel/osrelease": release + "\n"}), env=env, release=release) as machine:
+                result = machine.result()
+                self.assertEqual(kinds(result), expected)
+                self.assertEqual(value(result["environment"]["layers"][-1]["os"]["kernel"]), release)
 
     def test_an_emulated_process(self):
         files = dict(RUNNER_FILES)
@@ -284,8 +300,10 @@ class LinuxProbeTests(Case):
             result = machine.result()
         vm, container = result["environment"]["layers"][1:]
         self.assertEqual(value(vm["cpu"]["arch"]), "x86_64")
-        self.assertEqual(value(container["cpu"]["arch"]), "aarch64")
-        self.assertEqual(value(container["cpu"]["execution"]), "emulated")
+        # The container layer names no architecture of its own; the runtime records the emulation.
+        self.assertEqual(container["cpu"]["arch"]["provenance"], "unknown")
+        self.assertEqual(container["cpu"]["execution"]["provenance"], "unknown")
+        self.assertEqual(value(result["workload"]["runtimes"]["python"]["arch"]), "aarch64")
         self.assertEqual(value(result["workload"]["runtimes"]["python"]["execution"]), "emulated")
         self.assertValidRecord(result, policy=False)
 
@@ -324,6 +342,17 @@ class LinuxProbeTests(Case):
                 self.assertValidRecord(result)
         with FakeMachine(remove=("proc/sys/kernel/arch",)) as machine:
             self.assertEqual(machine.result()["workload"]["runtimes"]["python"]["execution"]["provenance"], "unknown")
+
+    def test_the_c_library_comes_from_confstr_only(self):
+        with FakeMachine() as machine, mock.patch.object(collector.os, "confstr", return_value="glibc 2.39"):
+            self.assertEqual(machine.result()["workload"]["runtimes"]["python"]["libc"], {"value": "glibc 2.39", "provenance": "observed", "evidence": ["python:os.confstr"]})
+        # Without it (musl, macOS, Windows), the interpreter's executable is not scanned for a version.
+        for effect in (ValueError("unrecognized configuration name"), AttributeError("confstr"), None):
+            confstr = mock.patch.object(collector.os, "confstr", return_value=None) if effect is None else mock.patch.object(collector.os, "confstr", side_effect=effect)
+            with self.subTest(effect=type(effect).__name__), FakeMachine() as machine, confstr, \
+                    mock.patch.object(collector.platform, "libc_ver", side_effect=AssertionError("scans the interpreter")):
+                result = machine.result()
+                self.assertEqual((result["workload"]["runtimes"]["python"]["libc"]["provenance"], result["probe_errors"]), ("unknown", []))
 
     def test_the_interpreter_build_architecture(self):
         with FakeMachine() as machine:
@@ -370,6 +399,15 @@ class LinuxProbeTests(Case):
                 # The container rules cannot pass for a container the record does not show.
                 findings = validator.validate_document(result, SCHEMA)
                 self.assertEqual(findings.codes(), ["policy-minimal-devices", "policy-no-privileged-container"])
+        # Apptainer keeps the initial PID namespace by default, so only its own markers show it.
+        for marker, env in (({".singularity.d/": None}, {"PATH": ""}), ({}, {"PATH": "", "APPTAINER_CONTAINER": "/home/someone/private.sif"})):
+            with self.subTest(marker=marker, env=sorted(env)), FakeMachine(dict(files, **marker), env=env) as machine:
+                result = machine.result()
+                self.assertEqual(kinds(result), ["host", "vm", "container"])
+                self.assertEqual(value(result["environment"]["layers"][2]["technology"]), "apptainer")
+                self.assertEqual(result["environment"]["layers"][1]["os"]["name"]["provenance"], "unknown")
+                self.assertNotIn("private.sif", json.dumps(result))
+                self.assertValidRecord(result, policy=False)
 
     def test_signals_that_do_not_show_a_vm(self):
         metal = dict(RUNNER_FILES, **{"proc/cpuinfo": CPUINFO_X86.format(hypervisor=""), "sys/class/dmi/id/sys_vendor": "Amazon EC2\n",
@@ -380,6 +418,13 @@ class LinuxProbeTests(Case):
         self.assertValidRecord(result)
         with FakeMachine(dict(metal, **{"proc/cpuinfo": CPUINFO_X86.format(hypervisor="hypervisor")})) as machine:
             self.assertEqual(value(machine.result()["environment"]["layers"][1]["technology"]), "amazon")
+        # Arm /proc/cpuinfo has no hypervisor flag, so only the product name tells an EC2 VM from metal.
+        graviton = dict(metal, **{"proc/cpuinfo": CPUINFO_ARM, "proc/sys/kernel/arch": "aarch64\n"})
+        for product, expected in (("c7g.large", ["host", "vm"]), ("c7g.metal", [None]), ("m7i.metal-24xl", [None])):
+            with self.subTest(product=product), FakeMachine(dict(graviton, **{"sys/class/dmi/id/product_name": product + "\n"}), machine="aarch64") as machine:
+                result = machine.result()
+                self.assertEqual(kinds(result), expected)
+                self.assertValidRecord(result, policy=False)
         # WSL 1 has no Linux kernel, and Windows with Hyper-V shows the hypervisor flag to it.
         wsl1 = dict(RUNNER_FILES, **{"proc/sys/kernel/osrelease": "4.4.0-19041-Microsoft\n"})
         with FakeMachine(wsl1, release="4.4.0-19041-Microsoft") as machine:
@@ -698,6 +743,8 @@ class NodeTests(Case):
         with mock.patch.object(collector.sys, "byteorder", "little"):
             facts, _ = self.node('{"v":"24.21.0","m":"137","n":"10","a":"ppc64","p":"linux"}', reference=("ppc64le", None))
         self.assertEqual((value(facts["arch"]), value(facts["execution"])), ("ppc64le", "native"))
+        self.assertEqual(facts["arch"]["provenance"], "inferred")
+        self.assertIn("python:sys.byteorder", facts["execution"]["evidence"])
 
     @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
     def test_node_failures(self):

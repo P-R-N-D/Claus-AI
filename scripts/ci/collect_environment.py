@@ -3,8 +3,8 @@
 The collector reads the following, and nothing else:
 
 - /proc, /sys, /etc/os-release or /usr/lib/os-release, /run/.containerenv
-  and /run/systemd/container, and whether /.dockerenv and /run/systemd/system
-  exist.
+  and /run/systemd/container, and whether /.dockerenv, /.singularity.d and
+  /run/systemd/system exist.
 - The first 20 bytes of the interpreter's executable (its ELF header), when the
   build architecture is not otherwise known.
 - The environment variables in ENV_ALLOWLIST.
@@ -76,10 +76,11 @@ ENV_ALLOWLIST = frozenset({
     "GITHUB_WORKFLOW_REF", "GITHUB_JOB", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH",
     "ImageOS", "ImageVersion", "container", "KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME",
     "WSL_INTEROP", "PATH", "_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH",
+    "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER",
 })
 # sysconfig reads these even under python -I; when one is set, its values are not recorded.
 SYSCONFIG_OVERRIDES = ("_PYTHON_HOST_PLATFORM", "_PYTHON_SYSCONFIGDATA_NAME", "_PYTHON_SYSCONFIGDATA_PATH")
-PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME", "WSL_INTEROP", "PATH", "GITHUB_EVENT_PATH", *SYSCONFIG_OVERRIDES})
+PRESENCE_ONLY = frozenset({"KUBERNETES_SERVICE_HOST", "WSL_DISTRO_NAME", "WSL_INTEROP", "PATH", "GITHUB_EVENT_PATH", "APPTAINER_CONTAINER", "SINGULARITY_CONTAINER", *SYSCONFIG_OVERRIDES})
 
 STAGES = ("detect", "install", "initialize", "execute", "correctness", "security", "performance")
 STATUSES = ("passed", "failed", "blocked", "not-run", "not-applicable")
@@ -157,6 +158,13 @@ def unknown(reason, *evidence):
     return fact
 
 
+def as_inferred(fact, *evidence):
+    """An observed fact restated as inferred, with more evidence; other facts unchanged."""
+    if fact["provenance"] != "observed":
+        return fact
+    return inferred(fact["value"], *fact["evidence"], *evidence)
+
+
 def not_applicable(reason):
     return {"value": None, "provenance": "not-applicable", "reason": reason}
 
@@ -184,6 +192,7 @@ def execution_fact(arch, arch_evidence, reference):
     synthesises an Arm /proc/cpuinfo, so a match does not show native execution.
     """
     kernel_arch, cpu_family = reference
+    arch_evidence = [arch_evidence] if isinstance(arch_evidence, str) else list(arch_evidence)
     if arch is None:
         return unknown("the architecture is not known")
     if kernel_arch is not None:
@@ -192,10 +201,10 @@ def execution_fact(arch, arch_evidence, reference):
         if (arch, kernel_arch) == ("armv7", "aarch64"):
             return unknown("32-bit Arm runs natively only on aarch64 cores with AArch32, which this probe does not read; many recent cores have none")
         native = arch == kernel_arch or (arch, kernel_arch) in COMPATIBLE
-        return inferred("native" if native else "emulated", arch_evidence, "file:/proc/sys/kernel/arch")
+        return inferred("native" if native else "emulated", *arch_evidence, "file:/proc/sys/kernel/arch")
     family = arch_family(arch)
     if family is not None and cpu_family is not None and family != cpu_family:
-        return inferred("emulated", arch_evidence, "file:/proc/cpuinfo#format")
+        return inferred("emulated", *arch_evidence, "file:/proc/cpuinfo#format")
     return unknown("/proc/sys/kernel/arch is not available, and /proc/cpuinfo alone cannot rule out user-mode emulation")
 
 
@@ -329,10 +338,16 @@ class Probe:
         return None, None
 
     def wsl(self):
+        """wsl2, wsl1, or microsoft for another Microsoft kernel; None for any other kernel."""
         text, _ = self.read("/proc/sys/kernel/osrelease", 256)
         if text is None or "microsoft" not in text.lower():
             return None
-        return "wsl2" if "wsl2" in text.lower() else "wsl1"
+        text = text.strip()
+        # WSL 2 kernels end in -microsoft-standard or -microsoft-standard-WSL2; WSL 1 reports the
+        # Windows build, such as 4.4.0-19041-Microsoft.
+        if "wsl2" in text.lower() or "microsoft-standard" in text.lower():
+            return "wsl2"
+        return "wsl1" if text.endswith("-Microsoft") else "microsoft"
 
     def container_signals(self):
         """Return (technology or None, evidence list, /run/.containerenv values)."""
@@ -348,6 +363,13 @@ class Probe:
                 key, _, value = line.partition("=")
                 if key in ("engine", "rootless"):
                     containerenv[key] = value.strip().strip('"')
+        # Apptainer (formerly Singularity) shares the host's PID namespace by default.
+        for source, present in (("file:/.singularity.d", self.exists("/.singularity.d")),
+                                ("env:APPTAINER_CONTAINER", self.env("APPTAINER_CONTAINER") is not None),
+                                ("env:SINGULARITY_CONTAINER", self.env("SINGULARITY_CONTAINER") is not None)):
+            if present:
+                evidence.append(source)
+                technology = technology or "apptainer"
         for source, value in (("env:container", self.env("container")), ("file:/run/systemd/container", (self.read("/run/systemd/container", 256)[0] or "").strip())):
             if value:
                 evidence.append(source)
@@ -411,21 +433,21 @@ class Probe:
                 "service_manager": {"name": unknown(reason), "scope": unknown(reason)},
             }]
 
-        cpu_family, hypervisor = self.cpuinfo()
+        _, hypervisor = self.cpuinfo()
         kernel_arch = self.kernel_arch()
-        machine = normalize_arch(platform.machine())
         release = platform.release()
         kernel_fact = observed(release, "python:platform.release") if PRINTABLE.fullmatch(release or "") else unknown("the kernel release is empty or has unexpected characters")
-        machine_evidence = "python:platform.machine"
-        user_execution = execution_fact(machine, machine_evidence, (kernel_arch, cpu_family))
 
         container_technology, container_evidence, containerenv = self.container_signals()
         in_container = bool(container_evidence)
         wsl = self.wsl()
         dmi_technology, dmi_evidence = self.dmi_technology()
         if dmi_technology == "amazon" and not hypervisor:
-            # EC2 metal instances name Amazon EC2 in DMI but run no hypervisor (as systemd-detect-virt reads them).
-            dmi_technology, dmi_evidence = None, None
+            # EC2 metal instances name Amazon EC2 in DMI but run no hypervisor; their product name is
+            # <type>.metal or <type>.metal-<size>. Arm /proc/cpuinfo has no hypervisor flag to tell.
+            product, _ = self.read("/sys/class/dmi/id/product_name", 256)
+            if product is not None and re.search(r"\.metal(-[0-9a-z]+)?$", product.strip()):
+                dmi_technology, dmi_evidence = None, None
         try:
             initial_pid_namespace = self.namespace_inode("pid") == PID_NS_INIT_INO
         except OSError:
@@ -434,10 +456,14 @@ class Probe:
         # The layer that runs the kernel.
         kernel_layer = {"os": {"family": observed("linux", "python:platform.system"), "kernel": kernel_fact}}
         if wsl == "wsl1":
-            reason = "WSL 1 or an unrecognized Microsoft kernel"
+            reason = "WSL 1 runs Linux programs on Windows without a VM"
             kernel_layer["kind"] = unknown(reason)
             kernel_layer["technology"] = unknown(reason)
             kernel_layer["os"]["kernel"] = unknown("WSL 1 runs no Linux kernel; Windows reports this release string")
+        elif wsl == "microsoft":
+            reason = "a Microsoft kernel that is not a known WSL release"
+            kernel_layer["kind"] = unknown(reason)
+            kernel_layer["technology"] = unknown(reason)
         elif wsl == "wsl2":
             kernel_layer["kind"] = inferred("wsl2", "file:/proc/sys/kernel/osrelease")
             kernel_layer["technology"] = inferred("wsl2", "file:/proc/sys/kernel/osrelease")
@@ -455,7 +481,7 @@ class Probe:
             kernel_layer["os"]["name"] = unknown(f"the distribution of the system that runs the container is {hidden}")
             kernel_layer["os"]["version"] = unknown(f"the version of the system that runs the container is {hidden}")
             kernel_layer["service_manager"] = {"name": unknown(f"the service manager outside the container is {hidden}"), "scope": unknown(hidden)}
-        elif initial_pid_namespace is not True:
+        elif initial_pid_namespace is not True and wsl != "wsl2":
             # A container that leaves none of the signals above still has its own PID namespace,
             # and its os-release and PID 1 are not the kernel layer's.
             why = "this process is not in the initial PID namespace, or that cannot be read, so os-release and PID 1 may belong to a container or sandbox"
@@ -463,8 +489,13 @@ class Probe:
             kernel_layer["os"]["version"] = unknown(why)
             kernel_layer["service_manager"] = {"name": unknown(why), "scope": unknown(why)}
         else:
-            kernel_layer["os"].update(self.distribution())
-            kernel_layer["service_manager"] = self.service_manager()
+            # Taken to be the kernel layer's because no container signal was found and the PID
+            # namespace is the initial one, or under WSL 2 the distribution's own, which WSL 2 gives
+            # every distribution. A chroot, or a container that shares that namespace and leaves no
+            # signal, would be read here too, so these facts are inferred, not observed.
+            pid_evidence = "file:/proc/self/ns/pid#inode" if initial_pid_namespace else "file:/proc/sys/kernel/osrelease"
+            kernel_layer["os"].update({key: as_inferred(fact, pid_evidence) for key, fact in self.distribution().items()})
+            kernel_layer["service_manager"] = {key: as_inferred(fact, pid_evidence) for key, fact in self.service_manager().items()}
         if kernel_arch is not None:
             layer_arch = observed(kernel_arch, "file:/proc/sys/kernel/arch")
         else:
@@ -493,10 +524,10 @@ class Probe:
             container = {"kind": inferred("container", *container_evidence)}
             container["technology"] = inferred(container_technology, *container_evidence) if container_technology else unknown("the container signals do not name the engine", *container_evidence)
             container["os"] = dict(self.distribution(), family=observed("linux", "python:platform.system"), kernel=not_applicable("a container shares the kernel of the layer below"))
-            container["cpu"] = {
-                "arch": observed(machine, machine_evidence) if machine else unknown("platform.machine() is empty"),
-                "execution": user_execution,
-            }
+            # The container runs on the kernel layer's CPU, and its programs need not all be built for
+            # one architecture, so each runtime records its own architecture and whether it is emulated.
+            per_runtime = "a container's programs can be built for different architectures; each runtime records its own"
+            container["cpu"] = {"arch": unknown(per_runtime), "execution": unknown(per_runtime)}
             container["service_manager"] = self.service_manager()
             rootless = containerenv.get("rootless")
             if rootless in ("0", "1"):
@@ -727,7 +758,12 @@ class Probe:
             gil = inferred(True, *free_threaded["evidence"])
         else:
             gil = unknown("sys._is_gil_enabled is missing")
-        libc, libc_version = platform.libc_ver()
+        try:
+            # Only glibc reports its version here. platform.libc_ver() would fall back to scanning
+            # the interpreter's executable, which gives the version it was linked against.
+            libc = os.confstr("CS_GNU_LIBC_VERSION")
+        except (AttributeError, ValueError, OSError):
+            libc = None
         return {
             "implementation": observed(sys.implementation.name, "python:sys.implementation.name"),
             "version": observed(version, "python:platform.python_version"),
@@ -738,7 +774,7 @@ class Probe:
             "pointer_bits": observed(struct.calcsize("P") * 8, "python:struct.calcsize"),
             "free_threaded_build": free_threaded,
             "gil_enabled": gil,
-            "libc": observed(f"{libc} {libc_version}", "python:platform.libc_ver") if libc and libc_version else unknown("platform.libc_ver() found no C library version"),
+            "libc": observed(libc, "python:os.confstr") if isinstance(libc, str) and re.fullmatch(r"glibc [0-9]{1,4}\.[0-9]{1,4}(\.[0-9]{1,4})?", libc) else unknown("the C library reports no version through os.confstr; only glibc does"),
             "execution": execution_fact(arch, arch_evidence, reference) if self.system == "Linux" else unknown("compared on Linux only"),
         }
 
@@ -769,17 +805,19 @@ class Probe:
 
         arch = normalize_arch(values.get("a"))
         arch_evidence = [evidence]
+        arch_fact = observed(arch, evidence) if arch else unknown("node reported no usable architecture")
         if arch == "ppc64" and sys.byteorder == "little":
-            # Node reports ppc64 for both byte orders.
+            # Node reports ppc64 for both byte orders, so the little-endian name is derived.
             arch, arch_evidence = "ppc64le", [evidence, "python:sys.byteorder"]
+            arch_fact = inferred(arch, *arch_evidence)
         platform_name = values.get("p")
         return {
             "version": checked("v", r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}"),
             "modules_abi": checked("m", r"[0-9]{1,5}"),
             "napi_version": checked("n", r"[0-9]{1,5}"),
             "platform": observed(platform_name, evidence) if isinstance(platform_name, str) and SLUG.fullmatch(platform_name) else unknown("node reported no usable platform"),
-            "arch": observed(arch, *arch_evidence) if arch else unknown("node reported no usable architecture"),
-            "execution": execution_fact(arch, evidence, reference) if self.system == "Linux" else unknown("compared on Linux only"),
+            "arch": arch_fact,
+            "execution": execution_fact(arch, arch_evidence, reference) if self.system == "Linux" else unknown("compared on Linux only"),
         }
 
     def run(self):

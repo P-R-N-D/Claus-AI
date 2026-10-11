@@ -97,7 +97,7 @@ KNOWN_OS_FAMILIES = frozenset({"linux", "windows", "macos", "freebsd"})
 KNOWN_TECHNOLOGIES = frozenset({
     "kvm", "qemu", "hyper-v", "vmware", "virtualbox", "xen", "parallels", "apple-virtualization",
     "firecracker", "amazon", "google", "wsl2",
-    "docker", "podman", "containerd", "cri-o", "lxc", "systemd-nspawn",
+    "docker", "podman", "containerd", "cri-o", "lxc", "systemd-nspawn", "apptainer",
 })
 KNOWN_BACKEND_APIS = frozenset({
     "cpu", "cuda", "rocm", "oneapi", "level-zero", "opencl", "vulkan-compute", "directcompute",
@@ -764,7 +764,9 @@ def policy_violations(result):
     layers = layers_of(result)
     family = known(layers[-1]["os"]["family"])
     containers = [index for index, layer in enumerate(layers) if known(layer["kind"]) == "container"]
-    if not containers and family in (None, "linux") and known(result["workload"]["isolation"]["pid_namespace"]["initial"]) is not True:
+    # WSL 2 runs each distribution in its own PID namespace inside its VM, so there the namespace tells nothing.
+    in_wsl2 = known(layers[-1]["kind"]) == "wsl2"
+    if not containers and not in_wsl2 and family in (None, "linux") and known(result["workload"]["isolation"]["pid_namespace"]["initial"]) is not True:
         # Without a container layer and outside the initial PID namespace, an undetected container cannot be ruled out.
         path, message = "/workload/isolation/pid_namespace/initial", "no layer is a container, but the workload is not shown to run outside one"
         yield "engine-rootless", "layers", None, path, message, None

@@ -511,6 +511,31 @@ class ProvenanceTests(Case):
             self.assertFalse([label for label, shape in validator.SECRET_SHAPES if shape.search(text)])
         self.assertLess(time.perf_counter() - started, 2)
 
+    def test_a_long_key_or_deep_nesting_does_not_lengthen_every_path(self):
+        # Every path below a key repeats it, so a long key or deep nesting over many values would make as many
+        # long paths, and the walk built a container's child paths all at once, before it visited any of them.
+        result = fixture("linux-x64-vm.result")
+        long = check(changed(result, lambda d: d["extensions"].update({"x-a": {"k" * 100000: ["\u0001"] * 1000}})))
+        paths = [path for _, code, path, _ in long.items if code == "control-character"]
+        self.assertEqual(sorted(paths), sorted(f"/extensions/x-a/(100000 characters)/{index}" for index in range(1000)))
+        keys = [f"a{index}" for index in range(40)]
+        nested = "\u0001"
+        for key in reversed(keys):
+            nested = {key: nested}
+        deep = check(changed(result, lambda d: d["extensions"].update({"x-a": nested})))
+        self.assertFinding(deep, "control-character", "/" + "/".join(["extensions", "x-a", *keys[:6], "...", *keys[-7:]]))
+        self.assertEqual((validator.pointer("", "k" * 128), validator.pointer("", "k" * 129)), ("/" + "k" * 128, "/(129 characters)"))
+        sixteen = "/" + "/".join(str(index) for index in range(15))
+        self.assertEqual((validator.pointer(sixteen, 15), validator.pointer(validator.pointer(sixteen, 15), 16)),
+                         (sixteen + "/15", "/0/1/2/3/4/5/6/7/.../10/11/12/13/14/15/16"))
+        # A value's path is built when the value is reached.
+        built = []
+        original = validator.pointer
+        with mock.patch.object(validator, "pointer", side_effect=lambda *args: built.append(args) or original(*args)):
+            values = validator.walk({"a": list(range(1000))})
+            self.assertEqual([path for path, _ in (next(values) for _ in range(3))], ["", "/a", "/a/999"])
+        self.assertEqual(len(built), 2)
+
 
 class EnvironmentRuleTests(Case):
     def test_layer_structure(self):
@@ -1432,6 +1457,13 @@ class ProfileTests(Case):
                 self.assertValid(check(profile))
                 workflow.write_text("on: push\njobs:\n  backend:\n    runs-on: x\nenv:\n  compatibility: x\n", encoding="utf-8")
                 self.assertCodes(check(profile), "evidence-source")
+                # A workflow that is not UTF-8, or a name longer than the system allows, is a finding, not a
+                # traceback that would print the path as written.
+                workflow.write_bytes(b"on: push\njobs:\n  compatibility:\n    runs-on: \xff\n")
+                self.assertFinding(check(profile), "evidence-source", "/evidence_sources/0/workflow")
+                long = changed(profile, lambda d: d.update(evidence_sources=[{"workflow": ".github/workflows/##[error]" + "a" * 300 + ".yml", "job": "compatibility"}]))
+                self.assertFinding(check(long), "evidence-source", "/evidence_sources/0/workflow")
+                self.assertIn("cannot read workflow file", check(long).items[0][3])
 
     def test_a_result_is_checked_against_what_its_profile_declares(self):
         result, profile = pair("windows-arm64-wsl2-podman")
@@ -1614,6 +1646,11 @@ class ProfileTests(Case):
             path.write_text("# T\n\n## Other\n", encoding="utf-8")
             with self.assertRaises(ValueError):
                 validator.read_strategy_lanes(path)
+            # A lane listed twice would leave only its last status; the table is then ambiguous.
+            path.write_text("# T\n\n## Platform and accelerator lanes\n\n| Lane | Wheels | Backend lock | Notes |\n|---|---|---|---|\n"
+                            "| A | x | Checked: CI | n |\n| A | x | Not supported | n |\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "lists 'A' twice"):
+                validator.read_strategy_lanes(path)
 
 
 class CommandTests(Case):
@@ -1670,6 +1707,29 @@ class CommandTests(Case):
                     self.assertEqual(code, 2)
                     self.assertIn("is the schema, the profile, the lane table or a document of this run", output)
                     self.assertEqual({path: path.read_bytes() for path in copies.values()}, before)
+
+    def test_a_summary_that_is_an_evidence_workflow_is_a_usage_error(self):
+        # A real profile's evidence sources are read from its workflow files, so a summary appended there would change one.
+        result, profile = real_result()
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            workflow = directory / ".github" / "workflows" / "ci.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_bytes((validator.ROOT / ".github" / "workflows" / "ci.yml").read_bytes())
+            (directory / "linked.yml").hardlink_to(workflow)
+            paths = {name: directory / f"{name}.json" for name in ("result", "profile")}
+            paths["result"].write_text(json.dumps(result), encoding="utf-8")
+            paths["profile"].write_text(json.dumps(profile), encoding="utf-8")
+            before = workflow.read_bytes()
+            with mock.patch.object(validator, "ROOT", directory):
+                self.assertEqual(self.run_main("--profile", paths["profile"], paths["result"], "--summary", directory / "summary.md")[0], 0)
+                for label, argv in (("profile", ("--profile", paths["profile"], paths["result"])), ("document", (paths["profile"],))):
+                    for summary in (workflow, directory / "linked.yml"):
+                        with self.subTest(label, summary=summary.name):
+                            code, output = self.run_main(*argv, "--summary", summary)
+                            self.assertEqual(code, 2)
+                            self.assertIn("is a workflow file a profile of this run names as its evidence source", output)
+                            self.assertEqual(workflow.read_bytes(), before)
 
     def test_argparse_errors_cannot_forge_output_lines(self):
         # argparse repeats an argument it rejects, and the program name, in its usage line too; both are written as every other line is.

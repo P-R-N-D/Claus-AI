@@ -936,6 +936,19 @@ class RunEvidenceTests(Case):
             self.assertEqual(ci["ci"]["run_url"]["provenance"], "unknown")
             self.assertEqual(ci["revision"]["event_sha"]["provenance"], "unknown")
 
+    def test_the_run_attempt_is_read_up_to_the_largest_integer_the_schema_allows(self):
+        # GitHub sets no upper bound; the schema's integers end at 4294967295, so a larger attempt is not a fact.
+        with tempfile.TemporaryDirectory() as directory:
+            for attempt, expected in (("10000", 10000), ("4294967295", 4294967295), ("4294967296", None), ("12345678901", None)):
+                env = dict(self.run_env(directory, "push", {"after": "d" * 40}), GITHUB_RUN_ATTEMPT=attempt)
+                with self.subTest(attempt=attempt), FakeMachine(env=env) as machine:
+                    result = machine.result()
+                self.assertEqual(value(result["run"]["ci"]["run_attempt"]), expected)
+                self.assertEqual(result["run"]["ci"]["run_attempt"]["provenance"], "unknown" if expected is None else "observed")
+                codes = validator.validate_document(result, SCHEMA).codes()
+                self.assertNotIn("schema", codes)
+                self.assertEqual("ci-evidence" in codes, expected is None)
+
     def test_outside_github_actions(self):
         with FakeMachine(env={"PATH": "", "GITHUB_SHA": "a" * 40}) as machine:
             run = machine.result()["run"]
@@ -1201,7 +1214,7 @@ class NodeTests(Case):
         with FakeMachine(env={"PATH": "/x", "SystemRoot": "C:\\Windows"}) as machine:
             for name in ("posix", "nt"):
                 probe = machine.probe(probe_node=True)
-                with self.subTest(os=name), mock.patch.object(collector.shutil, "which", return_value="/x/node"), \
+                with self.subTest(os=name), mock.patch.object(collector, "find_on_path", return_value="/x/node"), \
                         mock.patch.object(collector.subprocess, "Popen", popen), mock.patch.object(collector.os, "name", name):
                     self.assertEqual(probe.node(("x86_64", "x86"))["version"]["reason"], "node could not be run (OSError)")
         self.assertEqual(environments, [{}, {"SystemRoot": "C:\\Windows"}])
@@ -1224,50 +1237,43 @@ class NodeTests(Case):
                 self.assertEqual(machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"], "node is not on PATH")
         self.assertEqual(searched, [os.defpath, "", "/x"])
 
-    def test_node_is_not_looked_for_in_the_current_directory_on_windows(self):
-        # shutil.which on Windows looks in the current directory before PATH, so a node in the checkout would run.
-        def windows_which(cmd, mode=os.F_OK | os.X_OK, path=None):
-            directory, name = os.path.split(cmd)
-            for place in [directory] if directory else [os.curdir, *(path or "").split(os.pathsep)]:
-                candidate = os.path.join(place, name)
-                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                    return candidate
-            return None
-
+    def test_node_is_looked_for_on_windows_only_as_node_exe_in_the_path_directories(self):
+        # shutil.which on Windows looks in the current directory before PATH, so a node in the checkout would run,
+        # and tries each extension PATHEXT lists, so a node.bat or node.com earlier on PATH would run in place of node.
         started = []
 
         def popen(args, **kwargs):
             started.append(args[0])
             raise OSError("not started")
 
+        def which(*args, **kwargs):
+            raise AssertionError("shutil.which is not used on Windows")
+
         with tempfile.TemporaryDirectory() as directory:
-            checkout, installed, empty = (pathlib.Path(directory, name) for name in ("checkout", "bin", "empty"))
-            for place in (checkout, installed, empty):
+            checkout, scripts, installed, empty = (pathlib.Path(directory, name) for name in ("checkout", "scripts", "bin", "empty"))
+            for place in (checkout, scripts, installed, empty):
                 place.mkdir()
-            for place in (checkout, installed):
-                (place / "node").write_text("", encoding="utf-8")
-                (place / "node").chmod(0o755)
+            for path in (checkout / "node.exe", installed / "node.exe", *(scripts / name for name in ("node", "node.bat", "node.cmd", "node.com"))):
+                path.write_text("", encoding="utf-8")
             # With no PATH the default directories are searched, but not the current directory that Windows lists first;
-            # a PATH that names the current directory has it searched.
+            # a PATH that names the current directory has it searched. An empty entry names no directory.
             default = os.curdir + os.pathsep + str(installed)
-            cases = ((str(installed), str(installed / "node")), (os.pathsep + str(installed), str(installed / "node")), (str(empty), None),
-                     (None, str(installed / "node")), (default, os.path.join(os.curdir, "node")))
-            for search_path, expected in cases:
-                with self.subTest(path=search_path), FakeMachine(env={} if search_path is None else {"PATH": search_path}) as machine, \
-                        contextlib.chdir(checkout), mock.patch.object(collector.shutil, "which", windows_which), \
-                        mock.patch.object(collector.subprocess, "Popen", popen), mock.patch.object(collector.os, "name", "nt"), \
-                        mock.patch.object(collector.os, "defpath", default):
-                    started.clear()
-                    reason = machine.probe(probe_node=True).node(("x86_64", "x86"))["version"]["reason"]
-                    self.assertEqual((started, reason), ([expected], "node could not be run (OSError)") if expected else ([], "node is not on PATH"))
-            # Before CPython 3.12 the lookup could not find node.exe there, so node is not looked for, and the reason says why.
-            with FakeMachine(env={"PATH": str(installed)}) as machine, contextlib.chdir(checkout), \
-                    mock.patch.object(collector.subprocess, "Popen", popen), mock.patch.object(collector.os, "name", "nt"):
-                started.clear()
-                probe = machine.probe(probe_node=True)
-                with mock.patch.object(collector.sys, "version_info", (3, 11, 9)):
-                    reason = probe.node(("x86_64", "x86"))["version"]["reason"]
-                self.assertEqual((started, reason), ([], "on Windows node is looked for only with CPython 3.12 or later"))
+            path = str(scripts) + os.pathsep + str(installed)
+            cases = ((path, str(installed / "node.exe")), (os.pathsep + path, str(installed / "node.exe")), (str(empty), None), ("", None),
+                     (None, str(installed / "node.exe")), (default, os.path.join(os.curdir, "node.exe")))
+            # The lookup does not depend on the CPython version, as shutil.which does. The probe is made before
+            # os.name is changed, as pathlib reads it.
+            for version in ((3, 11, 9), (3, 12, 0)):
+                for search_path, expected in cases:
+                    env = {"PATHEXT": ".COM;.BAT;.CMD;.EXE"} if search_path is None else {"PATH": search_path, "PATHEXT": ".COM;.BAT;.CMD;.EXE"}
+                    with self.subTest(path=search_path, version=version), FakeMachine(env=env) as machine, contextlib.chdir(checkout):
+                        probe = machine.probe(probe_node=True)
+                        started.clear()
+                        with mock.patch.object(collector.shutil, "which", which), mock.patch.object(collector.subprocess, "Popen", popen), \
+                                mock.patch.object(collector.os, "name", "nt"), mock.patch.object(collector.os, "defpath", default), \
+                                mock.patch.object(collector.sys, "version_info", version):
+                            reason = probe.node(("x86_64", "x86"))["version"]["reason"]
+                        self.assertEqual((started, reason), ([expected], "node could not be run (OSError)") if expected else ([], "node is not on PATH"))
 
 
 class CommandTests(Case):

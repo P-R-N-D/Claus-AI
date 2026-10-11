@@ -339,8 +339,23 @@ def json_equal(a, b):
     return a == b
 
 
+# A finding's path names at most PATH_KEYS keys, each of at most KEY_LIMIT characters.
+KEY_LIMIT = 128
+PATH_KEYS = 16
+
+
 def pointer(path, key):
-    return f"{path}/{str(key).replace('~', '~0').replace('/', '~1')}"
+    """The JSON Pointer of `key` under `path`, as a finding names a place.
+
+    A key longer than KEY_LIMIT characters is named by its length, and a path of more than PATH_KEYS keys keeps
+    the first and last of them around "...", so neither a long key nor deep nesting makes the path of every value
+    below it long. Such a path names the place for a reader; it is not resolved."""
+    text = str(key)
+    name = f"({len(text)} characters)" if len(text) > KEY_LIMIT else text.replace("~", "~0").replace("/", "~1")
+    keys = f"{path}/{name}".split("/")[1:]
+    if len(keys) > PATH_KEYS:
+        keys = keys[:PATH_KEYS // 2] + ["..."] + keys[1 - PATH_KEYS // 2:]
+    return "/" + "/".join(keys)
 
 
 def calendar_date(text):
@@ -428,15 +443,18 @@ def validate_schema(instance, schema, root, path, findings):
 
 
 def walk(document, extensions=True):
-    """Yield (path, value) for every value in the document, without recursion; optionally skip extension contents."""
-    stack = [("", document)]
+    """Yield (path, value) for every value in the document, without recursion; optionally skip extension contents.
+
+    A value's path is built when the value is reached, so a container's children share its path until then."""
+    stack = [("", None, document)]
     while stack:
-        path, value = stack.pop()
+        parent, key, value = stack.pop()
+        path = parent if key is None else pointer(parent, key)
         yield path, value
         if isinstance(value, dict):
-            stack.extend((pointer(path, key), item) for key, item in value.items() if extensions or key != "extensions")
+            stack.extend((path, key, item) for key, item in value.items() if extensions or key != "extensions")
         elif isinstance(value, list):
-            stack.extend((pointer(path, index), item) for index, item in enumerate(value))
+            stack.extend((path, index, item) for index, item in enumerate(value))
 
 
 def is_fact(value):
@@ -1151,10 +1169,19 @@ def check_evidence_sources(profile, findings):
     for index, source in enumerate(profile["evidence_sources"]):
         workflow = ROOT / source["workflow"]
         base = f"/evidence_sources/{index}"
-        if not source["workflow"].startswith(".github/workflows/") or ".." in source["workflow"] or not workflow.is_file():
+        text = None
+        if source["workflow"].startswith(".github/workflows/") and ".." not in source["workflow"]:
+            # A path the system refuses, such as a name over its length limit, or a file that is not UTF-8, is a
+            # finding, so the path is printed as every finding is, not in a traceback.
+            try:
+                text = workflow.read_text(encoding="utf-8") if workflow.is_file() else None
+            except (OSError, UnicodeError) as exc:
+                findings.error("evidence-source", f"{base}/workflow", f"cannot read workflow file {source['workflow']!r} ({type(exc).__name__})")
+                continue
+        if text is None:
             findings.error("evidence-source", f"{base}/workflow", f"no workflow file {source['workflow']!r}")
             continue
-        jobs = re.search(r"^jobs:[ \t]*\n(.*?)(?=^[^\s#]|\Z)", workflow.read_text(encoding="utf-8"), re.MULTILINE | re.DOTALL)
+        jobs = re.search(r"^jobs:[ \t]*\n(.*?)(?=^[^\s#]|\Z)", text, re.MULTILINE | re.DOTALL)
         if not jobs or not re.search(rf"^  {re.escape(source['job'])}:[ \t]*$", jobs.group(1), re.MULTILINE):
             findings.error("evidence-source", f"{base}/job", f"{source['workflow']!r} has no job {source['job']!r}")
 
@@ -1269,6 +1296,8 @@ def read_strategy_lanes(path):
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if not line.startswith("| ") or len(cells) < 3 or cells[0] in ("Lane",) or set(cells[0]) <= set("-: "):
             continue
+        if cells[0] in raw:
+            raise ValueError(f"the lane table lists {cells[0]!r} twice")
         raw[cells[0]] = cells[2]
     if not raw:
         raise ValueError("no lanes in the lane table")
@@ -1366,6 +1395,14 @@ def same_file(path, other):
         return False
 
 
+def evidence_workflows(document):
+    """The workflow files a real profile's evidence sources name, which check_evidence_sources reads."""
+    if not isinstance(document, dict) or document.get("kind") != "profile" or document.get("synthetic") is not False:
+        return []
+    sources = document.get("evidence_sources")
+    return [ROOT / source["workflow"] for source in sources if isinstance(source, dict) and isinstance(source.get("workflow"), str)] if isinstance(sources, list) else []
+
+
 def main(argv=None):
     parser = ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("documents", nargs="+", type=pathlib.Path, help="profile or result JSON files")
@@ -1420,6 +1457,7 @@ def main(argv=None):
                 print(plain(f"  {level.upper()} {code} {path}: {message}"), file=sys.stderr)
             return 2
 
+    workflows = evidence_workflows(profile)
     invalid = 0
     lines = ["### Compatibility record validation", "", "| Document | Kind | Result | Errors | Warnings |", "|---|---|---|---|---|"]
     details = []
@@ -1437,6 +1475,7 @@ def main(argv=None):
             findings = validate(document, profile, strategy_lanes, not args.no_policy, args.require_real)
             if findings is None:
                 return 2
+            workflows += evidence_workflows(document)
         errors = findings.errors
         warnings = [item for item in findings.items if item[0] == "warning"]
         verdict = "invalid" if errors else "valid"
@@ -1449,6 +1488,10 @@ def main(argv=None):
         lines.append(f"| {markdown_cell(path.name)} | {markdown_cell(kind)} | {verdict} | {len(errors)} | {len(warnings)} |")
 
     if args.summary:
+        # Nor may it be a workflow file a real profile's evidence sources were read from.
+        if any(same_file(args.summary, workflow) for workflow in workflows):
+            print(plain(f"error: the summary {args.summary} is a workflow file a profile of this run names as its evidence source"), file=sys.stderr)
+            return 2
         shown = details[:200]
         if len(details) > len(shown):
             shown.append(f"- {len(details) - len(shown)} more findings are in the job log")

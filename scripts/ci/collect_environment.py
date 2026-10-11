@@ -13,9 +13,8 @@ The collector reads the following, and nothing else:
 - The first 4 KiB that `node -p` writes, run with an empty environment (on
   Windows, SystemRoot only) and stopped after 30 seconds. node is looked for in
   the PATH directories only, so on Windows not in the current directory unless
-  PATH names it, also when PATH is unset; there this needs CPython 3.12 or
-  later, and with an older one node is not looked for and the node facts are
-  unknown, with that reason.
+  PATH names it, also when PATH is unset, and there only as node.exe, whatever
+  PATHEXT lists.
 
 Files are read only when they are regular files, and are opened so that a FIFO
 cannot block the probe.
@@ -251,16 +250,16 @@ class NotRegularFile(OSError):
 def find_on_path(name, search_path):
     """The program `name` in the directories of `search_path`, or None.
 
-    On Windows shutil.which also looks in the current directory first, which the path does not name, so
-    there each directory is looked in by itself; an empty entry names no directory. That needs CPython 3.12 or
-    later on Windows: an older shutil.which adds no PATHEXT extension to a name with a directory, so it finds
-    no node.exe, and node() does not call it there."""
+    On Windows shutil.which also looks in the current directory first, which the path does not name, and tries
+    each extension PATHEXT lists, which the environment sets, so a node.com or node.bat could run in place of
+    node. There each directory is looked in by itself for `name` with the .exe extension only, and an empty
+    entry names no directory."""
     if os.name != "nt":
         return shutil.which(name, path=search_path)
     for directory in search_path.split(os.pathsep):
-        found = shutil.which(os.path.join(directory, name)) if directory else None
-        if found:
-            return found
+        candidate = os.path.join(directory, name + ".exe")
+        if directory and os.path.isfile(candidate):
+            return candidate
     return None
 
 
@@ -902,12 +901,8 @@ class Probe:
 
         if not self.probe_node:
             return all_unknown("not probed (--no-node)")
-        # Before CPython 3.12 shutil.which on Windows adds no PATHEXT extension to a name with a directory, so
-        # find_on_path could not find node.exe; the reason says so rather than that node is missing.
-        if os.name == "nt" and sys.version_info < (3, 12):
-            return all_unknown("on Windows node is looked for only with CPython 3.12 or later")
         # An unset PATH searches the default directories, but not the current directory that Windows lists first
-        # in them; an empty one, as shutil.which reads it, finds nothing.
+        # in them; an empty one finds nothing.
         search_path = self.env("PATH")
         if search_path is None:
             search_path = os.pathsep.join(entry for entry in os.defpath.split(os.pathsep) if os.name != "nt" or entry != os.curdir)
@@ -1014,7 +1009,7 @@ class Probe:
             "repository": gha("GITHUB_REPOSITORY", r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}"),
             "ref": gha("GITHUB_REF", r"refs/[A-Za-z0-9._/+-]{1,190}"),
             "run_id": gha("GITHUB_RUN_ID", r"[0-9]{1,20}"),
-            "run_attempt": gha("GITHUB_RUN_ATTEMPT", r"[0-9]{1,4}"),
+            "run_attempt": gha("GITHUB_RUN_ATTEMPT", r"[0-9]{1,10}"),
             "run_url": not_applicable(na),
             "workflow_ref": gha("GITHUB_WORKFLOW_REF", r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]{1,150}@refs/[A-Za-z0-9._/+-]{1,150}"),
             "job": gha("GITHUB_JOB", r"[A-Za-z0-9_-]{1,100}"),
@@ -1026,6 +1021,9 @@ class Probe:
         }
         if ci["run_attempt"]["value"] is not None:
             ci["run_attempt"]["value"] = int(ci["run_attempt"]["value"])
+            # Up to the schema's largest integer, as the validator reads the attempt of a run URL.
+            if ci["run_attempt"]["value"] > 4294967295:
+                ci["run_attempt"] = unknown("GITHUB_RUN_ATTEMPT does not have the expected form", "env:GITHUB_RUN_ATTEMPT")
         if system:
             # The documented form; the attempt is in run_attempt.
             server = self.env_value("GITHUB_SERVER_URL", r"https://[A-Za-z0-9.-]{1,100}")

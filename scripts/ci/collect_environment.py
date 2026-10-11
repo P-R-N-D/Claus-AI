@@ -13,7 +13,8 @@ The collector reads the following, and nothing else:
 - The first 4 KiB that `node -p` writes, run with an empty environment (on
   Windows, SystemRoot only) and stopped after 30 seconds. node is looked for in
   the PATH directories only, so on Windows not in the current directory, also
-  when PATH is unset; there this needs CPython 3.12 or later.
+  when PATH is unset; there this needs CPython 3.12 or later, and an older one
+  finds no node, so the node facts are unknown.
 
 Files are read only when they are regular files, and are opened so that a FIFO
 cannot block the probe.

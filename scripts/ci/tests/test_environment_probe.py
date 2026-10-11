@@ -1246,9 +1246,11 @@ class NodeTests(Case):
             for place in (checkout, installed):
                 (place / "node").write_text("", encoding="utf-8")
                 (place / "node").chmod(0o755)
-            # With no PATH the default directories are searched, but not the current directory that Windows lists first.
+            # With no PATH the default directories are searched, but not the current directory that Windows lists first;
+            # a PATH that names the current directory has it searched.
             default = os.curdir + os.pathsep + str(installed)
-            cases = ((str(installed), str(installed / "node")), (os.pathsep + str(installed), str(installed / "node")), (str(empty), None), (None, str(installed / "node")))
+            cases = ((str(installed), str(installed / "node")), (os.pathsep + str(installed), str(installed / "node")), (str(empty), None),
+                     (None, str(installed / "node")), (default, os.path.join(os.curdir, "node")))
             for search_path, expected in cases:
                 with self.subTest(path=search_path), FakeMachine(env={} if search_path is None else {"PATH": search_path}) as machine, \
                         contextlib.chdir(checkout), mock.patch.object(collector.shutil, "which", windows_which), \

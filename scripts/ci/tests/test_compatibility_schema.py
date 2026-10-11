@@ -472,10 +472,15 @@ class ProvenanceTests(Case):
             ("AWS key", "AKIA" + "ABCDEFGHIJKLMNOP", "secret-like-value"),
             ("private key", "-----BEGIN OPENSSH PRIVATE KEY-----", "secret-like-value"),
             ("JSON Web Token after a letter", "xeyJ" + "A" * 10 + ".eyJ" + "B" * 10 + ".", "secret-like-value"),
+            # The shortest JSON Web Token shape has 8 characters after each "eyJ"; one fewer on either side is not one.
+            ("shortest JSON Web Token", "eyJ" + "A" * 8 + ".eyJ" + "B" * 8 + ".", "secret-like-value"),
+            ("shortest JSON Web Token after a letter", "xeyJ" + "A" * 8 + ".eyJ" + "B" * 8 + ".", "secret-like-value"),
+            ("short first part", "eyJ" + "A" * 7 + ".eyJ" + "B" * 8 + ".", None),
+            ("short second part", "eyJ" + "A" * 8 + ".eyJ" + "B" * 7 + ".", None),
         ):
             with self.subTest(label):
                 document = changed(result, lambda d: d["stages"]["install"].update(reason=text))
-                self.assertCodes(check(document), code)
+                self.assertCodes(check(document), *([code] if code else []))
         document = changed(result, lambda d: d["extensions"].update({"x-data": {"ghp_" + "A" * 36: 1}}))
         self.assertCodes(check(document), "secret-like-value")
         # A long run with many "eyJ" in it is searched in linear time; a quadratic search takes seconds here.

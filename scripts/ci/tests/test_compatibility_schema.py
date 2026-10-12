@@ -9,6 +9,7 @@ third-party package is needed. From the repository root:
 
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -514,20 +515,39 @@ class ProvenanceTests(Case):
     def test_a_long_key_or_deep_nesting_does_not_lengthen_every_path(self):
         # Every path below a key repeats it, so a long key or deep nesting over many values would make as many
         # long paths, and the walk built a container's child paths all at once, before it visited any of them.
+        def named(text):
+            digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+            return f"~({len(text)} characters, sha256 {digest})"
+
         result = fixture("linux-x64-vm.result")
         long = check(changed(result, lambda d: d["extensions"].update({"x-a": {"k" * 100000: ["\u0001"] * 1000}})))
         paths = [path for _, code, path, _ in long.items if code == "control-character"]
-        self.assertEqual(sorted(paths), sorted(f"/extensions/x-a/(100000 characters)/{index}" for index in range(1000)))
+        # Sets, so that a failure lists the paths that differ rather than diffing 1000 similar lines.
+        self.assertEqual(len(paths), 1000)
+        self.assertEqual(set(paths), {f"/extensions/x-a/{named('k' * 100000)}/{index}" for index in range(1000)})
         keys = [f"a{index}" for index in range(40)]
         nested = "\u0001"
         for key in reversed(keys):
             nested = {key: nested}
         deep = check(changed(result, lambda d: d["extensions"].update({"x-a": nested})))
-        self.assertFinding(deep, "control-character", "/" + "/".join(["extensions", "x-a", *keys[:6], "...", *keys[-7:]]))
-        self.assertEqual((validator.pointer("", "k" * 128), validator.pointer("", "k" * 129)), ("/" + "k" * 128, "/(129 characters)"))
+        self.assertFinding(deep, "control-character", "/" + "/".join(["extensions", "x-a", *keys[:6], "~...", *keys[-7:]]))
+        # The limit is on the escaped key, and a replaced key keeps the start of its digest, so keys of one length
+        # stay apart. An escaped key holds "~" only before "0" or "1", so a key that looks like a marker is not one.
+        kept = ("k" * 128, "~" * 64, "/" * 64, "...", "~...", "(5 characters)")
+        self.assertEqual([validator.pointer("", key) for key in kept], ["/" + "k" * 128, "/" + "~0" * 64, "/" + "~1" * 64, "/...", "/~0...", "/(5 characters)"])
+        replaced = ("k" * 129, "~" * 65, "/" * 65, "x" * 200, "y" * 200, "\ud800" * 200)
+        self.assertEqual([validator.pointer("", key) for key in replaced], ["/" + named(key) for key in replaced])
+        self.assertEqual(len({validator.pointer("", key) for key in replaced}), len(replaced))
         sixteen = "/" + "/".join(str(index) for index in range(15))
         self.assertEqual((validator.pointer(sixteen, 15), validator.pointer(validator.pointer(sixteen, 15), 16)),
-                         (sixteen + "/15", "/0/1/2/3/4/5/6/7/.../10/11/12/13/14/15/16"))
+                         (sixteen + "/15", "/0/1/2/3/4/5/6/7/~.../10/11/12/13/14/15/16"))
+        # However long and deep the keys, a path keeps at most PATH_KEYS keys of at most KEY_LIMIT characters.
+        chain = "\u0001"
+        for index in range(40):
+            chain = {"~" * 63 + chr(ord("a") + index % 26): chain, "~" * 200: index}
+        bounded = check(changed(result, lambda d: d["extensions"].update({"x-a": chain})))
+        self.assertTrue(bounded.items)
+        self.assertLessEqual(max(len(path) for _, _, path, _ in bounded.items), validator.PATH_KEYS * (validator.KEY_LIMIT + 1))
         # A value's path is built when the value is reached.
         built = []
         original = validator.pointer
@@ -535,7 +555,6 @@ class ProvenanceTests(Case):
             values = validator.walk({"a": list(range(1000))})
             self.assertEqual([path for path, _ in (next(values) for _ in range(3))], ["", "/a", "/a/999"])
         self.assertEqual(len(built), 2)
-
 
 class EnvironmentRuleTests(Case):
     def test_layer_structure(self):
@@ -1461,6 +1480,7 @@ class ProfileTests(Case):
                 # traceback that would print the path as written.
                 workflow.write_bytes(b"on: push\njobs:\n  compatibility:\n    runs-on: \xff\n")
                 self.assertFinding(check(profile), "evidence-source", "/evidence_sources/0/workflow")
+                self.assertIn("cannot read workflow file '.github/workflows/ci.yml' (UnicodeDecodeError)", check(profile).items[0][3])
                 long = changed(profile, lambda d: d.update(evidence_sources=[{"workflow": ".github/workflows/##[error]" + "a" * 300 + ".yml", "job": "compatibility"}]))
                 self.assertFinding(check(long), "evidence-source", "/evidence_sources/0/workflow")
                 self.assertIn("cannot read workflow file", check(long).items[0][3])
@@ -1711,6 +1731,10 @@ class CommandTests(Case):
     def test_a_summary_that_is_an_evidence_workflow_is_a_usage_error(self):
         # A real profile's evidence sources are read from its workflow files, so a summary appended there would change one.
         result, profile = real_result()
+        # Its files count whenever check_evidence_sources reads them, also under a schema that lets `synthetic` be
+        # something other than a boolean.
+        for synthetic, count in ((False, 1), (0, 1), (None, 1), (True, 0), (1, 0)):
+            self.assertEqual(len(validator.evidence_workflows(dict(profile, synthetic=synthetic))), count)
         with tempfile.TemporaryDirectory() as directory:
             directory = pathlib.Path(directory)
             workflow = directory / ".github" / "workflows" / "ci.yml"
@@ -1726,6 +1750,7 @@ class CommandTests(Case):
                 for label, argv in (("profile", ("--profile", paths["profile"], paths["result"])), ("document", (paths["profile"],))):
                     for summary in (workflow, directory / "linked.yml"):
                         with self.subTest(label, summary=summary.name):
+                            workflow.write_bytes(before)
                             code, output = self.run_main(*argv, "--summary", summary)
                             self.assertEqual(code, 2)
                             self.assertIn("is a workflow file a profile of this run names as its evidence source", output)

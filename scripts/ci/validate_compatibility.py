@@ -26,6 +26,7 @@ document is invalid, 2 on a usage error or a file or schema that cannot be used.
 
 import argparse
 import datetime
+import hashlib
 import json
 import math
 import pathlib
@@ -339,7 +340,7 @@ def json_equal(a, b):
     return a == b
 
 
-# A finding's path names at most PATH_KEYS keys, each of at most KEY_LIMIT characters.
+# A finding's path names at most PATH_KEYS keys, each of at most KEY_LIMIT characters once escaped.
 KEY_LIMIT = 128
 PATH_KEYS = 16
 
@@ -347,14 +348,19 @@ PATH_KEYS = 16
 def pointer(path, key):
     """The JSON Pointer of `key` under `path`, as a finding names a place.
 
-    A key longer than KEY_LIMIT characters is named by its length, and a path of more than PATH_KEYS keys keeps
-    the first and last of them around "...", so neither a long key nor deep nesting makes the path of every value
-    below it long. Such a path names the place for a reader; it is not resolved."""
+    A key longer than KEY_LIMIT characters once escaped is named by its length and the start of its SHA-256, and
+    a path of more than PATH_KEYS keys keeps the first and last of them around "~...", so neither a long key nor
+    deep nesting makes the path of every value below it long. An escaped key holds "~" only before "0" or "1",
+    so neither marker reads as a key, but a shortened path can name more than one place: it names the place for
+    a reader and is not resolved."""
     text = str(key)
-    name = f"({len(text)} characters)" if len(text) > KEY_LIMIT else text.replace("~", "~0").replace("/", "~1")
+    name = text.replace("~", "~0").replace("/", "~1")
+    if len(name) > KEY_LIMIT:
+        digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+        name = f"~({len(text)} characters, sha256 {digest})"
     keys = f"{path}/{name}".split("/")[1:]
     if len(keys) > PATH_KEYS:
-        keys = keys[:PATH_KEYS // 2] + ["..."] + keys[1 - PATH_KEYS // 2:]
+        keys = keys[:PATH_KEYS // 2] + ["~..."] + keys[1 - PATH_KEYS // 2:]
     return "/" + "/".join(keys)
 
 
@@ -1396,8 +1402,11 @@ def same_file(path, other):
 
 
 def evidence_workflows(document):
-    """The workflow files a real profile's evidence sources name, which check_evidence_sources reads."""
-    if not isinstance(document, dict) or document.get("kind") != "profile" or document.get("synthetic") is not False:
+    """The workflow files a real profile's evidence sources name, which check_evidence_sources reads.
+
+    A profile counts as real here whenever check_evidence_sources would read its files, also under a schema that
+    lets `synthetic` be something other than a boolean."""
+    if not isinstance(document, dict) or document.get("kind") != "profile" or document.get("synthetic"):
         return []
     sources = document.get("evidence_sources")
     return [ROOT / source["workflow"] for source in sources if isinstance(source, dict) and isinstance(source.get("workflow"), str)] if isinstance(sources, list) else []

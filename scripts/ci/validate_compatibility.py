@@ -1189,13 +1189,14 @@ def declared_version(profile, name):
     major.minor version gives None.
     """
     layers, python = layers_of(profile), profile["workload"]["runtimes"]["python"]
+    part = r"(?:0|[1-9][0-9]{0,3})"  # no leading zero, as cpython_version and the collector write numbers
     path, fact, pattern, form = {
         "macOS": (f"/environment/layers/{len(layers) - 1}/os/version", layers[-1]["os"]["version"],
-                  r"([0-9]{1,4}(?:\.[0-9]{1,4}){0,2})", "a macOS version, such as 14.7 or 15.5"),
+                  rf"({part}(?:\.{part}){{0,2}})", "a macOS version, such as 14.7 or 15.5"),
         "glibc": ("/workload/runtimes/python/libc", python["libc"],
-                  r"(?ai:glibc) ([0-9]{1,4}(?:\.[0-9]{1,4}){1,2})", "a libc fact with the glibc version, such as glibc 2.39"),
+                  rf"(?ai:glibc) ({part}(?:\.{part}){{1,2}})", "a libc fact with the glibc version, such as glibc 2.39"),
         "CPython": ("/workload/runtimes/python/version", python["version"],
-                    r"([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})", "a CPython release version, such as 3.12.15"),
+                    rf"({part}\.{part}\.{part})", "a CPython release version, such as 3.12.15"),
     }[name]
     written = known(fact)
     match = re.fullmatch(pattern, written) if isinstance(written, str) else None
@@ -1254,18 +1255,21 @@ def check_evidence_sources(profile, findings):
 
 
 # An unindented jobs key, plain or quoted, with nothing after its colon but blanks and a comment that follows a blank.
-# MULTILINE makes ^ and $ match at "\n" only, as the reader below splits lines.
+# MULTILINE makes ^ and $ match at "\n" only, as the reader below splits lines; read_text has already turned "\r\n"
+# and "\r" into "\n".
 JOBS_KEY = re.compile(r"""^(?:jobs|"jobs"|'jobs')[ \t]*:(?:[ \t]+(?:#.*)?)?$""", re.MULTILINE)
 
 
 def workflow_has_job(text, job):
     """Whether a workflow's top-level `jobs` mapping has the key `job`.
 
-    The workflow is read as text, not parsed as YAML, and split into lines at "\n" only, one line at a time. The
-    mapping is the block after an unindented `jobs:` line (or `"jobs":`, `'jobs':` or `jobs :`, with an optional
-    comment after a blank), up to the next line that does not start with a space (blank and comment lines aside),
-    and its keys are the lines at the indentation of its first key, plain or quoted, with a colon followed by a
-    space, a tab or the end of the line. A `jobs` mapping written in flow style names no job."""
+    The workflow is read as text, not parsed as YAML, one line at a time. Lines end at "\n", "\r\n" or "\r" as in YAML
+    (check_evidence_sources reads the file with universal newlines, and this splits at "\n" only), not at U+0085,
+    U+2028 or U+2029. The mapping is the block after an unindented `jobs:` line (or `"jobs":`, `'jobs':` or
+    `jobs :`, with an optional comment after a blank), up to the next line that does not start with a space (blank
+    and comment lines aside), and its keys are the lines at the indentation of its first key, plain or quoted, with
+    a colon followed by a space, a tab or the end of the line. A `jobs` mapping written in flow style names no
+    job."""
     key = re.compile(rf"""(?:{re.escape(job)}|"{re.escape(job)}"|'{re.escape(job)}')[ \t]*:(?:[ \t]|$)""")
     jobs = JOBS_KEY.search(text)
     if not jobs:
@@ -1318,8 +1322,10 @@ def check_against_profile(result, profile, findings):
         # job it ran, so a record that does not name both its repository and its workflow ref links to no profile.
         repository, workflow_ref = known(ci["repository"]), known(ci["workflow_ref"])
         sources = [(source["workflow"], source["job"]) for source in profile["evidence_sources"]]
-        if not isinstance(repository, str) or not isinstance(workflow_ref, str):
-            findings.error("profile-link", "/run/ci/workflow_ref", f"a GitHub Actions record is linked to profile {profile['id']} by its repository, workflow ref and job; this one does not name its repository and workflow ref")
+        missing = [name for name, fact in (("repository", repository), ("workflow ref", workflow_ref)) if not isinstance(fact, str)]
+        if missing:
+            where = "/run/ci/repository" if missing == ["repository"] else "/run/ci/workflow_ref"
+            findings.error("profile-link", where, f"a GitHub Actions record is linked to profile {profile['id']} by its repository, workflow ref and job; this one does not name its {' and '.join(missing)}")
         elif not workflow_ref.startswith(repository + "/"):
             findings.error("profile-link", "/run/ci/workflow_ref", f"the workflow ref {workflow_ref!r} is not in repository {repository!r}")
         else:

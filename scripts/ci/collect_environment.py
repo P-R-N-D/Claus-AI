@@ -142,6 +142,11 @@ USER_NS_INIT_INO = 0xEFFFFFFD
 PID_NS_INIT_INO = 0xEFFFFFFC
 # The same characters as CONTROL in validate_compatibility.py; a test keeps plain() equal to the validator's.
 CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]")
+# GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>, and the validator links a run to its profile by it, so any
+# ref git allows is recorded: none of space, "~", "^", ":", "?", "*", "[" or "\", and none of the characters CONTROL
+# refuses in any value. The whole value stays within the schema's 200 characters.
+WORKFLOW_REF = (r"(?=.{1,200}\Z)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]{1,150}@refs/"
+                r"[^ ~^:?*\[\\\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]+")
 # The same shapes as SECRET_SHAPES in validate_compatibility.py; a test keeps them equal. None starts with \b, so
 # a shape is still found in the JSON text after an escape such as \n or \u200e.
 SECRET_SHAPES = (
@@ -1011,7 +1016,7 @@ class Probe:
             "run_id": gha("GITHUB_RUN_ID", r"[0-9]{1,20}"),
             "run_attempt": gha("GITHUB_RUN_ATTEMPT", r"[0-9]{1,10}"),
             "run_url": not_applicable(na),
-            "workflow_ref": gha("GITHUB_WORKFLOW_REF", r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]{1,150}@refs/[A-Za-z0-9._/+-]{1,150}"),
+            "workflow_ref": gha("GITHUB_WORKFLOW_REF", WORKFLOW_REF),
             "job": gha("GITHUB_JOB", r"[A-Za-z0-9_-]{1,100}"),
             "runner_environment": gha("RUNNER_ENVIRONMENT", r"github-hosted|self-hosted"),
             "runner_os": gha("RUNNER_OS", r"[A-Za-z0-9]{1,40}"),

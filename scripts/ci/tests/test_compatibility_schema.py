@@ -1361,7 +1361,7 @@ class ProfileTests(Case):
             ("statically-resolvable", "14.7.1", False), ("statically-resolvable", None, False), ("statically-resolvable", "Sequoia", False),
             ("not-supported", "14.7.1", True), ("not-supported", "13", True), ("not-supported", "15.0", False), ("not-supported", None, False),
             ("checked", "15.5", False), ("not-assessed", None, True), ("not-assessed", "Sequoia", True),
-            ("not-assessed", "15.5", False), ("not-assessed", "14.7", False),
+            ("not-assessed", "15.5", False), ("not-assessed", "14.7", False), ("statically-resolvable", "015.5", False),
         ):
             with self.subTest(status=status, os_version=os_version):
                 claimed = changed(mac, lambda d: (d["support"].update(status=status, lane="macOS Apple Silicon"), version(os_version)(d)))
@@ -1397,11 +1397,15 @@ class ProfileTests(Case):
             ("glibc 1.39", libc("glibc 1.39"), [at_libc], True),
             ("glibc without a version", libc("glibc"), [at_libc], True),
             ("glibc from the ABI tag only", libc(None), [at_libc], True),
+            ("glibc 2.039, a leading zero", libc("glibc 2.039"), [at_libc], True),
+            ("glibc 02.39, a leading zero", libc("glibc 02.39"), [at_libc], True),
+            ("glibc and two spaces", libc("glibc  2.39"), [at_libc], True),
             ("CPython 3.12.13", cpython("3.12.13"), [], False),
             ("CPython 3.12.12", cpython("3.12.12"), [at_version], True),
             ("CPython 3.12.13rc1", cpython("3.12.13rc1"), [at_version], True),
             ("CPython 3.12.14+", cpython("3.12.14+"), [at_version], True),
             ("CPython 3.12", cpython("3.12"), [at_version], True),
+            ("CPython 3.12.10000", cpython("3.12.10000"), [at_version], True),
         ):
             with self.subTest(label):
                 claimed = changed(real, change)
@@ -1450,6 +1454,10 @@ class ProfileTests(Case):
                 if label in ("Python 3.15 free-threaded", "Python 3.13", "PyPy"):
                     # The lane table does not assess this interpreter, so the profile records not-assessed.
                     self.assertValid(check(changed(claimed, lambda d: d["support"].update(status="not-assessed"))))
+        # A lane without version bounds covers every profile on its platform and interpreter, so a real one copies its status.
+        on_arm = changed(real, lambda d: (aarch64(d), d["support"].update(status="not-assessed", lane="Linux aarch64 glibc")))
+        self.assertEqual([(code, path) for _, code, path, _ in check(on_arm).errors], [("support-claim", "/support/status")])
+        self.assertValid(check(changed(on_arm, lambda d: d["support"].update(status="statically-resolvable"))))
         # The C library comes from the libc fact before the ABI tag, and an error names that fact. glibc and musl are
         # read in any letter case; a libc fact or ABI tag that names another C library contradicts the lane whatever the status.
         at_libc, at_soabi = ["/workload/runtimes/python/libc"], ["/workload/runtimes/python/soabi"]
@@ -1525,6 +1533,11 @@ class ProfileTests(Case):
             with self.subTest(lane=lane):
                 self.assertEqual(set(re.findall(r"\w+ [0-9][0-9.]* or (?:newer|older)\b", cell)), kept.get(lane, set()))
         self.assertEqual(validator.bound_text(("CPython", (3, 12, 13), "or newer")), "CPython 3.12.13 or newer")
+        # Each bound names a version the validator reads.
+        _, real = real_result()
+        for name in {bound[0] for bounds in validator.STATUS_CONDITIONS.values() for bound in bounds}:
+            with self.subTest(name=name):
+                self.assertIsNotNone(validator.declared_version(real if name != "macOS" else macos_profile(), name)[1])
 
     def test_a_checked_claim_needs_the_lane_table(self):
         _, profile = real_result()
@@ -1711,7 +1724,8 @@ class ProfileTests(Case):
         other_workflow = changed(result, lambda d: d["run"]["ci"].update(workflow_ref=fact("P-R-N-D/Claus-AI/.github/workflows/other.yml@refs/pull/1/merge", "env:GITHUB_WORKFLOW_REF")))
         self.assertCodes(check(other_workflow, profile), "profile-link")
         # A known workflow ref in another repository is a mismatch, not a missing ref, even when the job matches.
-        for ref in ("Other/Repo/.github/workflows/ci.yml@refs/heads/main", "P-R-N-D/Claus-AI-fork/.github/workflows/ci.yml@refs/heads/main"):
+        for ref in ("Other/Repo/.github/workflows/ci.yml@refs/heads/main", "P-R-N-D/Claus-AI-fork/.github/workflows/ci.yml@refs/heads/main",
+                    "P-R-N-D/Claus-AIX.github/workflows/ci.yml@refs/heads/main"):
             with self.subTest(workflow_ref=ref):
                 elsewhere = changed(result, lambda d: d["run"]["ci"].update(workflow_ref=fact(ref, "env:GITHUB_WORKFLOW_REF")))
                 self.assertCodes(check(elsewhere, profile), "profile-link")
@@ -1722,15 +1736,19 @@ class ProfileTests(Case):
             with self.subTest(workflow_ref=ref):
                 partial = changed(result, lambda d: d["run"]["ci"].update(workflow_ref=fact(ref, "env:GITHUB_WORKFLOW_REF")))
                 self.assertEqual(check(partial, profile).errors, [("error", "profile-link", "/run/ci/workflow_ref", f"the workflow ref {ref!r} does not name a workflow file and a ref")])
+        # The ref is what follows the first "@", and git allows "@" in a branch name.
+        at_sign = changed(result, lambda d: d["run"]["ci"].update(workflow_ref=fact("P-R-N-D/Claus-AI/.github/workflows/ci.yml@refs/heads/a@b", "env:GITHUB_WORKFLOW_REF")))
+        self.assertValid(check(at_sign, profile))
         # A run is linked by its workflow and its job, so a record without its workflow ref or its repository links to
-        # no profile, even with the profile's job, and fails as CI evidence too.
-        for label, change in (("no workflow ref", lambda d: d["run"]["ci"].update(workflow_ref=unknown())),
-                              ("no repository", lambda d: d["run"]["ci"].update(repository=unknown())),
-                              ("neither", lambda d: d["run"]["ci"].update(workflow_ref=unknown(), repository=unknown()))):
+        # no profile, even with the profile's job, and fails as CI evidence too. The finding names what is missing.
+        for label, change, path, missing in (("no workflow ref", lambda d: d["run"]["ci"].update(workflow_ref=unknown()), "/run/ci/workflow_ref", "workflow ref"),
+                                             ("no repository", lambda d: d["run"]["ci"].update(repository=unknown()), "/run/ci/repository", "repository"),
+                                             ("neither", lambda d: d["run"]["ci"].update(workflow_ref=unknown(), repository=unknown()), "/run/ci/workflow_ref", "repository and workflow ref")):
             with self.subTest(label):
                 findings = check(changed(result, change), profile)
                 self.assertCodes(findings, "ci-evidence", "profile-link")
-                self.assertFinding(findings, "profile-link", "/run/ci/workflow_ref")
+                message = f"a GitHub Actions record is linked to profile {profile['id']} by its repository, workflow ref and job; this one does not name its {missing}"
+                self.assertEqual([item for item in findings.errors if item[1] == "profile-link"], [("error", "profile-link", path, message)])
         self.assertFinding(check(changed(other_job, lambda d: d["run"]["ci"].update(workflow_ref=unknown())), profile), "profile-link", "/run/ci/workflow_ref")
 
     def test_a_github_actions_record_names_its_run_and_commits(self):

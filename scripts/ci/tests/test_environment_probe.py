@@ -928,6 +928,21 @@ class RunEvidenceTests(Case):
                 result = machine.result()
             self.assertEqual(result["run"]["revision"]["pr_head_sha"], {"value": None, "provenance": "unknown", "reason": "GITHUB_EVENT_PATH is not set"})
             self.assertIn("ci-evidence", validator.validate_document(result, SCHEMA).codes())
+            # The validator links a run to its profile by its workflow ref, so the ref of a manual dispatch is recorded
+            # for any branch name git allows, within the schema's 200 characters and without a character the
+            # validator refuses in any value.
+            profile = validator.load_json(ROOT / "tests" / "compatibility" / "profiles" / "linux-x64-gha.json")
+            base = "P-R-N-D/Claus-AI/.github/workflows/ci.yml@refs/heads/"
+            for branch, recorded in (("fix/issue#12", True), ("feat/caf\u00e9", True), ("a,b", True), ("it's", True), ("a@b", True),
+                                     ("x" * (200 - len(base)), True), ("x" * (201 - len(base)), False), ("a b", False), ("a~1", False),
+                                     ("a:b", False), ("a\\b", False), ("a\x01b", False), ("a\x85b", False), ("a\u202eb", False), ("a\udc80", False)):
+                env = dict(self.run_env(directory, "workflow_dispatch", {}), GITHUB_WORKFLOW_REF=base + branch)
+                with self.subTest(branch=branch), FakeMachine(env=env) as machine:
+                    result = machine.result()
+                self.assertEqual(result["run"]["ci"]["workflow_ref"]["provenance"], "observed" if recorded else "unknown")
+                codes = validator.validate_document(result, SCHEMA, profile).codes()
+                self.assertFalse({"schema", "control-character"} & set(codes), codes)
+                self.assertEqual(("ci-evidence" in codes, "profile-link" in codes), (not recorded, not recorded))
             odd = dict(push, GITHUB_REPOSITORY="owner/repo|x", RUNNER_ENVIRONMENT="custom", GITHUB_SHA="not-a-sha")
             with FakeMachine(env=odd) as machine:
                 ci = machine.result()["run"]

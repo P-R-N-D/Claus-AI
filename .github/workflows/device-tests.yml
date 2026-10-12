@@ -36,7 +36,6 @@ jobs:
     timeout-minutes: 15
     env:
       UV_NO_CONFIG: '1'
-      RECORDS: ${{ runner.temp }}/device-compute
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,7 +51,8 @@ jobs:
           package-manager-cache: false
       - name: Prepare the standard-library Python runtime
         run: |
-          mkdir -p "$RECORDS"
+          mkdir -p "$RUNNER_TEMP/device-compute"
+          echo "RECORDS=$RUNNER_TEMP/device-compute" >> "$GITHUB_ENV"
           uv venv --managed-python --python 3.12.15
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Collect the real environment

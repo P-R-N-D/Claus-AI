@@ -133,6 +133,38 @@ def interpreter_patches(system, interpreter):
     return patches
 
 
+class FakeNative:
+    """Answers NativeQueries' calls from a table, as one macOS or Windows machine would; anything missing gives None."""
+
+    def __init__(self, sysctl=None, machine=None, token=None, bios=None):
+        self.values, self.machine, self.token, self.bios = dict(sysctl or {}), machine, token, bios
+
+    def sysctl(self, name, integer):
+        value = self.values.get(name)
+        if value is not None and isinstance(value, int) != integer:
+            raise AssertionError(f"{name} is read as the wrong type")
+        return value
+
+    def windows_native_machine(self):
+        return self.machine
+
+    def windows_token(self):
+        return self.token
+
+    def windows_bios(self):
+        return self.bios
+
+
+# A GitHub-hosted macos-15 runner: an Apple Virtualization guest on Apple silicon.
+MACOS_ARM = {"hw.optional.arm64": 1, "kern.hv_vmm_present": 1, "hw.model": "VirtualMac2,1", "kern.osproductversion": "15.7.1",
+             "kern.osrelease": "24.6.0", "sysctl.proc_translated": 0}
+# A GitHub-hosted macos-15-intel runner: Intel Macs have no hw.optional.arm64 set and no sysctl.proc_translated.
+MACOS_INTEL = {"hw.optional.arm64": 0, "hw.optional.x86_64": 1, "kern.hv_vmm_present": 1, "hw.model": "VMware7,1",
+               "kern.osproductversion": "15.7.1", "kern.osrelease": "24.6.0"}
+HYPER_V_BIOS = {"SystemManufacturer": "Microsoft Corporation", "SystemProductName": "Virtual Machine"}
+NO_ADMIN = {"elevated": False, "administrators": False, "local_system": False}
+
+
 @contextlib.contextmanager
 def without(module, name):
     """Remove an attribute, such as os.getresuid on macOS, for the duration of a test."""
@@ -151,7 +183,8 @@ class FakeMachine:
     build targets, which emulation and personality changes do not alter.
     """
 
-    def __init__(self, files=None, remove=(), env=None, machine="x86_64", release="6.17.0-1022-azure", system="Linux", interpreter="x86_64"):
+    def __init__(self, files=None, remove=(), env=None, machine="x86_64", release="6.17.0-1022-azure", system="Linux", interpreter="x86_64", native=None):
+        self.native = native or FakeNative()
         self.directory = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.directory.name) / "root"
         content = dict(RUNNER_FILES if files is None else files)
@@ -188,6 +221,7 @@ class FakeMachine:
 
     def probe(self, **kwargs):
         kwargs.setdefault("probe_node", False)
+        kwargs.setdefault("native", self.native)
         return FakeProbe(self.root, env=self.env, git_dir=self.git, system=self.system, **kwargs)
 
     def result(self, **kwargs):
@@ -804,27 +838,160 @@ class IsolationTests(Case):
 
 
 class OtherSystemTests(Case):
-    # Off Linux the collector does not measure the layer kind, elevation or capabilities, so these rules fail.
-    UNMEASURED = ["policy-app-non-root", "policy-minimal-capabilities", "policy-minimal-devices", "policy-no-privileged-container"]
+    def windows(self, interpreter="aarch64", machine=0xAA64, token=NO_ADMIN, bios=HYPER_V_BIOS, version="10.0.26100"):
+        native = FakeNative(machine=machine, token=token, bios=bios)
+        with mock.patch.object(collector.platform, "version", return_value=version), \
+                FakeMachine(system="Windows", interpreter=interpreter, native=native) as fake:
+            return fake.result()
 
-    def test_a_system_other_than_linux(self):
-        with FakeMachine(system="Windows", interpreter="aarch64") as machine:
-            result = machine.result()
+    def macos(self, values, interpreter="aarch64", uid=501):
+        with mock.patch.object(collector.os, "geteuid", return_value=uid), mock.patch.object(collector.os, "getuid", return_value=uid), \
+                FakeMachine(system="Darwin", interpreter=interpreter, native=FakeNative(sysctl=values)) as fake:
+            return fake.result()
+
+    def policy_codes(self, result):
+        return [code for code in validator.validate_document(result, SCHEMA).codes() if code.startswith("policy-")]
+
+    def test_windows_on_arm(self):
+        result = self.windows()
         layers = result["environment"]["layers"]
-        self.assertEqual(len(layers), 1)
-        self.assertEqual(value(layers[0]["os"]["family"]), "windows")
-        self.assertEqual(layers[0]["kind"]["provenance"], "unknown")
-        self.assertEqual(result["workload"]["isolation"]["seccomp"]["provenance"], "unknown")
-        identity = result["workload"]["identity"]
-        self.assertEqual((identity["superuser"]["provenance"], identity["real_uid"]["provenance"], identity["saved_uid"]["provenance"]), ("unknown", "not-applicable", "not-applicable"))
-        self.assertEqual(result["probe_errors"], [])
+        self.assertEqual(kinds(result), ["host", "vm"])
+        self.assertEqual(layers[1]["technology"], {"value": "hyper-v", "provenance": "inferred", "evidence": [collector.WINDOWS_BIOS_EVIDENCE + "#SystemProductName"]})
+        self.assertFact(layers[1]["os"]["family"], "windows", "observed")
+        self.assertFact(layers[1]["os"]["version"], "10.0.26100", "observed")
+        self.assertFact(layers[1]["os"]["kernel"], "10.0.26100", "observed")
+        self.assertEqual(layers[1]["cpu"]["arch"], {"value": "aarch64", "provenance": "observed", "evidence": ["python:IsWow64Process2#nativeMachine"]})
+        self.assertEqual(layers[1]["cpu"]["execution"]["provenance"], "unknown")
         python = result["workload"]["runtimes"]["python"]
         self.assertFact(python["arch"], "aarch64", "observed")
+        self.assertEqual(python["execution"], {"value": "native", "provenance": "inferred", "evidence": ["python:sysconfig.get_platform", "python:IsWow64Process2#nativeMachine"]})
         self.assertEqual(python["libc"]["provenance"], "unknown")
+        isolation = result["workload"]["isolation"]
+        self.assertEqual({provenance for _, provenance in walk_provenance({k: v for k, v in isolation.items() if k != "capabilities"})}, {"not-applicable"})
+        # The token's privileges, which stand in for capabilities, are not read.
+        self.assertEqual({fact["provenance"] for fact in isolation["capabilities"].values()}, {"unknown"})
+        identity = result["workload"]["identity"]
+        self.assertFact(identity["superuser"], False, "observed")
+        self.assertEqual({identity[name]["provenance"] for name in ("uid", "real_uid", "saved_uid", "gid")}, {"not-applicable"})
+        self.assertEqual(result["probe_errors"], [])
         self.assertValidRecord(result, policy=False)
-        findings = validator.validate_document(result, SCHEMA)
-        self.assertEqual(sorted({code for code in findings.codes() if code[len("policy-"):] in validator.RULE_SCOPE}), self.UNMEASURED)
-        self.assertIn("policy-engine-rootless", findings.codes("warning"))
+        # A token without administrator rights, in a VM the record shows, still fails minimal-capabilities, which
+        # nothing on Windows measures.
+        self.assertEqual(self.policy_codes(result), ["policy-minimal-capabilities"])
+
+    def test_an_x64_process_emulated_on_windows_on_arm(self):
+        result = self.windows(interpreter="x86_64")
+        python = result["workload"]["runtimes"]["python"]
+        self.assertFact(python["arch"], "x86_64", "observed")
+        self.assertEqual(python["execution"], {"value": "emulated", "provenance": "inferred", "evidence": ["python:sysconfig.get_platform", "python:IsWow64Process2#nativeMachine"]})
+        # IsWow64Process2 names the Arm machine to an emulated x64 process too.
+        self.assertFact(result["environment"]["layers"][1]["cpu"]["arch"], "aarch64", "observed")
+        self.assertValidRecord(result, policy=False)
+        self.assertFact(self.windows(interpreter="x86_64", machine=0x8664)["workload"]["runtimes"]["python"]["execution"], "native", "inferred")
+        # Node runs in its own process, compared with the same machine.
+        with FakeMachine(system="Windows", native=FakeNative(machine=0xAA64)) as fake:
+            probe = fake.probe()
+            self.assertFact(probe.execution("x86_64", "cmd:node#process.arch", None), "emulated", "inferred")
+            self.assertFact(probe.execution("aarch64", "cmd:node#process.arch", None), "native", "inferred")
+        # Without IsWow64Process2 nothing is compared, and the machine is not named.
+        result = self.windows(machine=None)
+        self.assertEqual(result["workload"]["runtimes"]["python"]["execution"]["provenance"], "unknown")
+        self.assertEqual(result["environment"]["layers"][-1]["cpu"]["arch"]["provenance"], "unknown")
+        self.assertValidRecord(result, policy=False)
+
+    def test_an_administrator_token_is_the_superuser(self):
+        elevated, administrators, system = ("python:GetTokenInformation(TokenElevation)", "python:CheckTokenMembership(BUILTIN\\Administrators)",
+                                            "python:GetTokenInformation(TokenUser)")
+        for token, evidence in (
+            ({"elevated": True, "administrators": True, "local_system": False}, [elevated, administrators]),
+            # With UAC off, an administrator's token holds the enabled group without being marked elevated.
+            ({"elevated": False, "administrators": True, "local_system": False}, [administrators]),
+            ({"elevated": None, "administrators": None, "local_system": True}, [system]),
+        ):
+            with self.subTest(token=token):
+                result = self.windows(token=token)
+                self.assertEqual(result["workload"]["identity"]["superuser"], {"value": True, "provenance": "observed", "evidence": evidence})
+                self.assertValidRecord(result, policy=False)
+                self.assertEqual(self.policy_codes(result), ["policy-app-non-root", "policy-minimal-capabilities"])
+        # A token that cannot be read, or is read in part, does not show a non-root user.
+        for token in (None, {"elevated": False, "administrators": None, "local_system": False}):
+            with self.subTest(token=token):
+                result = self.windows(token=token)
+                self.assertEqual(result["workload"]["identity"]["superuser"]["provenance"], "unknown")
+                self.assertEqual(self.policy_codes(result), ["policy-app-non-root", "policy-minimal-capabilities"])
+
+    def test_the_bios_values_name_the_hypervisor(self):
+        for bios, technology, evidence in (
+            ({"SystemManufacturer": "QEMU", "SystemProductName": "Standard PC (Q35 + ICH9, 2009)"}, "qemu", "SystemManufacturer"),
+            ({"SystemManufacturer": "Amazon EC2", "SystemProductName": "m7g.large"}, "amazon", "SystemManufacturer"),
+            ({"SystemManufacturer": "Dell Inc.", "SystemProductName": "VMware20,1"}, "vmware", "SystemProductName"),
+        ):
+            with self.subTest(bios=bios):
+                result = self.windows(bios=bios)
+                layer = result["environment"]["layers"][-1]
+                self.assertEqual(layer["technology"], {"value": technology, "provenance": "inferred", "evidence": [f"{collector.WINDOWS_BIOS_EVIDENCE}#{evidence}"]})
+                self.assertValidRecord(result, policy=False)
+        # Values that name no hypervisor do not show bare metal, so no layer kind is recorded and the container rules cannot pass.
+        for bios, reason in (({"SystemManufacturer": "Dell Inc.", "SystemProductName": "OptiPlex 7090"}, "does not show bare metal"), (None, "cannot be read")):
+            with self.subTest(bios=bios):
+                result = self.windows(bios=bios)
+                self.assertEqual(kinds(result), [None])
+                self.assertIn(reason, result["environment"]["layers"][0]["kind"]["reason"])
+                self.assertValidRecord(result, policy=False)
+                self.assertEqual(self.policy_codes(result), ["policy-minimal-capabilities", "policy-minimal-devices", "policy-no-privileged-container"])
+        result = self.windows(version="10.0.26100; x")
+        self.assertEqual(result["environment"]["layers"][-1]["os"]["version"]["provenance"], "unknown")
+
+    def test_macos_on_apple_silicon(self):
+        result = self.macos(MACOS_ARM)
+        layers = result["environment"]["layers"]
+        self.assertEqual(kinds(result), ["host", "vm"])
+        self.assertEqual(layers[1]["kind"]["evidence"], ["python:sysctlbyname(kern.hv_vmm_present)"])
+        self.assertEqual(layers[1]["technology"], {"value": "apple-virtualization", "provenance": "inferred", "evidence": ["python:sysctlbyname(hw.model)"]})
+        self.assertFact(layers[1]["os"]["family"], "macos", "observed")
+        self.assertFact(layers[1]["os"]["version"], "15.7.1", "observed")
+        self.assertFact(layers[1]["os"]["kernel"], "24.6.0", "observed")
+        self.assertEqual(layers[1]["cpu"]["arch"], {"value": "aarch64", "provenance": "observed", "evidence": ["python:sysctlbyname(hw.optional.arm64)"]})
+        python = result["workload"]["runtimes"]["python"]
+        self.assertEqual(python["execution"], {"value": "native", "provenance": "inferred", "evidence": ["python:sysconfig.get_platform", "python:sysctlbyname(sysctl.proc_translated)"]})
+        self.assertEqual({provenance for _, provenance in walk_provenance(result["workload"]["isolation"])}, {"not-applicable"})
+        self.assertEqual(result["probe_errors"], [])
+        self.assertValidRecord(result, policy=False)
+        self.assertEqual(self.policy_codes(result), [])
+        # A root process is the superuser on macOS as anywhere else.
+        self.assertEqual(self.policy_codes(self.macos(MACOS_ARM, uid=0)), ["policy-app-non-root"])
+
+    def test_a_process_rosetta_translates(self):
+        result = self.macos({**MACOS_ARM, "sysctl.proc_translated": 1}, interpreter="x86_64")
+        python = result["workload"]["runtimes"]["python"]
+        self.assertFact(python["arch"], "x86_64", "observed")
+        self.assertEqual(python["execution"], {"value": "emulated", "provenance": "inferred", "evidence": ["python:sysconfig.get_platform", "python:sysctlbyname(sysctl.proc_translated)"]})
+        # hw.optional.arm64 is 1 under Rosetta too, so the machine is still named.
+        self.assertFact(result["environment"]["layers"][1]["cpu"]["arch"], "aarch64", "observed")
+        self.assertValidRecord(result, policy=False)
+
+    def test_macos_on_intel(self):
+        result = self.macos(MACOS_INTEL, interpreter="x86_64")
+        layers = result["environment"]["layers"]
+        self.assertFact(layers[1]["technology"], "vmware", "inferred")
+        self.assertEqual(layers[1]["cpu"]["arch"], {"value": "x86_64", "provenance": "observed", "evidence": ["python:sysctlbyname(hw.optional.x86_64)"]})
+        # Intel Macs have no sysctl.proc_translated, so the build is compared with the machine.
+        self.assertEqual(result["workload"]["runtimes"]["python"]["execution"], {"value": "native", "provenance": "inferred", "evidence": ["python:sysconfig.get_platform", "python:sysctlbyname(hw.optional.x86_64)"]})
+        self.assertValidRecord(result, policy=False)
+        self.assertEqual(self.policy_codes(result), [])
+
+    def test_macos_without_usable_values(self):
+        result = self.macos({**MACOS_ARM, "kern.hv_vmm_present": 0})
+        self.assertEqual(kinds(result), [None])
+        self.assertIn("does not show bare metal", result["environment"]["layers"][0]["kind"]["reason"])
+        self.assertValidRecord(result, policy=False)
+        self.assertEqual(self.policy_codes(result), ["policy-minimal-devices", "policy-no-privileged-container"])
+        result = self.macos({"kern.hv_vmm_present": 1, "hw.model": "Mac14,2", "kern.osproductversion": "15.7.1; x", "kern.osrelease": "24.6.0\n"})
+        layer = result["environment"]["layers"][-1]
+        self.assertEqual((layer["technology"]["provenance"], layer["os"]["version"]["provenance"], layer["os"]["kernel"]["provenance"], layer["cpu"]["arch"]["provenance"]),
+                         ("unknown", "unknown", "unknown", "unknown"))
+        self.assertEqual(result["workload"]["runtimes"]["python"]["execution"]["provenance"], "unknown")
+        self.assertValidRecord(result, policy=False)
 
     def test_user_ids_off_linux(self):
         with FakeMachine(system="FreeBSD") as machine:
@@ -849,7 +1016,9 @@ class OtherSystemTests(Case):
         self.assertValidRecord(result, policy=False)
         codes = validator.validate_document(result, SCHEMA).codes()
         self.assertNotIn("policy-app-non-root", codes)
-        self.assertIn("policy-minimal-capabilities", codes)
+        # Linux capabilities do not exist on macOS; with no hypervisor signal, no container is ruled out.
+        self.assertNotIn("policy-minimal-capabilities", codes)
+        self.assertIn("policy-no-privileged-container", codes)
 
 
 class RunEvidenceTests(Case):
@@ -1437,6 +1606,38 @@ class CommandTests(Case):
             self.assertEqual(result["stages"]["initialize"]["status"], "not-run")
             self.assertEqual(result["stages"]["performance"]["status"], "not-applicable")
 
+    def test_extensions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            output = directory / "result.json"
+            good = directory / "abi.json"
+            good.write_text(json.dumps({"schema": "claus-python-abi/1", "packages": []}), encoding="utf-8")
+            code, _ = self.run_main("--output", output, "--no-node", "--extension", f"x-python-abi={good}")
+            self.assertIn(code, (0, 1))
+            result = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(result["extensions"], {"x-python-abi": {"schema": "claus-python-abi/1", "packages": []}})
+            self.assertValidRecord(result, policy=False)
+            output.unlink()
+            (directory / "list.json").write_text("[]", encoding="utf-8")
+            (directory / "bad.json").write_bytes(b"\xff")
+            (directory / "big.json").write_text('{"a": "' + "x" * collector.EXTENSION_LIMIT + '"}', encoding="utf-8")
+            (directory / "token.json").write_text(json.dumps({"t": "ghp_" + "A" * 36}), encoding="utf-8")
+            for value, message in ((f"python-abi={good}", "x-NAME=PATH"), (f"x-Python={good}", "x-NAME=PATH"), ("x-abi=", "x-NAME=PATH"),
+                                   (f"x-abi={directory / 'missing.json'}", "cannot read the file"), (f"x-abi={directory / 'list.json'}", "not a JSON object"),
+                                   (f"x-abi={directory / 'bad.json'}", "not a UTF-8 JSON document"), (f"x-abi={directory / 'big.json'}", "larger than"),
+                                   (f"x-abi={directory}", "cannot read the file")):
+                with self.subTest(value=value):
+                    code, text = self.run_main("--output", output, "--no-node", "--extension", value)
+                    self.assertEqual(code, 2)
+                    self.assertIn(message, text)
+                    self.assertFalse(output.exists())
+            code, text = self.run_main("--output", output, "--no-node", "--extension", f"x-a={good}", "--extension", f"x-a={good}")
+            self.assertIn("given twice", text)
+            code, text = self.run_main("--output", output, "--no-node", "--extension", f"x-a={directory / 'token.json'}")
+            self.assertEqual(code, 2)
+            self.assertIn("looks like a GitHub token", text)
+            self.assertFalse(output.exists())
+
     def test_a_record_that_looks_like_it_holds_a_secret_is_not_written(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory) / "result.json"
@@ -1587,6 +1788,130 @@ class CommandTests(Case):
                 self.assertIsNone(re.search(r"(?<!\\)\]\(|(?<!\\)[`<*]", row.replace("\\\\", "")))
 
 
+class EngineTests(Case):
+    """--amend-container: the engine-side facts a process inside a container cannot see, read on the host from Podman."""
+
+    FILES = dict(RUNNER_FILES, **{
+        "run/.containerenv": "",
+        "proc/self/uid_map": "      1001          0          1\n         0          1       1001\n",
+        "proc/self/status": status(uid=1001, gid=118, cap_bnd="0000000000000000", no_new_privs=1, seccomp=2),
+        "proc/self/cgroup": "0::/\n",
+        "etc/os-release": 'ID="rhel"\nVERSION_ID="9.8"\n',
+    })
+    INFO = {"host": {"security": {"rootless": True}}}
+
+    @staticmethod
+    def inspect(name="claus-ubi", running=True, privileged=False, devices=()):
+        return [{"Name": name, "State": {"Running": running}, "HostConfig": {"Privileged": privileged, "Devices": list(devices)}}]
+
+    def record(self):
+        files = dict(self.FILES)
+        files.pop("run/systemd/system/")
+        with FakeMachine(files) as machine:
+            return machine.result(user_inode=4026532000)
+
+    def test_the_container_record_before_and_after(self):
+        record = self.record()
+        container = record["environment"]["layers"][-1]["container"]
+        # Podman writes rootless to /run/.containerenv only in a privileged container, so inside this one the mode is not known.
+        self.assertEqual([container[name]["provenance"] for name in ("engine_mode", "privileged", "devices")], ["unknown"] * 3)
+        self.assertEqual(sorted(self.policy(record)), ["policy-engine-rootless", "policy-minimal-devices", "policy-no-privileged-container"])
+        amended = collector.amend_container(json.loads(json.dumps(record)), self.INFO, self.inspect(), "claus-ubi")
+        container = amended["environment"]["layers"][-1]["container"]
+        self.assertEqual(container["engine_mode"], {"value": "rootless", "provenance": "observed", "evidence": ["cmd:podman info#host.security.rootless"]})
+        self.assertEqual(container["privileged"], {"value": False, "provenance": "observed", "evidence": ["cmd:podman container inspect#HostConfig.Privileged"]})
+        self.assertEqual(container["devices"], {"value": [], "provenance": "observed", "evidence": ["cmd:podman container inspect#HostConfig.Devices"]})
+        self.assertValidRecord(amended)
+        self.assertEqual(self.policy(amended), [])
+        # Nothing else in the record changes.
+        record["environment"]["layers"][-1]["container"].update({name: container[name] for name in ("engine_mode", "privileged", "devices")})
+        self.assertEqual(amended, record)
+
+    def policy(self, record):
+        findings = validator.validate_document(record, SCHEMA)
+        return [code for code in findings.codes() + findings.codes("warning") if code.startswith("policy-")]
+
+    def test_a_rootful_or_privileged_engine_is_recorded_as_it_is(self):
+        record = self.record()
+        rootful = collector.amend_container(json.loads(json.dumps(record)), {"host": {"security": {"rootless": False}}}, self.inspect(), "claus-ubi")
+        self.assertFact(rootful["environment"]["layers"][-1]["container"]["engine_mode"], "rootful", "observed")
+        self.assertEqual(self.policy(rootful), ["policy-engine-rootless"])
+        privileged = collector.amend_container(json.loads(json.dumps(record)), self.INFO, self.inspect(privileged=True), "claus-ubi")
+        self.assertEqual(self.policy(privileged), ["policy-no-privileged-container"])
+        devices = collector.amend_container(json.loads(json.dumps(record)), self.INFO,
+                                            self.inspect(devices=[{"PathOnHost": "/dev/dri/renderD128", "PathInContainer": "/dev/dri/renderD128"},
+                                                                  {"PathOnHost": "/dev/fuse", "PathInContainer": "/dev/fuse"}]), "claus-ubi")
+        self.assertFact(devices["environment"]["layers"][-1]["container"]["devices"], ["dri-renderd128", "fuse"], "observed")
+        self.assertValidRecord(devices, policy=False)
+        self.assertEqual(self.policy(devices), ["policy-minimal-devices"])
+        odd = collector.amend_container(json.loads(json.dumps(record)), self.INFO, self.inspect(devices=[{"PathInContainer": "/tmp/x"}]), "claus-ubi")
+        self.assertEqual(odd["environment"]["layers"][-1]["container"]["devices"]["provenance"], "unknown")
+
+    def test_output_that_does_not_describe_the_container_changes_nothing(self):
+        record = self.record()
+        for info, inspect, message in (
+            ({"host": {"security": {}}}, self.inspect(), "rootless"),
+            ({"host": {"security": {"rootless": "true"}}}, self.inspect(), "rootless"),
+            ([], self.inspect(), "rootless"),
+            (self.INFO, [], "exactly one container"),
+            (self.INFO, self.inspect() * 2, "exactly one container"),
+            (self.INFO, self.inspect(name="other"), "another container"),
+            (self.INFO, self.inspect(running=False), "not running"),
+            (self.INFO, [{"Name": "claus-ubi", "State": {"Running": True}, "HostConfig": {}}], "Privileged"),
+            (self.INFO, [{"Name": "claus-ubi", "State": {"Running": True}, "HostConfig": {"Privileged": False, "Devices": "x"}}], "not a list"),
+        ):
+            with self.subTest(message=message, info=info), self.assertRaisesRegex(collector.ProbeError, message):
+                collector.amend_container(json.loads(json.dumps(record)), info, inspect, "claus-ubi")
+        with FakeMachine() as machine:
+            vm_record = machine.result()
+        with self.assertRaisesRegex(collector.ProbeError, "not a container"):
+            collector.amend_container(vm_record, self.INFO, self.inspect(), "claus-ubi")
+        with self.assertRaisesRegex(collector.ProbeError, "not a result"):
+            collector.amend_container(dict(record, collector="someone-else/1"), self.INFO, self.inspect(), "claus-ubi")
+
+    @unittest.skipUnless(os.name == "posix" and pathlib.Path("/bin/sh").exists(), "needs /bin/sh")
+    def test_the_amend_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            path = directory / "record.json"
+            path.write_text(json.dumps(self.record()), encoding="utf-8")
+            calls = directory / "calls"
+            podman = directory / "podman"
+            podman.write_text(
+                "#!/bin/sh\n"
+                f'echo "$*" >> "{calls}"\n'
+                f"case \"$1\" in info) printf '%s' '{json.dumps(self.INFO)}' ;; container) printf '%s' '{json.dumps(self.inspect())}' ;; *) exit 9 ;; esac\n",
+                encoding="utf-8",
+            )
+            podman.chmod(0o755)
+            run = lambda *argv: CommandTests.run_main(self, *argv)  # noqa: E731
+            with mock.patch.dict(os.environ, {"PATH": str(directory)}):
+                for argv, message in ((["--amend-container", path], "needs --podman-container"),
+                                      (["--amend-container", path, "--podman-container", "bad name"], "needs --podman-container"),
+                                      (["--amend-container", path, "--podman-container", "claus-ubi", "--no-node"], "takes --podman-container only"),
+                                      (["--output", path, "--podman-container", "claus-ubi"], "goes with --amend-container")):
+                    with self.subTest(argv=argv):
+                        code, text = run(*argv)
+                        self.assertEqual(code, 2)
+                        self.assertIn(message, text)
+                self.assertFalse(calls.exists())
+                code, text = run("--amend-container", path, "--podman-container", "claus-ubi")
+            self.assertEqual(code, 0, text)
+            self.assertIn("engine rootless (observed)", text)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["info --format json", "container inspect --format json claus-ubi"])
+            self.assertValidRecord(json.loads(path.read_text(encoding="utf-8")))
+            # A failure leaves the record as it was.
+            before = path.read_bytes()
+            with mock.patch.dict(os.environ, {"PATH": str(directory)}):
+                code, text = run("--amend-container", path, "--podman-container", "other")
+            self.assertEqual((code, path.read_bytes()), (2, before))
+            self.assertIn("another container than other; the record was not changed", text)
+            with mock.patch.dict(os.environ, {"PATH": str(directory / "missing")}):
+                code, text = run("--amend-container", path, "--podman-container", "claus-ubi")
+            self.assertEqual(code, 2)
+            self.assertIn("podman is not on PATH", text)
+
+
 class ThisMachineTests(Case):
     SENTINELS = {
         "GITHUB_TOKEN": "ghs_" + "Q" * 36,
@@ -1658,7 +1983,7 @@ class SharedTableTests(unittest.TestCase):
 
     def test_layer_technologies(self):
         # Every technology the collector can write is on the kind of layer the validator binds it to.
-        for technology in {name for _, name in collector.DMI_VENDORS} | {"hyper-v"}:
+        for technology in {name for _, name in collector.DMI_VENDORS + collector.MACOS_MODELS} | {"hyper-v"}:
             self.assertEqual(validator.TECHNOLOGY_KINDS.get(technology), "vm", technology)
         for technology in {name for name in collector.CONTAINER_TECHNOLOGIES.values() if name} | {"docker", "podman", "apptainer"}:
             self.assertEqual(validator.TECHNOLOGY_KINDS.get(technology), "container", technology)
@@ -1696,7 +2021,14 @@ class SourceTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom):
                 imported.add((node.module or "").split(".")[0])
         allowed = {"argparse", "datetime", "json", "os", "pathlib", "platform", "re", "shutil", "signal", "stat", "struct", "subprocess", "sys", "sysconfig", "threading", "time"}
-        self.assertEqual(imported - allowed, set())
+        # ctypes and winreg are imported inside NativeQueries only, for the macOS and Windows reads.
+        native = next(node for node in self.tree.body if isinstance(node, ast.ClassDef) and node.name == "NativeQueries")
+        local = {alias.name.split(".")[0] for node in ast.walk(native) if isinstance(node, (ast.Import, ast.ImportFrom))
+                 for alias in (node.names if isinstance(node, ast.Import) else [types.SimpleNamespace(name=node.module or "")])}
+        self.assertEqual(local, {"ctypes", "winreg"})
+        self.assertEqual(imported - allowed - local, set())
+        top = {alias.name.split(".")[0] for node in self.tree.body if isinstance(node, ast.Import) for alias in node.names}
+        self.assertEqual(top & local, set())
 
     def test_no_forbidden_calls(self):
         forbidden = {"platform.node", "platform.uname", "os.uname", "os.getlogin", "os.environ.items", "os.environ.keys",
@@ -1706,16 +2038,25 @@ class SourceTests(unittest.TestCase):
         environ = [node for node, name in self.names() if name == "os.environ"]
         self.assertEqual(len(environ), 1, "os.environ is read only through Probe.env")
 
-    def test_one_subprocess_without_a_shell(self):
+    def test_two_subprocesses_without_a_shell(self):
         calls = [node for node in ast.walk(self.tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                  and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"]
-        self.assertEqual([call.func.attr for call in calls], ["Popen"])
-        keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+        self.assertEqual(sorted(call.func.attr for call in calls), ["Popen", "run"])
+        popen = next(call for call in calls if call.func.attr == "Popen")
+        keywords = {keyword.arg: keyword.value for keyword in popen.keywords}
         self.assertNotIn("shell", keywords)
         # node gets an empty environment, or on Windows SystemRoot alone.
         self.assertEqual(ast.unparse(keywords["env"]), "{'SystemRoot': system_root} if system_root else {}")
         # stderr is discarded, and stdout is read through the bounded reader in Probe.node.
         self.assertEqual(ast.unparse(keywords["stderr"]), "subprocess.DEVNULL")
+        # podman runs only in the amend mode, from run_podman, with no shell and no input, and its argument list built there.
+        run = next(call for call in calls if call.func.attr == "run")
+        function = next(node for node in self.tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_podman")
+        self.assertIn(run, list(ast.walk(function)))
+        keywords = {keyword.arg: keyword.value for keyword in run.keywords}
+        self.assertNotIn("shell", keywords)
+        self.assertEqual(ast.unparse(keywords["stdin"]), "subprocess.DEVNULL")
+        self.assertEqual(ast.unparse(run.args[0]), "[executable, *args]")
 
     def test_files_are_opened_for_reading_except_the_outputs(self):
         for node in ast.walk(self.tree):
@@ -1723,9 +2064,12 @@ class SourceTests(unittest.TestCase):
                 mode = node.args[1].value if isinstance(node.args[1], ast.Constant) else None
                 with self.subTest(line=node.lineno):
                     self.assertIn(mode, ("rb", "a"))
-        main = next(node for node in self.tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        # Only the two command entry points write, and only the record they were given.
+        entries = [node for node in self.tree.body if isinstance(node, ast.FunctionDef) and node.name in ("main", "amend_main")]
         writers = [node for node in ast.walk(self.tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ("write_text", "write_bytes", "mkdir", "unlink", "rmdir", "chmod")]
-        self.assertEqual([node.lineno for node in writers], [node.lineno for node in ast.walk(main) if node in writers])
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(sorted(node.lineno for node in writers), sorted(node.lineno for entry in entries for node in ast.walk(entry) if node in writers))
+        self.assertTrue(all(ast.unparse(node.func.value) == "args.output" for node in writers if node.func.attr == "write_text" and node in list(ast.walk(entries[0]))))
 
 
 if __name__ == "__main__":

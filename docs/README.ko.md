@@ -53,14 +53,14 @@ AI 코딩 에이전트와 기여자를 위한 기술 문서는 영어로 작성�
 
 ## 로컬 실행 순서
 
-실제로 실행해 본 환경은 Linux x86-64뿐입니다. 나머지 행은 [플랫폼 및 가속기 lane](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes)의 정적 근거이며 지원을 보장한다는 뜻이 아닙니다.
+검증된 lane은 Linux x86-64뿐입니다. 나머지 행은 [플랫폼 및 가속기 lane](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes)의 정적 근거이며 지원을 보장한다는 뜻이 아닙니다. 2026-10-12부터 CI가 GitHub 호스팅 Linux arm64, macOS 15, 네이티브 Windows 러너에서도 backend와 frontend 검사를 실행하지만, 그 결과로 바뀌는 행은 없습니다([관찰된 lane 결과](DEPENDENCY-STRATEGY.md#observed-lane-results-2026-10-12)).
 
 | 머신 | 아래 단계 실행 방법 |
 |---|---|
 | Linux x86-64 | 표시된 대로 backend 잠금 파일을 사용합니다(검증된 lane). |
-| Linux arm64(glibc), NVIDIA DGX Spark 포함 | 로컬 개발 용도로만 표시된 대로 backend 잠금 파일을 사용합니다. arm64에서 정적으로 해석 가능하지만 실제로 실행해 보지는 않았으며, 이 플랫폼을 검증하려면 별도 이름의 잠금 파일이 필요합니다([backend locks](../backend/locks/README.md)). |
+| Linux arm64(glibc), NVIDIA DGX Spark 포함 | 로컬 개발 용도로만 표시된 대로 backend 잠금 파일을 사용합니다. arm64에서 정적으로 해석 가능하고 GitHub 호스팅 러너의 CI에서 backend 테스트가 통과했지만 상태가 바뀐 것은 아니며, 이 플랫폼을 검증하려면 별도 이름의 잠금 파일이 필요합니다([backend locks](../backend/locks/README.md)). |
 | Windows x64, 그리고 NVIDIA RTX Spark나 Qualcomm Snapdragon PC 같은 Windows on Arm | WSL2(Ubuntu)에서 실행합니다. 네이티브 Windows에서는 Linux 기준으로 해석한 이 잠금 파일로 동작하는 환경을 만들 수 없습니다. Windows x64에서는 Windows에서 Django와 psycopg가 요구하는 `tzdata` 없이 설치되고, Windows on Arm에서는 `autobahn`, `cryptography`, `psycopg-binary`에 `win_arm64` wheel이 없어 설치가 실패합니다. 네이티브 Windows on Arm에서는 Playwright도 x64 브라우저를 에뮬레이션으로 실행합니다. |
-| Apple Silicon의 macOS 15 이상 | 로컬 개발 용도로만 표시된 대로 backend 잠금 파일을 사용합니다. 정적으로 해석 가능하지만 실제로 실행해 보지는 않았으며, 이 플랫폼을 검증하려면 별도 이름의 잠금 파일이 필요합니다. |
+| Apple Silicon의 macOS 15 이상 | 로컬 개발 용도로만 표시된 대로 backend 잠금 파일을 사용합니다. 정적으로 해석 가능하고 GitHub 호스팅 macOS 15 러너의 CI에서 backend 테스트가 통과했지만 상태가 바뀐 것은 아니며, 이 플랫폼을 검증하려면 별도 이름의 잠금 파일이 필요합니다. |
 | macOS 14 이하, Intel Mac, Alpine(musl) | 이 잠금 파일로는 바이너리 설치가 불가능합니다. |
 
 CUDA는 필요하지 않습니다. 현재 의존성 그래프에는 CUDA나 다른 가속기 전용 패키지가 없으므로 NVIDIA GPU가 있든 없든, Snapdragon PC처럼 CUDA가 없는 Arm 머신에서도 같은 단계를 따릅니다.

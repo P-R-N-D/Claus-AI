@@ -53,14 +53,14 @@ Technical documents for AI coding agents and contributors are written in English
 
 ## Local development
 
-Only Linux x86-64 has been run. The other rows are static evidence from [Platform and accelerator lanes](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes), not support claims.
+Only Linux x86-64 is a checked lane. The other rows are static evidence from [Platform and accelerator lanes](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes), not support claims. Since 2026-10-12, CI also runs the backend and frontend checks on GitHub-hosted Linux arm64, macOS 15, and native Windows runners; those runs change no row ([Observed lane results](DEPENDENCY-STRATEGY.md#observed-lane-results-2026-10-12)).
 
 | Machine | How to run the steps below |
 |---|---|
 | Linux x86-64 | Use the backend lock as shown (the checked lane). |
-| Linux arm64 (glibc), including NVIDIA DGX Spark | For local development only, use the backend lock as shown. It is statically resolvable on arm64 but has not been run there; qualifying this platform needs its own separately named lock ([backend locks](../backend/locks/README.md)). |
+| Linux arm64 (glibc), including NVIDIA DGX Spark | For local development only, use the backend lock as shown. It is statically resolvable on arm64, and the backend tests passed there in CI on a GitHub-hosted runner, which is not a status change; qualifying this platform needs its own separately named lock ([backend locks](../backend/locks/README.md)). |
 | Windows x64, and Windows on Arm such as NVIDIA RTX Spark or Qualcomm Snapdragon PCs | Run the steps in WSL2 (Ubuntu). Native Windows cannot produce a working environment from this Linux-resolved lock: on Windows x64 it installs without `tzdata`, which Django and psycopg require on Windows, and on Windows on Arm the install fails because `autobahn`, `cryptography`, and `psycopg-binary` have no `win_arm64` wheels. On native Windows on Arm, Playwright also runs x64 browsers under emulation. |
-| macOS 15 or later on Apple Silicon | For local development only, use the backend lock as shown. It is statically resolvable but has not been run; qualifying this platform needs its own separately named lock. |
+| macOS 15 or later on Apple Silicon | For local development only, use the backend lock as shown. It is statically resolvable, and the backend tests passed in CI on a GitHub-hosted macOS 15 runner, which is not a status change; qualifying this platform needs its own separately named lock. |
 | macOS 14 or older, Intel Macs, Alpine (musl) | Not binary-installable with this lock. |
 
 CUDA is not required. The current dependency graph contains no CUDA or other accelerator-specific package, so the same steps apply with or without an NVIDIA GPU, including Arm machines without CUDA such as Snapdragon PCs.

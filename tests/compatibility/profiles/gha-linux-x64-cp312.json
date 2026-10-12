@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "kind": "profile",
+  "synthetic": false,
+  "id": "gha-linux-x64-cp312",
+  "title": "Linux x86-64 on a GitHub-hosted ubuntu-24.04 runner, backend and frontend",
+  "description": "The platform job of .github/workflows/compatibility.yml: the hashed backend lock, Django check, the Django tests and pytest with CPython 3.12.15 from uv, and the frontend checks with Node 24.21.0, on an ubuntu-24.04 x86-64 virtual machine as a non-root user, CPU only.",
+  "support": {
+    "status": "checked",
+    "lane": "Linux x86-64 glibc",
+    "reference": "docs/DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes"
+  },
+  "evidence_sources": [
+    {
+      "workflow": ".github/workflows/compatibility.yml",
+      "job": "platform"
+    }
+  ],
+  "runner": {
+    "runner_environment": {
+      "value": "github-hosted",
+      "provenance": "declared"
+    },
+    "runner_os": {
+      "value": "Linux",
+      "provenance": "declared"
+    },
+    "runner_arch": {
+      "value": "X64",
+      "provenance": "declared"
+    }
+  },
+  "required_stages": [
+    "detect",
+    "install",
+    "initialize",
+    "execute",
+    "correctness"
+  ],
+  "environment": {
+    "layers": [
+      {
+        "label": "Physical host, not visible to the runner",
+        "kind": {
+          "value": "host",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "the outermost host runs on hardware"
+        },
+        "os": {
+          "family": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "version": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "execution": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          }
+        }
+      },
+      {
+        "label": "GitHub-hosted runner virtual machine (runs-on: ubuntu-24.04)",
+        "kind": {
+          "value": "vm",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "GitHub does not document the hypervisor; each run records what the VM shows"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": "ubuntu",
+            "provenance": "declared"
+          },
+          "version": {
+            "value": "24.04",
+            "provenance": "declared"
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "changes with runner image updates; each run records it"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "x86_64",
+            "provenance": "declared"
+          },
+          "execution": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "whether the hypervisor emulates the CPU is not visible from inside the VM"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": "systemd",
+            "provenance": "declared"
+          },
+          "scope": {
+            "value": "system",
+            "provenance": "declared"
+          }
+        }
+      }
+    ]
+  },
+  "workload": {
+    "runtimes": {
+      "python": {
+        "implementation": {
+          "value": "cpython",
+          "provenance": "declared"
+        },
+        "version": {
+          "value": "3.12.15",
+          "provenance": "declared"
+        },
+        "cache_tag": {
+          "value": "cpython-312",
+          "provenance": "declared"
+        },
+        "soabi": {
+          "value": "cpython-312-x86_64-linux-gnu",
+          "provenance": "declared"
+        },
+        "platform": {
+          "value": "linux-x86_64",
+          "provenance": "declared"
+        },
+        "arch": {
+          "value": "x86_64",
+          "provenance": "declared"
+        },
+        "pointer_bits": {
+          "value": 64,
+          "provenance": "declared"
+        },
+        "free_threaded_build": {
+          "value": false,
+          "provenance": "declared"
+        },
+        "gil_enabled": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "libc": {
+          "value": "glibc 2.39",
+          "provenance": "declared"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "declared"
+        }
+      },
+      "node": {
+        "version": {
+          "value": "24.21.0",
+          "provenance": "declared"
+        },
+        "modules_abi": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "follows from the Node version; each run records it"
+        },
+        "napi_version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "follows from the Node version; each run records it"
+        },
+        "platform": {
+          "value": "linux",
+          "provenance": "declared"
+        },
+        "arch": {
+          "value": "x86_64",
+          "provenance": "declared"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "declared"
+        }
+      }
+    }
+  },
+  "compute": {
+    "backends": [
+      {
+        "id": "cpu",
+        "kind": "cpu",
+        "api": "cpu",
+        "available": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "GitHub does not fix the CPU model of hosted runners"
+        },
+        "version": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a CPU has no backend version"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not declared"
+        }
+      }
+    ],
+    "accelerator_inventory": {
+      "value": null,
+      "provenance": "not-applicable",
+      "reason": "this lane uses the CPU only"
+    }
+  },
+  "policy": {
+    "rules": {},
+    "exceptions": []
+  }
+}

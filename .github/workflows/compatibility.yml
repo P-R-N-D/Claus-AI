@@ -1,0 +1,551 @@
+name: Compatibility
+
+# Runs the backend and frontend checks on GitHub-hosted runners other than the
+# checked lane, and records each runner with the compatibility model in
+# docs/CI-MATRIX.md: Linux, Windows and macOS on x86-64 and Arm64, an x64
+# Python emulated on Windows on Arm, and UBI 9 and 10 in rootless Podman.
+# A green job is evidence about one runner image and commit. It changes no
+# support status in docs/DEPENDENCY-STRATEGY.md and is not a required check.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/compatibility.yml'
+      - '.nvmrc'
+      - 'backend/**'
+      - 'frontend/**'
+      - 'scripts/ci/**'
+      - 'tests/compatibility/**'
+      - 'docs/CI-MATRIX.md'
+      - 'docs/DEPENDENCY-STRATEGY.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer run for the same pull request cancels the older one; a manual dispatch gets its own group.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  platform:
+    # The same steps on every lane. The install step reports blocked, and passes, only when the
+    # reports explain the failure: a wheel the lock lacks for this platform, which the installer
+    # names, or a platform requirement the lock does not pin. Any other failure fails the job.
+    # The Windows lanes run the same steps in platform-windows below.
+    name: Platform / ${{ matrix.lane }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - lane: linux-x64
+            runner: ubuntu-24.04
+            python: cpython-3.12.15-linux-x86_64-gnu
+            node-arch: x64
+            frontend: true
+          - lane: linux-arm64
+            runner: ubuntu-24.04-arm
+            python: cpython-3.12.15-linux-aarch64-gnu
+            node-arch: arm64
+            frontend: true
+          - lane: macos-arm64
+            runner: macos-15
+            python: cpython-3.12.15-macos-aarch64-none
+            node-arch: arm64
+            frontend: true
+          - lane: macos-x64
+            runner: macos-15-intel
+            python: cpython-3.12.15-macos-x86_64-none
+            node-arch: x64
+            frontend: true
+    env: &platform_env
+      # uv ignores uv.toml and pyproject.toml files, which a pull request could add.
+      UV_NO_CONFIG: '1'
+      LOCK: backend/locks/cp312-linux-x86_64.txt
+      TEST_LOCK: backend/locks/cp312-linux-x86_64-test.txt
+      PROFILE: gha-${{ matrix.lane }}-cp312
+      PYTHON_REQUEST: ${{ matrix.python }}
+    # platform-windows runs these steps too (a YAML alias); they read GITHUB_JOB where the two jobs differ.
+    steps: &platform_steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.24'
+          enable-cache: false
+          # With a Python version given, setup-uv does not look for an interpreter in the checkout and run it.
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          architecture: ${{ matrix.node-arch }}
+          package-manager-cache: false
+      - name: Create a CPython 3.12.15 environment
+        run: |
+          # The Windows runners' administrator token is allowed only in platform-windows, under its condition and exception.
+          if [ "$RUNNER_OS" = Windows ] && [ "$GITHUB_JOB" != platform-windows ]; then echo "::error::Windows lanes run only in the platform-windows job"; exit 1; fi
+          mkdir -p "$RUNNER_TEMP/compatibility"
+          echo "RECORDS=$RUNNER_TEMP/compatibility" >> "$GITHUB_ENV"
+          uv venv --managed-python --python "$PYTHON_REQUEST"
+          if [ "$RUNNER_OS" = Windows ]; then venv_python="$GITHUB_WORKSPACE/.venv/Scripts/python.exe"; else venv_python="$GITHUB_WORKSPACE/.venv/bin/python"; fi
+          echo "VENV_PYTHON=$venv_python" >> "$GITHUB_ENV"
+          "$venv_python" -VV
+          "$venv_python" -c 'import platform, sqlite3, sysconfig; print(platform.machine(), sysconfig.get_platform(), "SQLite", sqlite3.sqlite_version)'
+          test "$("$venv_python" -c 'import platform; print(platform.python_version())')" = 3.12.15
+      - name: Check the lock's wheels for this interpreter
+        # packaging, from the lock, reads the interpreter's wheel tags; the probe reads PyPI's JSON API for each pinned version.
+        run: |
+          "$VENV_PYTHON" -I scripts/ci/probe_python_abi.py pin --lock "$LOCK" --name packaging --output "$RUNNER_TEMP/packaging.txt"
+          uv pip install --python "$VENV_PYTHON" --require-hashes --only-binary :all: --no-deps -r "$RUNNER_TEMP/packaging.txt"
+          "$VENV_PYTHON" -I scripts/ci/probe_python_abi.py wheels --lock "$LOCK" --output "$RECORDS/wheels.json" --summary "$GITHUB_STEP_SUMMARY"
+      - name: Install the hashed backend lock
+        id: install
+        run: |
+          sync=0
+          uv pip sync --python "$VENV_PYTHON" --require-hashes --only-binary :all: "$LOCK" 2>&1 | tee "$RECORDS/install.log" || sync=$?
+          check=skip
+          if [ "$sync" = 0 ]; then
+            check=0
+            uv pip check --python "$VENV_PYTHON" 2>&1 | tee -a "$RECORDS/install.log" || check=$?
+            "$VENV_PYTHON" -I scripts/ci/probe_python_abi.py requirements --lock "$LOCK" --output "$RECORDS/requirements.json" --summary "$GITHUB_STEP_SUMMARY"
+          fi
+          # Exits 1 when the stage failed; blocked and passed set the status and exit 0.
+          "$VENV_PYTHON" -I scripts/ci/probe_python_abi.py install-stage --sync "$sync" --check "$check" --log "$RECORDS/install.log" \
+            --wheels "$RECORDS/wheels.json" --requirements "$RECORDS/requirements.json" --github-output "$GITHUB_OUTPUT"
+      - name: Django check and migration drift
+        id: initialize
+        if: ${{ steps.install.outputs.status == 'passed' }}
+        working-directory: backend
+        run: |
+          "$VENV_PYTHON" manage.py check
+          "$VENV_PYTHON" manage.py makemigrations --check --dry-run
+      - name: Django tests
+        id: execute
+        if: ${{ steps.initialize.outcome == 'success' }}
+        working-directory: backend
+        run: |
+          "$VENV_PYTHON" manage.py test core agent 2>&1 | tee "$RECORDS/django-tests.log"
+          # Django exits 0 when no test is collected; require a nonzero count.
+          grep -Eq '^Ran [1-9][0-9]* tests? in ' "$RECORDS/django-tests.log" || { echo '::error::Django ran no tests'; exit 1; }
+      - name: pytest from the hashed test lock
+        id: correctness
+        if: ${{ steps.execute.outcome == 'success' }}
+        run: |
+          uv pip sync --python "$VENV_PYTHON" --require-hashes --only-binary :all: "$TEST_LOCK"
+          uv pip check --python "$VENV_PYTHON"
+          cd backend
+          "$VENV_PYTHON" ../scripts/ci/check_test_parity.py
+          # pytest exits 5 when it collects no test, so an empty run fails.
+          "$VENV_PYTHON" -m pytest
+      - name: Install npm 11.21.0 and the locked frontend dependencies
+        id: frontend-install
+        if: ${{ !cancelled() && matrix.frontend }}
+        working-directory: frontend
+        run: |
+          npm install --global npm@11.21.0
+          node -p 'process.version + " " + process.arch'
+          test "$(npm --version)" = 11.21.0
+          npm ci
+      - name: Frontend lint, type check, build, and unit tests
+        id: frontend
+        if: ${{ !cancelled() && matrix.frontend }}
+        working-directory: frontend
+        run: |
+          npm run lint
+          npx next typegen
+          npx tsc --noEmit
+          npm run build
+          npm run test:unit
+      - name: Record this runner's environment
+        # The collector records the stages from the steps above: an outcome of success is passed, failure is
+        # failed, and a step skipped because an earlier one did not pass is blocked. Its docstring lists every
+        # source it reads. Never escalates privileges.
+        id: collect
+        if: ${{ !cancelled() }}
+        env:
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          INSTALL_STATUS: ${{ steps.install.outputs.status }}
+          INSTALL_REASON: ${{ steps.install.outputs.reason }}
+          INITIALIZE: ${{ steps.initialize.outcome }}
+          EXECUTE: ${{ steps.execute.outcome }}
+          CORRECTNESS: ${{ steps.correctness.outcome }}
+          FRONTEND_ENABLED: ${{ matrix.frontend }}
+          FRONTEND_INSTALL: ${{ steps.frontend-install.outcome }}
+          FRONTEND: ${{ steps.frontend.outcome }}
+        run: |
+          args=()
+          job="compatibility.yml#$GITHUB_JOB"
+          ran() {  # stage, status, log reference, reason
+            args+=(--stage "$1=$2" --stage-evidence "$1=log:$3" --stage-escalation "$1=none")
+            if [ -n "$4" ]; then args+=(--stage-reason "$1=$4"); fi
+          }
+          step() {  # stage, outcome, step name, the stage it needs
+            case "$2" in
+              success) ran "$1" passed "$job/$3" "" ;;
+              failure) ran "$1" failed "$job/$3" "the step failed; see its log" ;;
+              skipped) args+=(--stage "$1=blocked" --stage-reason "$1=$4 did not pass") ;;
+              *) args+=(--stage "$1=not-run" --stage-reason "$1=the step did not run") ;;
+            esac
+          }
+          case "$INSTALL_STATUS" in
+            passed|failed) ran install "$INSTALL_STATUS" "$job/Install the hashed backend lock" "$INSTALL_REASON" ;;
+            blocked) args+=(--stage install=blocked --stage-reason "install=$INSTALL_REASON" --stage-evidence "install=log:$job/Install the hashed backend lock") ;;
+            *)
+              if [ "$INSTALL_OUTCOME" = failure ]; then
+                ran install failed "$job/Install the hashed backend lock" "the install step failed before it set a status"
+              else
+                args+=(--stage install=blocked --stage-reason "install=the install step did not run because an earlier step failed")
+              fi ;;
+          esac
+          step initialize "$INITIALIZE" "Django check and migration drift" install
+          step execute "$EXECUTE" "Django tests" initialize
+          step correctness "$CORRECTNESS" "pytest from the hashed test lock" execute
+          security="no security check runs on this lane"
+          if [ "$GITHUB_JOB" = platform-windows ] && [ "$RUNNER_OS" = Windows ]; then
+            # The temporary Windows administrator-token exception (docs/SECURITY-ARCHITECTURE.md): the record itself
+            # says that the policy is skipped and security is not verified, so it never reads as a non-administrator result.
+            security="not verified: no security check runs on this lane, and the privilege policy is skipped under the temporary Windows administrator-token exception"
+            printf '%s\n' '{"policy": "skipped", "security": "not-verified", "compatibility": "incomplete", "non_administrator_run": "not-run", "reason": "GitHub-hosted Windows runners give the job user an elevated administrator token only", "exception": "docs/SECURITY-ARCHITECTURE.md#temporary-exception-windows-administrator-token"}' > "$RECORDS/policy-exception.json"
+            args+=(--extension "x-policy-exception=$RECORDS/policy-exception.json")
+          fi
+          args+=(--stage security=not-run --stage-reason "security=$security")
+          args+=(--stage performance=not-run --stage-reason "performance=not measured on shared runners")
+          for name in wheels requirements; do
+            if [ -f "$RECORDS/$name.json" ]; then args+=(--extension "x-$name=$RECORDS/$name.json"); fi
+          done
+          # The stages describe the backend; the frontend steps' outcomes go in x-frontend, by the same mapping.
+          if [ "$FRONTEND_ENABLED" = true ]; then frontend_reason="the step did not run"; else frontend_reason="this lane runs no frontend step"; fi
+          frontend() {  # outcome, step name
+            case "$1" in
+              success) printf '{"status": "passed", "evidence": ["log:%s/%s"]}' "$job" "$2" ;;
+              failure) printf '{"status": "failed", "evidence": ["log:%s/%s"]}' "$job" "$2" ;;
+              *) printf '{"status": "not-run", "reason": "%s"}' "$frontend_reason" ;;
+            esac
+          }
+          printf '{"install": %s, "checks": %s}\n' "$(frontend "$FRONTEND_INSTALL" "Install npm 11.21.0 and the locked frontend dependencies")" \
+            "$(frontend "$FRONTEND" "Frontend lint, type check, build, and unit tests")" > "$RECORDS/frontend.json"
+          args+=(--extension "x-frontend=$RECORDS/frontend.json")
+          "$VENV_PYTHON" -I scripts/ci/collect_environment.py --profile-id "$PROFILE" --output "$RECORDS/$PROFILE.result.json" \
+            --summary "$GITHUB_STEP_SUMMARY" "${args[@]}"
+      - name: Check the record and the committed profiles
+        if: ${{ !cancelled() && steps.collect.outcome != 'skipped' }}
+        run: |
+          policy=()
+          if [ "$GITHUB_JOB" = platform-windows ] && [ "$RUNNER_OS" = Windows ]; then
+            # Only here, under the temporary Windows administrator-token exception (docs/SECURITY-ARCHITECTURE.md): the
+            # job's user is an administrator, so the record cannot pass app-non-root. The validator reports policy-skipped.
+            policy=(--no-policy)
+            echo "::warning title=Privilege policy skipped::Windows administrator token: policy skipped, security not verified, compatibility incomplete. This is not a non-administrator result."
+            printf '%s\n' "### Windows administrator-token exception" "" \
+              "- Privilege policy: skipped (\`--no-policy\`); the validator reports \`policy-skipped\`." \
+              "- Security: not verified. Compatibility: incomplete." \
+              "- Not a non-administrator result. See docs/SECURITY-ARCHITECTURE.md, \"Temporary exception: Windows administrator token\"." "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          "$VENV_PYTHON" -I scripts/ci/validate_compatibility.py --require-real --dependency-strategy docs/DEPENDENCY-STRATEGY.md "${policy[@]}" \
+            --profile "tests/compatibility/profiles/$PROFILE.json" --summary "$GITHUB_STEP_SUMMARY" \
+            "$RECORDS/$PROFILE.result.json" tests/compatibility/profiles/*.json
+      - name: Test the probes and the validator
+        # The tests describe made-up machines; they are written for Linux and run on the Linux lanes.
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.collect.outcome != 'skipped' }}
+        run: |
+          "$VENV_PYTHON" -I scripts/ci/tests/test_compatibility_schema.py
+          "$VENV_PYTHON" -I scripts/ci/tests/test_environment_probe.py
+          "$VENV_PYTHON" -I scripts/ci/tests/test_python_abi_probe.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: compatibility-${{ matrix.lane }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compatibility/
+          if-no-files-found: warn
+          # The record and the reports are the lane's only machine-readable evidence: keep them 90 days, GitHub's default for logs.
+          retention-days: 90
+
+  platform-windows:
+    # The platform steps on GitHub-hosted Windows runners, whose job user holds an elevated administrator token
+    # only. They run under the temporary exception in docs/SECURITY-ARCHITECTURE.md ("Temporary exception: Windows
+    # administrator token"): for a pull request from a branch of this repository, and for a manual run on main,
+    # which needs write access to start. A fork's pull request skips this job: an intentional not-run, never a pass.
+    # A job's if is evaluated before its matrix is expanded, so it reads only the github context.
+    if: >-
+      ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    name: Platform / ${{ matrix.lane }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - lane: windows-x64
+            runner: windows-2025
+            python: cpython-3.12.15-windows-x86_64-none
+            node-arch: x64
+            frontend: true
+          - lane: windows-arm64
+            runner: windows-11-arm
+            python: cpython-3.12.15-windows-aarch64-none
+            node-arch: arm64
+            frontend: true
+          - lane: windows-arm64-x64
+            # An x64 Python and Node on Windows on Arm, which Windows runs through its x64 emulation.
+            runner: windows-11-arm
+            python: cpython-3.12.15-windows-x86_64-none
+            node-arch: x64
+            frontend: false
+    env: *platform_env
+    steps: *platform_steps
+
+  ubi:
+    # UBI 9 and 10 in rootless Podman on the Ubuntu runners: the container runs as the runner's own user
+    # (--userns=keep-id), with every capability dropped and no-new-privileges, and is neither privileged
+    # nor given a device. Without rootless Podman the job records the lane as blocked and fails; it never
+    # falls back to Docker or to a rootful engine. A UBI container pass is not a RHEL host pass: the kernel,
+    # SELinux mode and systemd are the Ubuntu VM's.
+    name: UBI / ${{ matrix.lane }} / rootless Podman
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          # Each image is pulled by its multi-architecture index digest, which pins every per-architecture manifest;
+          # the tag only names the release. Selected 2026-10-12; see docs/DEPENDENCY-STRATEGY.md.
+          - lane: ubi9-x64
+            runner: ubuntu-24.04
+            image: registry.access.redhat.com/ubi9/ubi:9.8-1791765424@sha256:866c52a4f649b2e027e0eafeede5f37dd13ac58ab63bbe2950d7928334312a4c
+            arch: amd64
+            python: cpython-3.12.15-linux-x86_64-gnu
+          - lane: ubi9-arm64
+            runner: ubuntu-24.04-arm
+            image: registry.access.redhat.com/ubi9/ubi:9.8-1791765424@sha256:866c52a4f649b2e027e0eafeede5f37dd13ac58ab63bbe2950d7928334312a4c
+            arch: arm64
+            python: cpython-3.12.15-linux-aarch64-gnu
+          - lane: ubi10-x64
+            runner: ubuntu-24.04
+            image: registry.access.redhat.com/ubi10/ubi:10.2-1791444044@sha256:27e14f4987d7abe56664d7e1b1dddcd0226d4ca593da5726f0f65697a17d0fee
+            arch: amd64
+            python: cpython-3.12.15-linux-x86_64-gnu
+          - lane: ubi10-arm64
+            runner: ubuntu-24.04-arm
+            image: registry.access.redhat.com/ubi10/ubi:10.2-1791444044@sha256:27e14f4987d7abe56664d7e1b1dddcd0226d4ca593da5726f0f65697a17d0fee
+            arch: arm64
+            python: cpython-3.12.15-linux-aarch64-gnu
+    env:
+      UV_NO_CONFIG: '1'
+      LOCK: backend/locks/cp312-linux-x86_64.txt
+      TEST_LOCK: backend/locks/cp312-linux-x86_64-test.txt
+      PROFILE: gha-${{ matrix.lane }}-cp312
+      PYTHON_REQUEST: ${{ matrix.python }}
+      IMAGE: ${{ matrix.image }}
+      IMAGE_ARCH: ${{ matrix.arch }}
+      CONTAINER: claus-ubi
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.24'
+          enable-cache: false
+          python-version: ${{ matrix.python }}
+      - name: Create a host CPython 3.12.15 for the collector's engine step and the validator
+        # Kept outside the checkout, apart from the container's environment and from the runner's system Python.
+        run: |
+          mkdir -p "$RUNNER_TEMP/compatibility"
+          echo "RECORDS=$RUNNER_TEMP/compatibility" >> "$GITHUB_ENV"
+          uv venv --managed-python --python "$PYTHON_REQUEST" "$RUNNER_TEMP/host-venv"
+          echo "HOST_PYTHON=$RUNNER_TEMP/host-venv/bin/python" >> "$GITHUB_ENV"
+          echo "UV_DIR=$(dirname "$(command -v uv)")" >> "$GITHUB_ENV"
+      - name: Check that Podman runs rootless
+        id: podman
+        run: |
+          if ! command -v podman > /dev/null; then
+            echo 'reason=podman is not installed on this runner' >> "$GITHUB_OUTPUT"
+            echo '::error::podman is not installed on this runner'
+            exit 1
+          fi
+          podman --version
+          rootless=$(podman info --format '{{.Host.Security.Rootless}}') || { echo 'reason=podman info failed for the runner user' >> "$GITHUB_OUTPUT"; exit 1; }
+          if [ "$rootless" != true ]; then
+            echo 'reason=podman does not run rootless for the runner user' >> "$GITHUB_OUTPUT"
+            echo '::error::podman does not run rootless for the runner user'
+            exit 1
+          fi
+          podman info --format '{{.Host.OCIRuntime.Name}} {{.Host.OCIRuntime.Version}}; cgroups {{.Host.CgroupsVersion}}; network {{.Host.NetworkBackend}}'
+      - name: Record that the lane is blocked without rootless Podman
+        # The host's record, with no container layer, shows the runner's user and why the container stages did not run.
+        # It is not checked against the lane's profile, which declares the container; the job has already failed.
+        if: ${{ failure() && steps.podman.outcome == 'failure' }}
+        env:
+          REASON: ${{ steps.podman.outputs.reason }}
+        run: |
+          args=(--stage install=blocked --stage-reason "install=rootless Podman is unavailable: ${REASON:-unknown}")
+          for stage in initialize execute correctness; do args+=(--stage "$stage=blocked" --stage-reason "$stage=install did not pass"); done
+          args+=(--stage security=not-run --stage-reason "security=no security check runs on this lane")
+          args+=(--stage performance=not-run --stage-reason "performance=not measured on shared runners")
+          "$HOST_PYTHON" -I scripts/ci/collect_environment.py --no-node --profile-id "$PROFILE" --output "$RECORDS/$PROFILE.blocked.json" \
+            --summary "$GITHUB_STEP_SUMMARY" "${args[@]}"
+      - name: Pull the pinned image and check its architecture
+        id: pull
+        run: |
+          podman pull --quiet "$IMAGE"
+          arch=$(podman image inspect --format '{{.Architecture}}' "$IMAGE")
+          echo "image architecture: $arch"
+          test "$arch" = "$IMAGE_ARCH"
+          podman image inspect --format 'created {{.Created}}; labels version {{index .Labels "version"}} release {{index .Labels "release"}}' "$IMAGE"
+      - name: Start the container as the runner's user
+        id: start
+        run: |
+          event=$RUNNER_TEMP/event.json
+          cp "$GITHUB_EVENT_PATH" "$event"
+          podman run --detach --name "$CONTAINER" --userns=keep-id --user "$(id -u):$(id -g)" \
+            --cap-drop=all --security-opt=no-new-privileges \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --volume "$RECORDS:/records" --volume "$UV_DIR:/opt/uv:ro" --volume "$event:/github/event.json:ro" \
+            --env HOME=/tmp --env UV_NO_CONFIG=1 --env UV_CACHE_DIR=/tmp/uv-cache --env UV_PYTHON_INSTALL_DIR=/tmp/uv-python \
+            --env PATH=/opt/uv:/usr/local/bin:/usr/bin --env GITHUB_EVENT_PATH=/github/event.json \
+            --env GITHUB_ACTIONS --env GITHUB_EVENT_NAME --env GITHUB_SHA --env GITHUB_REF --env GITHUB_REPOSITORY \
+            --env GITHUB_SERVER_URL --env GITHUB_RUN_ID --env GITHUB_RUN_ATTEMPT --env GITHUB_WORKFLOW_REF --env GITHUB_JOB \
+            --env RUNNER_ENVIRONMENT --env RUNNER_OS --env RUNNER_ARCH --env ImageOS --env ImageVersion \
+            "$IMAGE" sleep infinity
+          podman exec "$CONTAINER" id
+      - name: Record the image's system Python, which the lane does not use
+        # UBI 9's system SQLite 3.34.1 is older than the 3.37.0 Django 6.1 needs; the lane uses uv's CPython 3.12.15.
+        run: |
+          code='import json, platform, sqlite3, sys; print(json.dumps({"used": False, "executable": sys.executable, "version": platform.python_version(), "sqlite": sqlite3.sqlite_version}))'
+          if podman exec "$CONTAINER" test -x /usr/bin/python3; then
+            podman exec "$CONTAINER" /usr/bin/python3 -I -c "$code" > "$RECORDS/system-python.json"
+          else
+            echo '{"used": false, "executable": null}' > "$RECORDS/system-python.json"
+          fi
+          cat "$RECORDS/system-python.json"
+      - name: Create a CPython 3.12.15 environment in the container
+        run: |
+          podman exec "$CONTAINER" uv venv --managed-python --python "$PYTHON_REQUEST"
+          podman exec "$CONTAINER" /workspace/.venv/bin/python -VV
+          podman exec "$CONTAINER" /workspace/.venv/bin/python -c 'import platform, sqlite3, os; print(platform.machine(), os.confstr("CS_GNU_LIBC_VERSION"), "SQLite", sqlite3.sqlite_version)'
+          test "$(podman exec "$CONTAINER" /workspace/.venv/bin/python -c 'import platform; print(platform.python_version())')" = 3.12.15
+      - name: Check the lock's wheels for this interpreter
+        run: |
+          podman exec "$CONTAINER" /workspace/.venv/bin/python -I scripts/ci/probe_python_abi.py pin --lock "$LOCK" --name packaging --output /tmp/packaging.txt
+          podman exec "$CONTAINER" uv pip install --python /workspace/.venv/bin/python --require-hashes --only-binary :all: --no-deps -r /tmp/packaging.txt
+          podman exec "$CONTAINER" /workspace/.venv/bin/python -I scripts/ci/probe_python_abi.py wheels --lock "$LOCK" --output /records/wheels.json --summary /records/summary.md
+      - name: Install the hashed backend lock
+        id: install
+        run: |
+          sync=0
+          podman exec "$CONTAINER" uv pip sync --python /workspace/.venv/bin/python --require-hashes --only-binary :all: "$LOCK" 2>&1 | tee "$RECORDS/install.log" || sync=$?
+          check=skip
+          if [ "$sync" = 0 ]; then
+            check=0
+            podman exec "$CONTAINER" uv pip check --python /workspace/.venv/bin/python 2>&1 | tee -a "$RECORDS/install.log" || check=$?
+            podman exec "$CONTAINER" /workspace/.venv/bin/python -I scripts/ci/probe_python_abi.py requirements --lock "$LOCK" --output /records/requirements.json --summary /records/summary.md
+          fi
+          podman exec "$CONTAINER" /workspace/.venv/bin/python -I scripts/ci/probe_python_abi.py install-stage --sync "$sync" --check "$check" --log /records/install.log \
+            --wheels /records/wheels.json --requirements /records/requirements.json --github-output /records/install-stage.txt || status=$?
+          if [ -f "$RECORDS/install-stage.txt" ]; then cat "$RECORDS/install-stage.txt" >> "$GITHUB_OUTPUT"; fi
+          exit "${status:-0}"
+      - name: Django check and migration drift
+        id: initialize
+        if: ${{ steps.install.outputs.status == 'passed' }}
+        run: |
+          podman exec --workdir /workspace/backend "$CONTAINER" /workspace/.venv/bin/python manage.py check
+          podman exec --workdir /workspace/backend "$CONTAINER" /workspace/.venv/bin/python manage.py makemigrations --check --dry-run
+      - name: Django tests
+        id: execute
+        if: ${{ steps.initialize.outcome == 'success' }}
+        run: |
+          podman exec --workdir /workspace/backend "$CONTAINER" /workspace/.venv/bin/python manage.py test core agent 2>&1 | tee "$RECORDS/django-tests.log"
+          grep -Eq '^Ran [1-9][0-9]* tests? in ' "$RECORDS/django-tests.log" || { echo '::error::Django ran no tests'; exit 1; }
+      - name: pytest from the hashed test lock
+        id: correctness
+        if: ${{ steps.execute.outcome == 'success' }}
+        run: |
+          podman exec "$CONTAINER" uv pip sync --python /workspace/.venv/bin/python --require-hashes --only-binary :all: "$TEST_LOCK"
+          podman exec "$CONTAINER" uv pip check --python /workspace/.venv/bin/python
+          podman exec --workdir /workspace/backend "$CONTAINER" /workspace/.venv/bin/python ../scripts/ci/check_test_parity.py
+          podman exec --workdir /workspace/backend "$CONTAINER" /workspace/.venv/bin/python -m pytest
+      - name: Record the container's environment, inside it
+        id: collect
+        if: ${{ !cancelled() && steps.start.outcome == 'success' }}
+        env:
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          INSTALL_STATUS: ${{ steps.install.outputs.status }}
+          INSTALL_REASON: ${{ steps.install.outputs.reason }}
+          INITIALIZE: ${{ steps.initialize.outcome }}
+          EXECUTE: ${{ steps.execute.outcome }}
+          CORRECTNESS: ${{ steps.correctness.outcome }}
+        run: |
+          args=()
+          ran() {
+            args+=(--stage "$1=$2" --stage-evidence "$1=log:compatibility.yml#ubi/$3" --stage-escalation "$1=none")
+            if [ -n "$4" ]; then args+=(--stage-reason "$1=$4"); fi
+          }
+          step() {
+            case "$2" in
+              success) ran "$1" passed "$3" "" ;;
+              failure) ran "$1" failed "$3" "the step failed; see its log" ;;
+              skipped) args+=(--stage "$1=blocked" --stage-reason "$1=$4 did not pass") ;;
+              *) args+=(--stage "$1=not-run" --stage-reason "$1=the step did not run") ;;
+            esac
+          }
+          case "$INSTALL_STATUS" in
+            passed|failed) ran install "$INSTALL_STATUS" "Install the hashed backend lock" "$INSTALL_REASON" ;;
+            blocked) args+=(--stage install=blocked --stage-reason "install=$INSTALL_REASON" --stage-evidence "install=log:compatibility.yml#ubi/Install the hashed backend lock") ;;
+            *)
+              if [ "$INSTALL_OUTCOME" = failure ]; then
+                ran install failed "Install the hashed backend lock" "the install step failed before it set a status"
+              else
+                args+=(--stage install=blocked --stage-reason "install=the install step did not run because an earlier step failed")
+              fi ;;
+          esac
+          step initialize "$INITIALIZE" "Django check and migration drift" install
+          step execute "$EXECUTE" "Django tests" initialize
+          step correctness "$CORRECTNESS" "pytest from the hashed test lock" execute
+          args+=(--stage security=not-run --stage-reason "security=no security check runs on this lane")
+          args+=(--stage performance=not-run --stage-reason "performance=not measured on shared runners")
+          for name in wheels requirements system-python; do
+            if [ -f "$RECORDS/$name.json" ]; then args+=(--extension "x-$name=/records/$name.json"); fi
+          done
+          podman exec "$CONTAINER" /workspace/.venv/bin/python -I scripts/ci/collect_environment.py --no-node --profile-id "$PROFILE" \
+            --output "/records/$PROFILE.result.json" --summary /records/summary.md "${args[@]}"
+      - name: Add the engine's view of the container to the record
+        # podman info and podman container inspect, run on the host as the runner's user, show whether the engine
+        # runs rootless, whether the container is privileged, and which devices it was given; inside the container
+        # those are not visible.
+        id: engine
+        if: ${{ !cancelled() && steps.collect.outcome != 'skipped' }}
+        run: |
+          "$HOST_PYTHON" -I scripts/ci/collect_environment.py --amend-container "$RECORDS/$PROFILE.result.json" --podman-container "$CONTAINER"
+      - name: Check the record and the committed profiles
+        if: ${{ !cancelled() && steps.collect.outcome != 'skipped' }}
+        run: |
+          "$HOST_PYTHON" -I scripts/ci/validate_compatibility.py --require-real --dependency-strategy docs/DEPENDENCY-STRATEGY.md \
+            --profile "tests/compatibility/profiles/$PROFILE.json" --summary "$GITHUB_STEP_SUMMARY" \
+            "$RECORDS/$PROFILE.result.json" tests/compatibility/profiles/*.json
+      - name: Show the summaries written in the container
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f "$RECORDS/summary.md" ]; then cat "$RECORDS/summary.md" >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Remove the container
+        if: ${{ always() && steps.start.outcome != 'skipped' }}
+        run: podman rm --force --ignore --time 5 "$CONTAINER"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: compatibility-${{ matrix.lane }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/compatibility/
+          if-no-files-found: warn
+          retention-days: 90

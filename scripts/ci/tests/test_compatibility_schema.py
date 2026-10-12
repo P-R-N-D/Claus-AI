@@ -551,9 +551,10 @@ class ProvenanceTests(Case):
             for index in range(40):
                 chain = {"~" * width + chr(ord("a") + index % 26): chain, "~" * 200: "\u0001"}
             with self.subTest(width=width):
-                bounded = check(changed(result, lambda d: d["extensions"].update({"x-a": chain})))
-                self.assertTrue(bounded.items)
-                self.assertLessEqual(max(len(path) for _, _, path, _ in bounded.items), validator.PATH_KEYS * (validator.KEY_LIMIT + 1))
+                bounded = [path.split("/")[1:] for _, _, path, _ in check(changed(result, lambda d: d["extensions"].update({"x-a": chain}))).items]
+                self.assertTrue(bounded)
+                self.assertLessEqual(max(map(len, bounded)), validator.PATH_KEYS)
+                self.assertLessEqual(max(len(key) for keys in bounded for key in keys), validator.KEY_LIMIT)
         # A value's path is built when the value is reached.
         built = []
         original = validator.pointer

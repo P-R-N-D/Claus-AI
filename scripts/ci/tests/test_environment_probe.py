@@ -1013,6 +1013,9 @@ class RunEvidenceTests(Case):
                 ("ref: refs/heads/./main\n", {"refs/heads/main": sha + "\n"}, None),
                 ("ref: refs//main\n", {"refs/main": sha + "\n"}, None),
                 ("ref: refs/heads/a..b\n", {"refs/heads/a..b": sha + "\n"}, None),
+                # Git allows "{", "@" and ".lock" elsewhere in a ref, so these are followed.
+                ("ref: refs/heads/a{b}@c\n", {"refs/heads/a{b}@c": sha + "\n"}, sha),
+                ("ref: refs/heads/x.locked/y\n", {"packed-refs": f"{sha} refs/heads/x.locked/y\n"}, sha),
                 # packed-refs lines end at "\n" only, so U+2028 inside a ref name does not end this line at "refs/heads/b".
                 ("ref: refs/heads/b\n", {"packed-refs": f"{sha} refs/heads/b\u2028c\n"}, None),
                 ("ref: refs/heads/main\n", {"packed-refs": f"{sha} refs/heads/main\r\n"}, sha),
@@ -1038,7 +1041,27 @@ class RunEvidenceTests(Case):
                 (machine.git / "packed-refs").write_bytes(sha.encode() + b" " + listed + b"\n")
                 with self.subTest(head=ref):
                     self.assertEqual(machine.probe().checkout_sha(), {"value": None, "provenance": "unknown", "reason": ".git/HEAD has an unexpected form"})
-            # A loose ref whose name the file system encoding cannot write is looked up in packed-refs.
+            # packed-refs is read in the same way: a line that is not UTF-8 is not read as U+FFFD, the name of the
+            # checked-out branch in the first case, and does not stop the lookup in the lines after it.
+            other = b"f" * 40
+            for ref, packed in ((b"refs/heads/x/a\xef\xbf\xbd", other + b" refs/heads/x/a\x80\n" + sha.encode() + b" refs/heads/x/a\xef\xbf\xbd\n"),
+                                (b"refs/heads/main", other + b" refs/heads/x/\xff\n" + sha.encode() + b" refs/heads/main\n")):
+                (machine.git / "HEAD").write_bytes(b"ref: " + ref + b"\n")
+                (machine.git / "packed-refs").write_bytes(packed)
+                with self.subTest(head=ref):
+                    self.assertEqual(machine.probe().checkout_sha(), {"value": sha, "provenance": "observed", "evidence": ["git:.git/packed-refs"]})
+            # Under a file system encoding other than UTF-8, the path of a ref that is not ASCII is not git's name for
+            # it, so that ref is not followed, not even when packed-refs lists it.
+            (machine.git / "packed-refs").write_text(f"{sha} refs/heads/feat/caf\u00e9\n{sha} refs/heads/main\n", encoding="utf-8")
+            for branch, encoding, expected in (("feat/caf\u00e9", "utf-8", sha), ("feat/caf\u00e9", "iso8859-1", None),
+                                               ("feat/caf\u00e9", "ascii", None), ("main", "iso8859-1", sha)):
+                (machine.git / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+                with self.subTest(branch=branch, encoding=encoding), mock.patch.object(collector.sys, "getfilesystemencoding", return_value=encoding):
+                    result = machine.probe().checkout_sha()
+                self.assertEqual(value(result), expected)
+                if expected is None:
+                    self.assertEqual(result["reason"], "a ref that is not ASCII is followed only when the file system encoding is UTF-8")
+            # A loose ref that cannot be read, here because of an encoding error, is looked up in packed-refs.
             read_regular = collector.read_regular
 
             def unencodable(path, limit):

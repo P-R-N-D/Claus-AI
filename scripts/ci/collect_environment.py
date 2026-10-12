@@ -146,7 +146,8 @@ CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\
 # CONTROL refuses in any value, taken from CONTROL itself.
 REF_CHAR = "[^ ~^:?*\\[\\\\" + CONTROL.pattern[1:]
 # GITHUB_REF, and the ref .git/HEAD names: actions/checkout checks a branch out by its name, so a run from a branch
-# named with any of these characters records its ref and commit. Within the schema's 200 characters.
+# named with any of these characters records its ref, and its commit unless checkout_sha does not follow that name.
+# Within the schema's 200 characters.
 GIT_REF = rf"(?=.{{1,200}}\Z)refs/{REF_CHAR}+"
 # GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>, and the validator links a run to its profile by it, so it
 # is recorded for any of those refs. The whole value stays within the schema's 200 characters.
@@ -1084,6 +1085,10 @@ class Probe:
         # no part that is empty, starts with ".", or ends with ".lock" or "." (which Windows drops from a file name).
         if ref is None or not re.fullmatch(GIT_REF, ref) or ".." in ref or "@{" in ref or any(not part or part.startswith(".") or part.endswith((".lock", ".")) for part in ref.split("/")):
             return unknown(".git/HEAD has an unexpected form")
+        # Git names a ref's file in UTF-8, and the path is written in the file system encoding: under another encoding
+        # a name that is not ASCII could open another branch's file, and packed-refs alone could hold an older commit.
+        if not ref.isascii() and sys.getfilesystemencoding() != "utf-8":
+            return unknown("a ref that is not ASCII is followed only when the file system encoding is UTF-8")
         loose, _ = self.read_git(ref)
         if loose is not None and SHA.fullmatch(loose.strip()):
             # An evidence reference is printable ASCII, so a loose ref with another name is cited by .git/HEAD, which

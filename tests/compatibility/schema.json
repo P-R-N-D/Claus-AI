@@ -1,0 +1,1617 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/P-R-N-D/Claus-AI/blob/main/tests/compatibility/schema.json",
+  "title": "Claus compatibility profile or result",
+  "$comment": "Uses only the keywords that scripts/ci/validate_compatibility.py implements; it rejects a schema with any other keyword. Rules across fields are in the validator, not here. See docs/CI-MATRIX.md.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "kind"
+  ],
+  "properties": {
+    "kind": {
+      "enum": [
+        "profile",
+        "result"
+      ]
+    }
+  },
+  "if": {
+    "properties": {
+      "kind": {
+        "const": "profile"
+      }
+    }
+  },
+  "then": {
+    "$ref": "#/$defs/profile"
+  },
+  "else": {
+    "$ref": "#/$defs/result"
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._+-]{0,63}$"
+    },
+    "provenance": {
+      "description": "observed: read on the machine by the collector, with evidence; inferred: derived from named evidence; declared: stated by a profile, workflow or tool, not measured; unknown and not-applicable: no value, with a reason.",
+      "enum": [
+        "observed",
+        "inferred",
+        "declared",
+        "unknown",
+        "not-applicable"
+      ]
+    },
+    "evidence_ref": {
+      "description": "Where a value came from, as <kind>:<location>. synthetic: marks fixtures that were never measured.",
+      "type": "string",
+      "pattern": "^(file|env|python|cmd|event|git|tool|doc|profile|workflow|log|artifact|synthetic):[!-~][ -~]{0,299}$"
+    },
+    "evidence_list": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidence_ref"
+      },
+      "maxItems": 20
+    },
+    "extensions": {
+      "description": "Free-form data under x- names. The validator checks its strings for control characters and secret-shaped values and nothing else; it never treats an extension as evidence of support.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^x-[a-z0-9][a-z0-9-]{0,62}$"
+      },
+      "additionalProperties": {}
+    },
+    "fact_string": {
+      "description": "A string fact.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_slug": {
+      "description": "A lower-case identifier fact; values outside the documented list are accepted with a warning.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z0-9][a-z0-9._+-]{0,63}$"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_integer": {
+      "description": "A non-negative integer fact.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_boolean": {
+      "description": "A boolean fact.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_sha": {
+      "description": "A Git commit SHA-1 fact.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_slug_list": {
+      "description": "A list of identifiers.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/slug"
+          },
+          "maxItems": 64
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_uid_map": {
+      "description": "Lines of /proc/self/uid_map as [inside, outside, count].",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 340,
+          "items": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_layer_kind": {
+      "description": "What kind of execution layer this is.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "enum": [
+            "host",
+            "vm",
+            "wsl2",
+            "container",
+            null
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_execution": {
+      "description": "native: no translation was found between the process and the CPU it runs on (no user-mode emulation, and an architecture the layers around it run natively); emulated: some layer translates the instructions. A system that its hypervisor emulates whole looks native from inside; see docs/CI-MATRIX.md \"CPU execution\".",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "enum": [
+            "native",
+            "emulated",
+            null
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_engine_mode": {
+      "description": "Whether the container engine runs without root on its host.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "enum": [
+            "rootless",
+            "rootful",
+            null
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_seccomp": {
+      "description": "Seccomp mode of the process.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "enum": [
+            "disabled",
+            "strict",
+            "filter",
+            null
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_selinux_mode": {
+      "description": "SELinux mode.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "enum": [
+            "enforcing",
+            "permissive",
+            "disabled",
+            null
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_cgroup_version": {
+      "description": "cgroup hierarchy the process is in.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "enum": [
+            "v1",
+            "v2",
+            "hybrid",
+            null
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "fact_escalation": {
+      "description": "Privilege escalation a stage used.",
+      "type": "object",
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "enum": [
+            "none",
+            "sudo",
+            "root-login",
+            "setuid",
+            "other",
+            null
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "os": {
+      "type": "object",
+      "required": [
+        "family",
+        "name",
+        "version",
+        "kernel"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "name": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "version": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "kernel": {
+          "$ref": "#/$defs/fact_string"
+        }
+      }
+    },
+    "cpu": {
+      "type": "object",
+      "required": [
+        "arch",
+        "execution"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "arch": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "execution": {
+          "$ref": "#/$defs/fact_execution"
+        }
+      }
+    },
+    "service_manager": {
+      "type": "object",
+      "required": [
+        "name",
+        "scope"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "scope": {
+          "$ref": "#/$defs/fact_slug"
+        }
+      }
+    },
+    "orchestration": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "scope"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "version": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "scope": {
+          "$ref": "#/$defs/fact_slug"
+        }
+      }
+    },
+    "container": {
+      "description": "Container-only facts; only a layer whose kind is container may have them.",
+      "type": "object",
+      "required": [
+        "engine_mode",
+        "privileged",
+        "devices",
+        "orchestration"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "engine_mode": {
+          "$ref": "#/$defs/fact_engine_mode"
+        },
+        "privileged": {
+          "$ref": "#/$defs/fact_boolean"
+        },
+        "devices": {
+          "$ref": "#/$defs/fact_slug_list"
+        },
+        "orchestration": {
+          "$ref": "#/$defs/orchestration"
+        }
+      }
+    },
+    "layer": {
+      "description": "One execution layer. Layers are listed from the outermost (index 0) to the one the workload runs in (last).",
+      "type": "object",
+      "required": [
+        "kind",
+        "technology",
+        "os",
+        "cpu",
+        "service_manager"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/text"
+        },
+        "kind": {
+          "$ref": "#/$defs/fact_layer_kind"
+        },
+        "technology": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "os": {
+          "$ref": "#/$defs/os"
+        },
+        "cpu": {
+          "$ref": "#/$defs/cpu"
+        },
+        "service_manager": {
+          "$ref": "#/$defs/service_manager"
+        },
+        "container": {
+          "$ref": "#/$defs/container"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": [
+        "layers"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "layers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/layer"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      }
+    },
+    "python": {
+      "type": "object",
+      "required": [
+        "implementation",
+        "version",
+        "cache_tag",
+        "soabi",
+        "platform",
+        "arch",
+        "pointer_bits",
+        "free_threaded_build",
+        "gil_enabled",
+        "libc",
+        "execution"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "implementation": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "version": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "cache_tag": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "soabi": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "platform": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "arch": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "pointer_bits": {
+          "$ref": "#/$defs/fact_integer"
+        },
+        "free_threaded_build": {
+          "$ref": "#/$defs/fact_boolean"
+        },
+        "gil_enabled": {
+          "$ref": "#/$defs/fact_boolean"
+        },
+        "libc": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "execution": {
+          "$ref": "#/$defs/fact_execution"
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "version",
+        "modules_abi",
+        "napi_version",
+        "platform",
+        "arch",
+        "execution"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "modules_abi": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "napi_version": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "platform": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "arch": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "execution": {
+          "$ref": "#/$defs/fact_execution"
+        }
+      }
+    },
+    "runtimes": {
+      "type": "object",
+      "required": [
+        "python",
+        "node"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "python": {
+          "$ref": "#/$defs/python"
+        },
+        "node": {
+          "$ref": "#/$defs/node"
+        }
+      }
+    },
+    "identity": {
+      "description": "Who the process runs as. superuser: effective UID 0 on Linux (in the process's own user namespace), macOS and FreeBSD; on Windows, an elevated token, membership of Administrators, or SYSTEM. real_uid and saved_uid show whether a non-root process could switch back to UID 0; they are not-applicable on Windows.",
+      "type": "object",
+      "required": [
+        "superuser",
+        "uid",
+        "real_uid",
+        "saved_uid",
+        "gid",
+        "user_namespace"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "superuser": {
+          "$ref": "#/$defs/fact_boolean"
+        },
+        "uid": {
+          "$ref": "#/$defs/fact_integer"
+        },
+        "real_uid": {
+          "$ref": "#/$defs/fact_integer"
+        },
+        "saved_uid": {
+          "$ref": "#/$defs/fact_integer"
+        },
+        "gid": {
+          "$ref": "#/$defs/fact_integer"
+        },
+        "user_namespace": {
+          "type": "object",
+          "required": [
+            "initial",
+            "uid_map"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "initial": {
+              "$ref": "#/$defs/fact_boolean"
+            },
+            "uid_map": {
+              "$ref": "#/$defs/fact_uid_map"
+            }
+          }
+        }
+      }
+    },
+    "isolation": {
+      "type": "object",
+      "required": [
+        "no_new_privs",
+        "capabilities",
+        "seccomp",
+        "apparmor",
+        "selinux",
+        "cgroup",
+        "pid_namespace"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "no_new_privs": {
+          "$ref": "#/$defs/fact_boolean"
+        },
+        "capabilities": {
+          "type": "object",
+          "required": [
+            "effective",
+            "permitted",
+            "bounding"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "effective": {
+              "$ref": "#/$defs/fact_slug_list"
+            },
+            "permitted": {
+              "$ref": "#/$defs/fact_slug_list"
+            },
+            "bounding": {
+              "$ref": "#/$defs/fact_slug_list"
+            }
+          }
+        },
+        "seccomp": {
+          "$ref": "#/$defs/fact_seccomp"
+        },
+        "apparmor": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "profile"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "$ref": "#/$defs/fact_boolean"
+            },
+            "profile": {
+              "$ref": "#/$defs/fact_string"
+            }
+          }
+        },
+        "selinux": {
+          "type": "object",
+          "required": [
+            "mode",
+            "context"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "$ref": "#/$defs/fact_selinux_mode"
+            },
+            "context": {
+              "$ref": "#/$defs/fact_string"
+            }
+          }
+        },
+        "cgroup": {
+          "type": "object",
+          "required": [
+            "version",
+            "delegated"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/fact_cgroup_version"
+            },
+            "delegated": {
+              "$ref": "#/$defs/fact_boolean"
+            }
+          }
+        },
+        "pid_namespace": {
+          "description": "Containers get their own PID namespace; the initial one shows the process is not in one.",
+          "type": "object",
+          "required": [
+            "initial"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "initial": {
+              "$ref": "#/$defs/fact_boolean"
+            }
+          }
+        }
+      }
+    },
+    "profile_workload": {
+      "type": "object",
+      "required": [
+        "runtimes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "runtimes": {
+          "$ref": "#/$defs/runtimes"
+        }
+      }
+    },
+    "result_workload": {
+      "description": "The process that ran the collector, in the last layer.",
+      "type": "object",
+      "required": [
+        "identity",
+        "isolation",
+        "runtimes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "isolation": {
+          "$ref": "#/$defs/isolation"
+        },
+        "runtimes": {
+          "$ref": "#/$defs/runtimes"
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "api",
+        "available",
+        "device",
+        "version",
+        "features"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/slug"
+        },
+        "kind": {
+          "enum": [
+            "cpu",
+            "gpu",
+            "npu",
+            "other"
+          ]
+        },
+        "api": {
+          "$ref": "#/$defs/slug"
+        },
+        "available": {
+          "$ref": "#/$defs/fact_boolean"
+        },
+        "device": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "version": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "features": {
+          "$ref": "#/$defs/fact_slug_list"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "compute": {
+      "type": "object",
+      "required": [
+        "backends",
+        "accelerator_inventory"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "backends": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/backend"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "accelerator_inventory": {
+          "$ref": "#/$defs/fact_boolean"
+        }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "not-run",
+            "not-applicable"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence_list"
+        },
+        "privilege": {
+          "type": "object",
+          "required": [
+            "escalation"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "escalation": {
+              "$ref": "#/$defs/fact_escalation"
+            }
+          }
+        },
+        "compute": {
+          "type": "object",
+          "required": [
+            "requested",
+            "effective"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "requested": {
+              "$ref": "#/$defs/slug"
+            },
+            "effective": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[a-z0-9][a-z0-9._+-]{0,63}$"
+            }
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "stages": {
+      "type": "object",
+      "required": [
+        "detect",
+        "install",
+        "initialize",
+        "execute",
+        "correctness",
+        "security",
+        "performance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "detect": {
+          "$ref": "#/$defs/stage"
+        },
+        "install": {
+          "$ref": "#/$defs/stage"
+        },
+        "initialize": {
+          "$ref": "#/$defs/stage"
+        },
+        "execute": {
+          "$ref": "#/$defs/stage"
+        },
+        "correctness": {
+          "$ref": "#/$defs/stage"
+        },
+        "security": {
+          "$ref": "#/$defs/stage"
+        },
+        "performance": {
+          "$ref": "#/$defs/stage"
+        }
+      }
+    },
+    "ci": {
+      "type": "object",
+      "required": [
+        "system",
+        "event",
+        "repository",
+        "ref",
+        "run_id",
+        "run_attempt",
+        "run_url",
+        "workflow_ref",
+        "job",
+        "runner_environment",
+        "runner_os",
+        "runner_arch",
+        "image_os",
+        "image_version"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "system": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "event": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "repository": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "ref": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "run_attempt": {
+          "$ref": "#/$defs/fact_integer"
+        },
+        "run_url": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "workflow_ref": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "job": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "runner_environment": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "runner_os": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "runner_arch": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "image_os": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "image_version": {
+          "$ref": "#/$defs/fact_string"
+        }
+      }
+    },
+    "revision": {
+      "description": "tested_sha: the commit checked out and tested; event_sha: GITHUB_SHA, which for pull_request is GitHub's temporary merge commit; pr_head_sha and pr_base_sha: the pull request's head and base from the event payload.",
+      "type": "object",
+      "required": [
+        "tested_sha",
+        "event_sha",
+        "pr_head_sha",
+        "pr_base_sha"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tested_sha": {
+          "$ref": "#/$defs/fact_sha"
+        },
+        "event_sha": {
+          "$ref": "#/$defs/fact_sha"
+        },
+        "pr_head_sha": {
+          "$ref": "#/$defs/fact_sha"
+        },
+        "pr_base_sha": {
+          "$ref": "#/$defs/fact_sha"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "ci",
+        "revision"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ci": {
+          "$ref": "#/$defs/ci"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        }
+      }
+    },
+    "rule_id": {
+      "enum": [
+        "app-non-root",
+        "engine-rootless",
+        "no-privileged-container",
+        "no-privilege-escalation",
+        "minimal-capabilities",
+        "minimal-devices"
+      ]
+    },
+    "exception": {
+      "type": "object",
+      "required": [
+        "id",
+        "rule",
+        "reason",
+        "scope",
+        "verification",
+        "end_condition",
+        "approval"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/slug"
+        },
+        "rule": {
+          "$ref": "#/$defs/rule_id"
+        },
+        "reason": {
+          "$ref": "#/$defs/text"
+        },
+        "scope": {
+          "type": "object",
+          "required": [],
+          "additionalProperties": false,
+          "properties": {
+            "stages": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "detect",
+                  "install",
+                  "initialize",
+                  "execute",
+                  "correctness",
+                  "security",
+                  "performance"
+                ]
+              },
+              "maxItems": 7
+            },
+            "escalations": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "sudo",
+                  "root-login",
+                  "setuid",
+                  "other"
+                ]
+              },
+              "maxItems": 4
+            },
+            "layers": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 7
+              },
+              "maxItems": 8
+            },
+            "capabilities": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/slug"
+              },
+              "maxItems": 64
+            },
+            "devices": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/slug"
+              },
+              "maxItems": 64
+            }
+          }
+        },
+        "verification": {
+          "$ref": "#/$defs/text"
+        },
+        "end_condition": {
+          "$ref": "#/$defs/text"
+        },
+        "approval": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "approved",
+                "pending",
+                "rejected"
+              ]
+            },
+            "reference": {
+              "$ref": "#/$defs/text"
+            },
+            "date": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            }
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "properties": {
+        "rules": {
+          "type": "object",
+          "required": [],
+          "additionalProperties": false,
+          "properties": {
+            "app-non-root": {
+              "enum": [
+                "required",
+                "preferred"
+              ]
+            },
+            "engine-rootless": {
+              "enum": [
+                "required",
+                "preferred"
+              ]
+            },
+            "no-privileged-container": {
+              "enum": [
+                "required",
+                "preferred"
+              ]
+            },
+            "no-privilege-escalation": {
+              "enum": [
+                "required",
+                "preferred"
+              ]
+            },
+            "minimal-capabilities": {
+              "enum": [
+                "required",
+                "preferred"
+              ]
+            },
+            "minimal-devices": {
+              "enum": [
+                "required",
+                "preferred"
+              ]
+            }
+          }
+        },
+        "exceptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/exception"
+          },
+          "maxItems": 32
+        }
+      }
+    },
+    "support": {
+      "description": "The lane's support status as docs/DEPENDENCY-STRATEGY.md records it; never derived from a run.",
+      "type": "object",
+      "required": [
+        "status",
+        "lane",
+        "reference"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "checked",
+            "statically-resolvable",
+            "not-supported",
+            "not-assessed"
+          ]
+        },
+        "lane": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "reference": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "evidence_source": {
+      "type": "object",
+      "required": [
+        "workflow",
+        "job"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "workflow": {
+          "$ref": "#/$defs/text"
+        },
+        "job": {
+          "$ref": "#/$defs/slug"
+        }
+      }
+    },
+    "runner": {
+      "description": "Run-level conditions a profile declares, compared with run.ci of each result checked against it.",
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "properties": {
+        "runner_environment": {
+          "$ref": "#/$defs/fact_slug"
+        },
+        "runner_os": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "runner_arch": {
+          "$ref": "#/$defs/fact_string"
+        },
+        "image_os": {
+          "$ref": "#/$defs/fact_string"
+        }
+      }
+    },
+    "profile": {
+      "description": "A declared lane: what its environment is meant to be and which policy applies. Not a measurement.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "kind",
+        "synthetic",
+        "id",
+        "title",
+        "support",
+        "evidence_sources",
+        "required_stages",
+        "environment",
+        "workload",
+        "compute",
+        "policy"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "profile"
+        },
+        "synthetic": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/slug"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "description": {
+          "$ref": "#/$defs/text"
+        },
+        "support": {
+          "$ref": "#/$defs/support"
+        },
+        "evidence_sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence_source"
+          },
+          "maxItems": 16
+        },
+        "runner": {
+          "$ref": "#/$defs/runner"
+        },
+        "required_stages": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "detect",
+              "install",
+              "initialize",
+              "execute",
+              "correctness",
+              "security",
+              "performance"
+            ]
+          },
+          "maxItems": 7
+        },
+        "accelerator_backend": {
+          "description": "The id of a gpu or npu backend in compute.backends that the execute, correctness and performance stages, when required, must run on. Absent or null for a CPU lane.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z0-9][a-z0-9._+-]{0,63}$"
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "workload": {
+          "$ref": "#/$defs/profile_workload"
+        },
+        "compute": {
+          "$ref": "#/$defs/compute"
+        },
+        "policy": {
+          "$ref": "#/$defs/policy"
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    },
+    "result": {
+      "description": "One run on one lane: what was observed and what each stage did.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "kind",
+        "synthetic",
+        "profile_id",
+        "generated_at",
+        "collector",
+        "run",
+        "environment",
+        "workload",
+        "compute",
+        "stages",
+        "overall",
+        "probe_errors"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "result"
+        },
+        "synthetic": {
+          "type": "boolean"
+        },
+        "profile_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z0-9][a-z0-9._+-]{0,63}$"
+        },
+        "generated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        },
+        "collector": {
+          "type": "object",
+          "required": [
+            "name",
+            "version"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/slug"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        },
+        "run": {
+          "$ref": "#/$defs/run"
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        },
+        "workload": {
+          "$ref": "#/$defs/result_workload"
+        },
+        "compute": {
+          "$ref": "#/$defs/compute"
+        },
+        "stages": {
+          "$ref": "#/$defs/stages"
+        },
+        "overall": {
+          "enum": [
+            "passed",
+            "failed",
+            "incomplete"
+          ]
+        },
+        "probe_errors": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": [
+              "probe",
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "probe": {
+                "$ref": "#/$defs/slug"
+              },
+              "error": {
+                "$ref": "#/$defs/text"
+              }
+            }
+          }
+        },
+        "extensions": {
+          "$ref": "#/$defs/extensions"
+        }
+      }
+    }
+  }
+}

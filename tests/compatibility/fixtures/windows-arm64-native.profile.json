@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "kind": "profile",
+  "synthetic": true,
+  "id": "synthetic-windows-arm64-native",
+  "title": "Synthetic Windows on Arm, native",
+  "description": "Native win_arm64 Python and Node with the CPU and a Qualcomm NPU through QNN. docs/DEPENDENCY-STRATEGY.md records the lane as not supported.",
+  "support": {
+    "status": "not-supported",
+    "lane": "Windows on Arm, native (`win_arm64`)",
+    "reference": "docs/DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes"
+  },
+  "evidence_sources": [],
+  "required_stages": [
+    "detect"
+  ],
+  "environment": {
+    "layers": [
+      {
+        "label": "Windows on Arm PC",
+        "kind": {
+          "value": "host",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "the outermost host runs on hardware"
+        },
+        "os": {
+          "family": {
+            "value": "windows",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": "windows",
+            "provenance": "declared"
+          },
+          "version": {
+            "value": "10.0.26100",
+            "provenance": "declared"
+          },
+          "kernel": {
+            "value": "10.0.26100",
+            "provenance": "declared"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "aarch64",
+            "provenance": "declared"
+          },
+          "execution": {
+            "value": "native",
+            "provenance": "declared"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": "windows-scm",
+            "provenance": "declared"
+          },
+          "scope": {
+            "value": "system",
+            "provenance": "declared"
+          }
+        }
+      }
+    ]
+  },
+  "workload": {
+    "runtimes": {
+      "python": {
+        "implementation": {
+          "value": "cpython",
+          "provenance": "declared"
+        },
+        "version": {
+          "value": "3.12.15",
+          "provenance": "declared"
+        },
+        "cache_tag": {
+          "value": "cpython-312",
+          "provenance": "declared"
+        },
+        "soabi": {
+          "value": "cp312-win_arm64",
+          "provenance": "declared"
+        },
+        "platform": {
+          "value": "win-arm64",
+          "provenance": "declared"
+        },
+        "arch": {
+          "value": "aarch64",
+          "provenance": "declared"
+        },
+        "pointer_bits": {
+          "value": 64,
+          "provenance": "declared"
+        },
+        "free_threaded_build": {
+          "value": false,
+          "provenance": "declared"
+        },
+        "gil_enabled": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "libc": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "no C library version on this OS"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "declared"
+        }
+      },
+      "node": {
+        "version": {
+          "value": "24.21.0",
+          "provenance": "declared"
+        },
+        "modules_abi": {
+          "value": "137",
+          "provenance": "declared"
+        },
+        "napi_version": {
+          "value": "10",
+          "provenance": "declared"
+        },
+        "platform": {
+          "value": "win32",
+          "provenance": "declared"
+        },
+        "arch": {
+          "value": "aarch64",
+          "provenance": "declared"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "declared"
+        }
+      }
+    }
+  },
+  "compute": {
+    "backends": [
+      {
+        "id": "cpu",
+        "kind": "cpu",
+        "api": "cpu",
+        "available": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "the CPU model is not recorded"
+        },
+        "version": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a CPU has no backend version"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "CPU features are not recorded"
+        }
+      },
+      {
+        "id": "qnn-npu",
+        "kind": "npu",
+        "api": "qnn",
+        "available": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not probed"
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not probed"
+        },
+        "version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not probed"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not probed"
+        }
+      }
+    ],
+    "accelerator_inventory": {
+      "value": null,
+      "provenance": "unknown",
+      "reason": "only the NPU named in the profile was listed"
+    }
+  },
+  "policy": {
+    "rules": {},
+    "exceptions": []
+  },
+  "extensions": {
+    "x-note": "Synthetic fixture for the validator's tests. It describes no machine that was measured."
+  }
+}

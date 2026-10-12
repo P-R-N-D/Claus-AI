@@ -1,0 +1,541 @@
+{
+  "schema_version": 1,
+  "kind": "result",
+  "synthetic": true,
+  "profile_id": "synthetic-windows-arm64-native",
+  "generated_at": null,
+  "collector": {
+    "name": "collect-environment",
+    "version": 1
+  },
+  "run": {
+    "ci": {
+      "system": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "event": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "repository": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "ref": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "run_id": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "run_attempt": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "run_url": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "workflow_ref": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "job": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "runner_environment": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "runner_os": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "runner_arch": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "image_os": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "image_version": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      }
+    },
+    "revision": {
+      "tested_sha": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "event_sha": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "pr_head_sha": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      },
+      "pr_base_sha": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "synthetic fixture; there was no run"
+      }
+    }
+  },
+  "environment": {
+    "layers": [
+      {
+        "label": "Windows on Arm PC",
+        "kind": {
+          "value": "host",
+          "provenance": "inferred",
+          "evidence": [
+            "synthetic:Win32_ComputerSystem HypervisorPresent false"
+          ]
+        },
+        "technology": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "the outermost host runs on hardware"
+        },
+        "os": {
+          "family": {
+            "value": "windows",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.system"
+            ]
+          },
+          "name": {
+            "value": "windows",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.system"
+            ]
+          },
+          "version": {
+            "value": "10.0.26100",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.version"
+            ]
+          },
+          "kernel": {
+            "value": "10.0.26100",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.version"
+            ]
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "aarch64",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:platform.machine"
+            ]
+          },
+          "execution": {
+            "value": "native",
+            "provenance": "inferred",
+            "evidence": [
+              "synthetic:IsWow64Process2 native machine"
+            ]
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": "windows-scm",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:service control manager"
+            ]
+          },
+          "scope": {
+            "value": "system",
+            "provenance": "observed",
+            "evidence": [
+              "synthetic:service control manager"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "workload": {
+    "identity": {
+      "superuser": {
+        "value": false,
+        "provenance": "observed",
+        "evidence": [
+          "synthetic:token elevation"
+        ]
+      },
+      "uid": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "Windows has no POSIX user ID or user namespace"
+      },
+      "real_uid": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "Windows has no POSIX user IDs"
+      },
+      "saved_uid": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "Windows has no POSIX user IDs"
+      },
+      "gid": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "Windows has no POSIX user ID or user namespace"
+      },
+      "user_namespace": {
+        "initial": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "Windows has no POSIX user ID or user namespace"
+        },
+        "uid_map": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "Windows has no POSIX user ID or user namespace"
+        }
+      }
+    },
+    "isolation": {
+      "no_new_privs": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "a Linux interface; not applicable on Windows"
+      },
+      "capabilities": {
+        "effective": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        },
+        "permitted": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        },
+        "bounding": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        }
+      },
+      "seccomp": {
+        "value": null,
+        "provenance": "not-applicable",
+        "reason": "a Linux interface; not applicable on Windows"
+      },
+      "apparmor": {
+        "enabled": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        },
+        "profile": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        }
+      },
+      "selinux": {
+        "mode": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        },
+        "context": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        }
+      },
+      "cgroup": {
+        "version": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        },
+        "delegated": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        }
+      },
+      "pid_namespace": {
+        "initial": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a Linux interface; not applicable on Windows"
+        }
+      }
+    },
+    "runtimes": {
+      "python": {
+        "implementation": {
+          "value": "cpython",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sys.implementation.name"
+          ]
+        },
+        "version": {
+          "value": "3.12.15",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:platform.python_version"
+          ]
+        },
+        "cache_tag": {
+          "value": "cpython-312",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sys.implementation.cache_tag"
+          ]
+        },
+        "soabi": {
+          "value": "cp312-win_arm64",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sysconfig.SOABI"
+          ]
+        },
+        "platform": {
+          "value": "win-arm64",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sysconfig.get_platform"
+          ]
+        },
+        "arch": {
+          "value": "aarch64",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sysconfig.get_platform"
+          ]
+        },
+        "pointer_bits": {
+          "value": 64,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:struct.calcsize"
+          ]
+        },
+        "free_threaded_build": {
+          "value": false,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sysconfig.Py_GIL_DISABLED"
+          ]
+        },
+        "gil_enabled": {
+          "value": true,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:sys._is_gil_enabled"
+          ]
+        },
+        "libc": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "no C library version on this OS"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "inferred",
+          "evidence": [
+            "synthetic:platform.machine",
+            "synthetic:sysconfig.get_platform"
+          ]
+        }
+      },
+      "node": {
+        "version": {
+          "value": "24.21.0",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:node -p"
+          ]
+        },
+        "modules_abi": {
+          "value": "137",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:node -p"
+          ]
+        },
+        "napi_version": {
+          "value": "10",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:node -p"
+          ]
+        },
+        "platform": {
+          "value": "win32",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:node -p"
+          ]
+        },
+        "arch": {
+          "value": "aarch64",
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:node -p"
+          ]
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "inferred",
+          "evidence": [
+            "synthetic:platform.machine",
+            "synthetic:node -p"
+          ]
+        }
+      }
+    }
+  },
+  "compute": {
+    "backends": [
+      {
+        "id": "cpu",
+        "kind": "cpu",
+        "api": "cpu",
+        "available": {
+          "value": true,
+          "provenance": "observed",
+          "evidence": [
+            "synthetic:collector ran on it"
+          ]
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "the CPU model is not recorded"
+        },
+        "version": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a CPU has no backend version"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "CPU features are not recorded"
+        }
+      },
+      {
+        "id": "qnn-npu",
+        "kind": "npu",
+        "api": "qnn",
+        "available": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not probed"
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not probed"
+        },
+        "version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not probed"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not probed"
+        }
+      }
+    ],
+    "accelerator_inventory": {
+      "value": null,
+      "provenance": "unknown",
+      "reason": "only the NPU named in the profile was listed"
+    }
+  },
+  "stages": {
+    "detect": {
+      "status": "passed",
+      "evidence": [
+        "synthetic:collector"
+      ],
+      "privilege": {
+        "escalation": {
+          "value": "none",
+          "provenance": "declared"
+        }
+      }
+    },
+    "install": {
+      "status": "failed",
+      "reason": "the backend lock has no win_arm64 wheels for autobahn, cryptography and psycopg-binary",
+      "evidence": [
+        "synthetic:uv pip sync log"
+      ],
+      "privilege": {
+        "escalation": {
+          "value": "none",
+          "provenance": "declared"
+        }
+      }
+    },
+    "initialize": {
+      "status": "blocked",
+      "reason": "install failed"
+    },
+    "execute": {
+      "status": "blocked",
+      "reason": "install failed"
+    },
+    "correctness": {
+      "status": "blocked",
+      "reason": "install failed"
+    },
+    "security": {
+      "status": "not-run",
+      "reason": "not run in this scenario"
+    },
+    "performance": {
+      "status": "blocked",
+      "reason": "install failed"
+    }
+  },
+  "overall": "failed",
+  "probe_errors": [],
+  "extensions": {
+    "x-note": "Synthetic fixture for the validator's tests. It describes no machine that was measured."
+  }
+}

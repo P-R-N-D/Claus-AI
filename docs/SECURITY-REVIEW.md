@@ -6,7 +6,7 @@ It is not a security policy and defines no requirement: the meaning and status o
 
 ## Status
 
-- In effect for every change that matches a trigger below or a run condition under "When this review runs", from HEAD 8ec5623 (committed 2026-09-21; the repository facts in this document were verified on 2026-10-08). The procedure itself depends on nothing that is Planned. (Updated 2026-10-10: the step 1 file table was re-checked at 14b9109 (unchanged through 3fe4d1a) and now lists `frontend/src/proxy.ts`, the lockfiles, and the runtime version files. Later the same day, CI workflows were added to the triggers and to the step 1 file table.)
+- In effect for every change that matches a trigger below or a run condition under "When this review runs", from HEAD 8ec5623 (committed 2026-09-21; the repository facts in this document were verified on 2026-10-08). The procedure itself depends on nothing that is Planned. (Updated 2026-10-10: the step 1 file table was re-checked at 14b9109 (unchanged through 3fe4d1a) and now lists `frontend/src/proxy.ts`, the lockfiles, and the runtime version files. Later the same day, CI workflows were added to the triggers and to the step 1 file table. On 2026-10-11, `scripts/ci/` and `tests/compatibility/` were added to the CI trigger and to that table row, and step 1 gained the check of compatibility policy exceptions.)
 - Implemented today, and therefore reviewable as behavior: the health endpoints, the ASGI composition, `DATABASE_URL` parsing with SQLite fallback, and the S3-compatible storage backend. Their security facts, with file and line evidence, are in [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md) "Current implementation security facts".
 - Not implemented: authentication, authorization, scope checks, sharing, approval, audit, RAG, model calls, Tasks, runtimes beyond a lazy Playwright factory, and WebMCP. Most `SEC-*` requirements are Planned; "How Planned requirements are reviewed" below says what that means for a review.
 - WebMCP is Experimental: an external draft with no default-on browser support as of 2026-10-08 ([WEBMCP.md](WEBMCP.md)). In the AGENT area, `SEC-AGENT-001` is Planned and `SEC-AGENT-002` to `SEC-AGENT-005` are Planned/Experimental.
@@ -36,7 +36,7 @@ Triggers are the ones listed in [CODE-REVIEW.md](CODE-REVIEW.md) step 9. Area na
 | External content handling (web pages, uploaded files, retrieved text, tool output reaching a model or a user) | INJ, `SEC-RAG-002` | `SEC-SECRET-003`, `SEC-TOOL-002` |
 | Logging and audit | `SEC-SECRET-003`, `SEC-SECRET-004`, `SEC-TOOL-002` | `SEC-FILE-005` |
 | i18n locale input handling (cookies, `Accept-Language`, preference values, `<html lang>`) | `SEC-INJ-001`, `SEC-AGENT-002` | AUTH, when a preference is stored on the account |
-| CI workflows (`.github/workflows/*`: trigger events, `permissions`, secrets, `runs-on` labels, action references) | `SEC-SECRET-001` | `SEC-SECRET-003`, `SEC-TOOL-001` |
+| CI workflows (`.github/workflows/*`: trigger events, `permissions`, secrets, `runs-on` labels, action references), and the scripts and data they run and publish the output of (`scripts/ci/*`, `tests/compatibility/*`) | `SEC-SECRET-001` | `SEC-SECRET-003`, `SEC-TOOL-001` |
 
 ### How Planned requirements are reviewed
 
@@ -63,7 +63,7 @@ Map every file in the change to the boundaries in [SECURITY-ARCHITECTURE.md](SEC
 | `backend/agent/runtime/`, `backend/agent/llm/`, `backend/agent/rag/`, `backend/agent/orchestration/`, `backend/agent/tools/` | Runtimes, and model to content (docstring-only packages or a lazy factory today) |
 | `frontend/src/lib/api.ts`, `frontend/next.config.ts`, `frontend/src/proxy.ts`, `frontend/src/components/`, `frontend/src/app/` | Browser to control plane (the client side of it; `next.config.ts` and `src/proxy.ts` run in the Next.js server, which forwards `/core/*` and `/agent/*` to the backend and redirects UI paths, and authorizes nothing) |
 | `.env.example`, `.gitignore`, `backend/requirements.txt`, `backend/locks/*`, `frontend/package.json`, `frontend/package-lock.json`, `.nvmrc`, `.python-version` | No boundary: the "Secrets hygiene" implementation facts, plus the dependency surface |
-| `.github/workflows/*` | No product boundary: repository to CI runner, where pull request code runs on the runner and with the token the workflow gives it; the "CI workflow" implementation facts |
+| `.github/workflows/*`, `scripts/ci/*`, `tests/compatibility/*` | No product boundary: repository to CI runner, where pull request code runs on the runner and with the token the workflow gives it; the "CI workflow" implementation facts. The compatibility collector reads runner state and allowlisted environment variables and its record is published as a run artifact |
 
 Record:
 
@@ -72,6 +72,8 @@ Record:
 - The triggers matched and, from the table above, the areas and IDs to examine, plus any ID the change itself cites.
 
 For a change under `.github/workflows/`, also record the trigger events (`pull_request_target` and `workflow_run` run with the base repository's token and secrets), the `permissions` each job gets, every secret referenced, every `runs-on` label (a self-hosted runner runs pull request code on that machine), and whether each action is pinned to a full commit SHA.
+
+For a change to a profile under `tests/compatibility/profiles/` that adds or changes a policy exception, check that its approval reference points to a decision by someone with authority over the repository, such as a maintainer's review or comment, and not to the change itself; that its scope names only the layers, stages and escalation methods, capabilities, or devices the lane needs; and that its end condition can be checked. The validator checks only that an approval is recorded, and its `policy-exception-applied` warning in the job log shows each use. A profile whose support status or lane changes without the matching edit to the lane table in [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes) is a finding.
 
 A new file under `backend/agent/fastapi/routes/` or a new `path()` in `backend/core/urls.py` is always a new boundary. A dependency added to `requirements.txt` or `package.json` widens the trust surface and needs the explicit approval that [CONTEXT.md](CONTEXT.md) requires, cited in the change. A change to `backend/locks/*` or `frontend/package-lock.json` needs the same cited approval, because [CONTEXT.md](CONTEXT.md) requires it for lockfile changes.
 

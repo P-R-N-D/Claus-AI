@@ -46,6 +46,7 @@ AI 코딩 에이전트와 기여자를 위한 기술 문서는 영어로 작성�
 - [STATE-SCHEMA.md](STATE-SCHEMA.md): 개념적 상태 모양(DB schema 아님).
 - [TESTING.md](TESTING.md): 현재 존재하는 테스트와 앞으로 필요한 검증.
 - [DEPENDENCY-STRATEGY.md](DEPENDENCY-STRATEGY.md): 적용한 의존성 업데이트와 호환성·보안 예외, 기존 free-threading 방침에 따른 Python 3.15 Limited API/`abi3t` wheel 대응, 성능 검증 및 유지보수 전략. Python 3.15 지원은 아직 미검증입니다.
+- [CI-MATRIX.md](CI-MATRIX.md): CI lane의 호환성 모델(profile, 실행 기록, validator가 검사하는 내용). 지원 상태는 기록하지 않습니다.
 - [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md): 신뢰 경계와 `SEC-*` 보안 요구사항.
 - [CODE-REVIEW.md](CODE-REVIEW.md), [SECURITY-REVIEW.md](SECURITY-REVIEW.md): 코드 변경의 독립 리뷰와 보안 리뷰 절차.
 - [INTERACTION-INTERFACES.md](INTERACTION-INTERFACES.md), [WEBMCP.md](WEBMCP.md), [I18N.md](I18N.md): 아직 구현되지 않은 상호작용 구조, WebMCP(실험적 기술) 계약, 프런트엔드 i18n 방향.

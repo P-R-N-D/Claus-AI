@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "kind": "profile",
+  "synthetic": true,
+  "id": "synthetic-kubernetes-arm64-cuda",
+  "title": "Synthetic Kubernetes pod on an aarch64 node with CUDA",
+  "description": "A non-root pod with one NVIDIA GPU; the GPU device is allowed by an approved exception. A mixed x86-64 and aarch64 cluster has one profile per node architecture.",
+  "support": {
+    "status": "not-assessed",
+    "lane": "Linux aarch64 glibc",
+    "reference": "docs/DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes"
+  },
+  "evidence_sources": [],
+  "required_stages": [
+    "detect",
+    "install",
+    "initialize",
+    "execute",
+    "correctness"
+  ],
+  "accelerator_backend": "cuda",
+  "environment": {
+    "layers": [
+      {
+        "label": "aarch64 GPU node",
+        "kind": {
+          "value": "host",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "the outermost host runs on hardware"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": "ubuntu",
+            "provenance": "declared"
+          },
+          "version": {
+            "value": "24.04",
+            "provenance": "declared"
+          },
+          "kernel": {
+            "value": "6.11.0-1016-nvidia",
+            "provenance": "declared"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "aarch64",
+            "provenance": "declared"
+          },
+          "execution": {
+            "value": "native",
+            "provenance": "declared"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": "systemd",
+            "provenance": "declared"
+          },
+          "scope": {
+            "value": "system",
+            "provenance": "declared"
+          }
+        }
+      },
+      {
+        "label": "Kubernetes pod",
+        "kind": {
+          "value": "container",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": "containerd",
+          "provenance": "declared"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": "ubuntu",
+            "provenance": "declared"
+          },
+          "version": {
+            "value": "24.04",
+            "provenance": "declared"
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "not-applicable",
+            "reason": "a container shares the kernel of the layer below"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "aarch64",
+            "provenance": "declared"
+          },
+          "execution": {
+            "value": "native",
+            "provenance": "declared"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "systemd is not running as the service manager here; other managers are not probed"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "no service manager seen"
+          }
+        },
+        "container": {
+          "engine_mode": {
+            "value": "rootful",
+            "provenance": "declared"
+          },
+          "privileged": {
+            "value": false,
+            "provenance": "declared"
+          },
+          "devices": {
+            "value": [
+              "nvidia-gpu"
+            ],
+            "provenance": "declared"
+          },
+          "orchestration": {
+            "name": {
+              "value": "kubernetes",
+              "provenance": "declared"
+            },
+            "version": {
+              "value": "1.33",
+              "provenance": "declared"
+            },
+            "scope": {
+              "value": null,
+              "provenance": "not-applicable",
+              "reason": "Kubernetes has no user or system scope"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "workload": {
+    "runtimes": {
+      "python": {
+        "implementation": {
+          "value": "cpython",
+          "provenance": "declared"
+        },
+        "version": {
+          "value": "3.12.15",
+          "provenance": "declared"
+        },
+        "cache_tag": {
+          "value": "cpython-312",
+          "provenance": "declared"
+        },
+        "soabi": {
+          "value": "cpython-312-aarch64-linux-gnu",
+          "provenance": "declared"
+        },
+        "platform": {
+          "value": "linux-aarch64",
+          "provenance": "declared"
+        },
+        "arch": {
+          "value": "aarch64",
+          "provenance": "declared"
+        },
+        "pointer_bits": {
+          "value": 64,
+          "provenance": "declared"
+        },
+        "free_threaded_build": {
+          "value": false,
+          "provenance": "declared"
+        },
+        "gil_enabled": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "libc": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "each run records it"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "declared"
+        }
+      },
+      "node": {
+        "version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "modules_abi": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "napi_version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "platform": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "arch": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        },
+        "execution": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "node is not on PATH"
+        }
+      }
+    }
+  },
+  "compute": {
+    "backends": [
+      {
+        "id": "cpu",
+        "kind": "cpu",
+        "api": "cpu",
+        "available": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "the CPU model is not recorded"
+        },
+        "version": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a CPU has no backend version"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "CPU features are not recorded"
+        }
+      },
+      {
+        "id": "cuda",
+        "kind": "gpu",
+        "api": "cuda",
+        "available": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "device": {
+          "value": "NVIDIA GB10",
+          "provenance": "declared"
+        },
+        "version": {
+          "value": "13.0",
+          "provenance": "declared"
+        },
+        "features": {
+          "value": [
+            "bf16",
+            "fp16"
+          ],
+          "provenance": "declared"
+        },
+        "extensions": {
+          "x-driver": "synthetic example of vendor data the validator ignores"
+        }
+      }
+    ],
+    "accelerator_inventory": {
+      "value": true,
+      "provenance": "declared"
+    }
+  },
+  "policy": {
+    "rules": {},
+    "exceptions": [
+      {
+        "id": "gpu-device",
+        "rule": "minimal-devices",
+        "reason": "The CUDA lane needs the GPU device inside the pod.",
+        "scope": {
+          "devices": [
+            "nvidia-gpu"
+          ]
+        },
+        "verification": "The device plugin passes exactly one GPU and no other device; the pod spec is reviewed with the lane.",
+        "end_condition": "Remove when the lane stops running GPU stages.",
+        "approval": {
+          "status": "approved",
+          "reference": "https://github.com/P-R-N-D/Claus-AI (synthetic example, no real approval)",
+          "date": "2026-10-11"
+        }
+      }
+    ]
+  },
+  "extensions": {
+    "x-note": "Synthetic fixture for the validator's tests. It describes no machine that was measured."
+  }
+}

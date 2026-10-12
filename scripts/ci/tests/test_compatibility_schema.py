@@ -519,6 +519,17 @@ class ProvenanceTests(Case):
             digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
             return f"~({len(text)} characters, sha256 {digest})"
 
+        # The limit is on the escaped key, and a replaced key keeps the first 8 hex digits of its digest, so keys of
+        # one length are told apart unless those digits agree. An escaped key holds "~" only before "0" or "1", so a
+        # key that looks like a marker is not one.
+        kept = ("k" * 128, "~" * 64, "/" * 64, "...", "~...", "(5 characters)")
+        self.assertEqual([validator.pointer("", key) for key in kept], ["/" + "k" * 128, "/" + "~0" * 64, "/" + "~1" * 64, "/...", "/~0...", "/(5 characters)"])
+        replaced = ("k" * 129, "~" * 65, "/" * 65, "x" * 200, "y" * 200, "\ud800" * 200)
+        self.assertEqual([validator.pointer("", key) for key in replaced], ["/" + named(key) for key in replaced])
+        self.assertEqual(len({validator.pointer("", key) for key in replaced}), len(replaced))
+        sixteen = "/" + "/".join(str(index) for index in range(15))
+        self.assertEqual((validator.pointer(sixteen, 15), validator.pointer(validator.pointer(sixteen, 15), 16)),
+                         (sixteen + "/15", "/0/1/2/3/4/5/6/7/~.../10/11/12/13/14/15/16"))
         result = fixture("linux-x64-vm.result")
         long = check(changed(result, lambda d: d["extensions"].update({"x-a": {"k" * 100000: ["\u0001"] * 1000}})))
         paths = [path for _, code, path, _ in long.items if code == "control-character"]
@@ -532,25 +543,17 @@ class ProvenanceTests(Case):
             nested = {key: nested}
         deep = check(changed(result, lambda d: d["extensions"].update({"x-a": nested})))
         self.assertFinding(deep, "control-character", "/" + "/".join(["extensions", "x-a", *keys[:6], "~...", *keys[-7:]]))
-        # The limit is on the escaped key, and a replaced key keeps the first 8 hex digits of its digest, so keys of
-        # one length are told apart unless those digits agree. An escaped key holds "~" only before "0" or "1", so a
-        # key that looks like a marker is not one.
-        kept = ("k" * 128, "~" * 64, "/" * 64, "...", "~...", "(5 characters)")
-        self.assertEqual([validator.pointer("", key) for key in kept], ["/" + "k" * 128, "/" + "~0" * 64, "/" + "~1" * 64, "/...", "/~0...", "/(5 characters)"])
-        replaced = ("k" * 129, "~" * 65, "/" * 65, "x" * 200, "y" * 200, "\ud800" * 200)
-        self.assertEqual([validator.pointer("", key) for key in replaced], ["/" + named(key) for key in replaced])
-        self.assertEqual(len({validator.pointer("", key) for key in replaced}), len(replaced))
-        sixteen = "/" + "/".join(str(index) for index in range(15))
-        self.assertEqual((validator.pointer(sixteen, 15), validator.pointer(validator.pointer(sixteen, 15), 16)),
-                         (sixteen + "/15", "/0/1/2/3/4/5/6/7/~.../10/11/12/13/14/15/16"))
-        # However long and deep the keys, a path keeps at most PATH_KEYS keys of at most KEY_LIMIT characters. Each
-        # chain key is under KEY_LIMIT characters but over it once escaped, and a finding sits under every long key.
-        chain = "\u0001"
-        for index in range(40):
-            chain = {"~" * 100 + chr(ord("a") + index % 26): chain, "~" * 200: "\u0001"}
-        bounded = check(changed(result, lambda d: d["extensions"].update({"x-a": chain})))
-        self.assertTrue(bounded.items)
-        self.assertLessEqual(max(len(path) for _, _, path, _ in bounded.items), validator.PATH_KEYS * (validator.KEY_LIMIT + 1))
+        # However long and deep the keys, a path keeps at most PATH_KEYS keys of at most KEY_LIMIT characters. The
+        # chain keys are kept at 127 characters once escaped, or are under KEY_LIMIT characters but over it once
+        # escaped, and a finding sits under every long key.
+        for width in (63, 100):
+            chain = "\u0001"
+            for index in range(40):
+                chain = {"~" * width + chr(ord("a") + index % 26): chain, "~" * 200: "\u0001"}
+            with self.subTest(width=width):
+                bounded = check(changed(result, lambda d: d["extensions"].update({"x-a": chain})))
+                self.assertTrue(bounded.items)
+                self.assertLessEqual(max(len(path) for _, _, path, _ in bounded.items), validator.PATH_KEYS * (validator.KEY_LIMIT + 1))
         # A value's path is built when the value is reached.
         built = []
         original = validator.pointer

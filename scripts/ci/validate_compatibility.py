@@ -340,7 +340,7 @@ def json_equal(a, b):
     return a == b
 
 
-# A finding's path names at most PATH_KEYS keys, each of at most KEY_LIMIT characters once escaped.
+# A path that pointer() builds names at most PATH_KEYS keys, each of at most KEY_LIMIT characters once escaped.
 KEY_LIMIT = 128
 PATH_KEYS = 16
 

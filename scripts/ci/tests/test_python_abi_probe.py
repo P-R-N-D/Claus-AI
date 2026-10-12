@@ -367,7 +367,8 @@ class PackageProbeTests(unittest.TestCase):
         self.path = pathlib.Path(directory.name)
         self.metadata(wheel(self.CFFI, "a"))
         (self.path / "pycparser-2.23.json").write_text(json.dumps({"urls": [wheel("pycparser-2.23-py3-none-any.whl", "b")]}), encoding="utf-8")
-        (self.path / "lock.txt").write_text(self.LOCK_TEXT, encoding="utf-8")
+        # Bytes, so that Windows does not write \r\n and change the lock's hash.
+        (self.path / "lock.txt").write_bytes(self.LOCK_TEXT.encode("utf-8"))
         self.lock = probe.parse_lock(self.LOCK_TEXT)
         self.installed = {}
         self.uv_calls = []

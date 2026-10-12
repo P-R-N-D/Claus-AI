@@ -1358,6 +1358,7 @@ class ProfileTests(Case):
         version = lambda text: lambda d: d["environment"]["layers"][-1]["os"].update(version=fact(text, provenance="declared") if text else unknown())  # noqa: E731
         for status, os_version, valid in (
             ("statically-resolvable", "15.5", True), ("statically-resolvable", "15", True), ("statically-resolvable", "26.0.1", True),
+            ("statically-resolvable", "1000.1", True),
             ("statically-resolvable", "14.7.1", False), ("statically-resolvable", None, False), ("statically-resolvable", "Sequoia", False),
             ("not-supported", "14.7.1", True), ("not-supported", "13", True), ("not-supported", "15.0", False), ("not-supported", None, False),
             ("checked", "15.5", False), ("not-assessed", None, True), ("not-assessed", "Sequoia", True),
@@ -1400,11 +1401,13 @@ class ProfileTests(Case):
             ("glibc 2.039, a leading zero", libc("glibc 2.039"), [at_libc], True),
             ("glibc 02.39, a leading zero", libc("glibc 02.39"), [at_libc], True),
             ("glibc and two spaces", libc("glibc  2.39"), [at_libc], True),
+            ("glibc 2.1000, four digits", libc("glibc 2.1000"), [], False),
             ("CPython 3.12.13", cpython("3.12.13"), [], False),
             ("CPython 3.12.12", cpython("3.12.12"), [at_version], True),
             ("CPython 3.12.13rc1", cpython("3.12.13rc1"), [at_version], True),
             ("CPython 3.12.14+", cpython("3.12.14+"), [at_version], True),
             ("CPython 3.12", cpython("3.12"), [at_version], True),
+            ("CPython 3.12.1000, four digits", cpython("3.12.1000"), [], False),
             ("CPython 3.12.10000", cpython("3.12.10000"), [at_version], True),
         ):
             with self.subTest(label):
@@ -1533,11 +1536,12 @@ class ProfileTests(Case):
             with self.subTest(lane=lane):
                 self.assertEqual(set(re.findall(r"\w+ [0-9][0-9.]* or (?:newer|older)\b", cell)), kept.get(lane, set()))
         self.assertEqual(validator.bound_text(("CPython", (3, 12, 13), "or newer")), "CPython 3.12.13 or newer")
-        # Each bound names a version the validator reads.
+        # Each bound names a version the validator reads, with as many parts as the bound compares.
         _, real = real_result()
-        for name in {bound[0] for bounds in validator.STATUS_CONDITIONS.values() for bound in bounds}:
-            with self.subTest(name=name):
-                self.assertIsNotNone(validator.declared_version(real if name != "macOS" else macos_profile(), name)[1])
+        mac = changed(macos_profile(), lambda d: d["environment"]["layers"][-1]["os"].update(version=fact("15.5", provenance="declared")))
+        for bound in {bound for bounds in validator.STATUS_CONDITIONS.values() for bound in bounds}:
+            with self.subTest(bound=validator.bound_text(bound)):
+                self.assertIsNotNone(validator.bound_met(mac if bound[0] == "macOS" else real, bound))
 
     def test_a_checked_claim_needs_the_lane_table(self):
         _, profile = real_result()

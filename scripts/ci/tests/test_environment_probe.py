@@ -928,21 +928,47 @@ class RunEvidenceTests(Case):
                 result = machine.result()
             self.assertEqual(result["run"]["revision"]["pr_head_sha"], {"value": None, "provenance": "unknown", "reason": "GITHUB_EVENT_PATH is not set"})
             self.assertIn("ci-evidence", validator.validate_document(result, SCHEMA).codes())
-            # The validator links a run to its profile by its workflow ref, so the ref of a manual dispatch is recorded
-            # for any branch name git allows, within the schema's 200 characters and without a character the
-            # validator refuses in any value.
+            # The validator links a run to its profile by its workflow ref, so a manual dispatch records its ref, its
+            # workflow ref and its commit for any branch name git allows, within the schema's 200 characters and
+            # without a character the validator refuses in any value. actions/checkout checks the branch out by its
+            # name, so .git/HEAD names the branch, whose commit is in a loose ref or in packed-refs.
             profile = validator.load_json(ROOT / "tests" / "compatibility" / "profiles" / "linux-x64-gha.json")
             base = "P-R-N-D/Claus-AI/.github/workflows/ci.yml@refs/heads/"
-            for branch, recorded in (("fix/issue#12", True), ("feat/caf\u00e9", True), ("a,b", True), ("it's", True), ("a@b", True),
-                                     ("x" * (200 - len(base)), True), ("x" * (201 - len(base)), False), ("a b", False), ("a~1", False),
-                                     ("a:b", False), ("a\\b", False), ("a\x01b", False), ("a\x85b", False), ("a\u202eb", False), ("a\udc80", False)):
+            sha = "0123456789abcdef0123456789abcdef01234567"
+            for branch in ("main", "fix/issue#12", "feat/caf\u00e9", "\u4e2d\u6587", "a,b", "it's", "a@b", "a\u3000", "x" * (200 - len(base))):
+                for packed in (False, True):
+                    env = dict(self.run_env(directory, "workflow_dispatch", {}), GITHUB_REF="refs/heads/" + branch, GITHUB_WORKFLOW_REF=base + branch)
+                    with self.subTest(branch=branch, packed=packed), FakeMachine(env=env) as machine:
+                        (machine.git / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+                        if packed:
+                            (machine.git / "packed-refs").write_text(f"# pack-refs with: peeled fully-peeled sorted\n{sha} refs/heads/{branch}\n", encoding="utf-8")
+                        else:
+                            loose = machine.git / "refs" / "heads" / branch
+                            loose.parent.mkdir(parents=True, exist_ok=True)
+                            loose.write_text(sha + "\n", encoding="utf-8")
+                        result = machine.result()
+                        run = result["run"]
+                        self.assertEqual((value(run["ci"]["ref"]), value(run["ci"]["workflow_ref"]), value(run["revision"]["tested_sha"])),
+                                         ("refs/heads/" + branch, base + branch, sha))
+                        # An evidence reference is printable ASCII, so a loose ref with another name is cited by HEAD.
+                        evidence = "git:.git/packed-refs" if packed else f"git:.git/refs/heads/{branch}" if branch.isascii() else "git:.git/HEAD"
+                        self.assertEqual(run["revision"]["tested_sha"]["evidence"], [evidence])
+                        codes = validator.validate_document(result, SCHEMA, profile).codes()
+                        self.assertFalse({"schema", "control-character", "ci-evidence", "profile-link"} & set(codes), codes)
+            for branch in ("x" * (201 - len(base)), "a b", "a~1", "a:b", "a\\b", "a\x01b", "a\x85b", "a\u202eb", "a\udc80"):
                 env = dict(self.run_env(directory, "workflow_dispatch", {}), GITHUB_WORKFLOW_REF=base + branch)
                 with self.subTest(branch=branch), FakeMachine(env=env) as machine:
                     result = machine.result()
-                self.assertEqual(result["run"]["ci"]["workflow_ref"]["provenance"], "observed" if recorded else "unknown")
-                codes = validator.validate_document(result, SCHEMA, profile).codes()
-                self.assertFalse({"schema", "control-character"} & set(codes), codes)
-                self.assertEqual(("ci-evidence" in codes, "profile-link" in codes), (not recorded, not recorded))
+                    self.assertEqual(result["run"]["ci"]["workflow_ref"]["provenance"], "unknown")
+                    codes = validator.validate_document(result, SCHEMA, profile).codes()
+                    self.assertFalse({"schema", "control-character"} & set(codes), codes)
+                    self.assertTrue({"ci-evidence", "profile-link"} <= set(codes), codes)
+            # GITHUB_REF is read in the same way.
+            for ref, recorded in (("refs/" + "x" * 195, True), ("refs/tags/v1.0#rc", True), ("refs/" + "x" * 196, False), ("refs/", False),
+                                  ("refs/heads/a b", False), ("refs/heads/a~1", False), ("refs/heads/a\x01", False), ("heads/main", False)):
+                env = dict(self.run_env(directory, "workflow_dispatch", {}), GITHUB_REF=ref)
+                with self.subTest(ref=ref), FakeMachine(env=env) as machine:
+                    self.assertEqual(machine.result()["run"]["ci"]["ref"]["provenance"], "observed" if recorded else "unknown")
             odd = dict(push, GITHUB_REPOSITORY="owner/repo|x", RUNNER_ENVIRONMENT="custom", GITHUB_SHA="not-a-sha")
             with FakeMachine(env=odd) as machine:
                 ci = machine.result()["run"]
@@ -978,6 +1004,15 @@ class RunEvidenceTests(Case):
             for head, files, expected in (
                 ("ref: refs/heads/main\n", {"refs/heads/main": sha + "\n"}, sha),
                 ("ref: refs/heads/main\n", {"packed-refs": f"# pack-refs\n{sha} refs/heads/main\n"}, sha),
+                ("ref: refs/heads/fix/issue#12\n", {"refs/heads/fix/issue#12": sha + "\n"}, sha),
+                ("ref: refs/heads/feat/caf\u00e9\n", {"packed-refs": f"{sha} refs/heads/feat/caf\u00e9\n"}, sha),
+                # Only ASCII blanks end the line: this branch is not "refs/heads/a".
+                ("ref: refs/heads/a\u3000\n", {"refs/heads/a\u3000": sha + "\n", "refs/heads/a": "f" * 40 + "\n"}, sha),
+                # Git refuses these refs, and each would reach a file that holds a commit ID.
+                ("ref: refs/heads/.hidden\n", {"refs/heads/.hidden": sha + "\n"}, None),
+                ("ref: refs/heads/./main\n", {"refs/heads/main": sha + "\n"}, None),
+                ("ref: refs//main\n", {"refs/main": sha + "\n"}, None),
+                ("ref: refs/heads/a..b\n", {"refs/heads/a..b": sha + "\n"}, None),
                 ("ref: refs/heads/../../../etc/passwd\n", {}, None),
                 ("ref: refs/../../outside\n", {}, None),
                 ("garbage\n", {}, None),
@@ -991,6 +1026,9 @@ class RunEvidenceTests(Case):
                     self.assertEqual(value(machine.probe().checkout_sha()), expected)
                 for name in files:
                     (machine.git / name).unlink()
+            # A ref name the file system encoding cannot write leaves the commit unknown.
+            with mock.patch.object(collector, "read_regular", side_effect=UnicodeEncodeError("ascii", "x", 0, 1, "not encodable")):
+                self.assertEqual(machine.probe().checkout_sha(), {"value": None, "provenance": "unknown", "reason": ".git/HEAD could not be read (UnicodeEncodeError)"})
 
     def test_only_allowlisted_variables_are_read(self):
         probe = collector.Probe(env={"GITHUB_TOKEN": "x"})
@@ -1412,6 +1450,13 @@ class CommandTests(Case):
         for sample in ("::a##[b", "a\nb\u2028c", *self.SECRET_SAMPLES, *(repr("\n" + sample) for sample in self.SECRET_SAMPLES)):
             with self.subTest(sample=sample[:6]):
                 self.assertEqual(collector.plain(sample), validator.plain(sample))
+
+    def test_a_ref_may_hold_any_character_git_allows_that_the_validator_accepts(self):
+        # Checked on every code point, so a change to the validator's CONTROL changes what a recorded ref may hold.
+        every = "".join(map(chr, range(0x110000)))
+        self.assertEqual(set(re.findall(collector.REF_CHAR, every)), set(validator.CONTROL.sub("", every)) - set(" ~^:?*[\\"))
+        for pattern in (collector.GIT_REF, collector.WORKFLOW_REF):
+            self.assertTrue(pattern.endswith("refs/" + collector.REF_CHAR + "+"))
 
     def test_an_unwritable_output_is_a_usage_error(self):
         with tempfile.TemporaryDirectory() as directory:

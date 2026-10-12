@@ -142,11 +142,15 @@ USER_NS_INIT_INO = 0xEFFFFFFD
 PID_NS_INIT_INO = 0xEFFFFFFC
 # The same characters as CONTROL in validate_compatibility.py; a test keeps plain() equal to the validator's.
 CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]")
-# GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>, and the validator links a run to its profile by it, so any
-# ref git allows is recorded: none of space, "~", "^", ":", "?", "*", "[" or "\", and none of the characters CONTROL
-# refuses in any value. The whole value stays within the schema's 200 characters.
-WORKFLOW_REF = (r"(?=.{1,200}\Z)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]{1,150}@refs/"
-                r"[^ ~^:?*\[\\\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]+")
+# A character git allows in a ref: none of space, "~", "^", ":", "?", "*", "[" or "\", and none of the characters
+# CONTROL refuses in any value, taken from CONTROL itself.
+REF_CHAR = "[^ ~^:?*\\[\\\\" + CONTROL.pattern[1:]
+# GITHUB_REF, and the ref .git/HEAD names: actions/checkout checks a branch out by its name, so a run from any branch
+# git allows records its ref and commit. Within the schema's 200 characters.
+GIT_REF = rf"(?=.{{1,200}}\Z)refs/{REF_CHAR}+"
+# GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>, and the validator links a run to its profile by it, so it
+# is recorded for any of those refs. The whole value stays within the schema's 200 characters.
+WORKFLOW_REF = rf"(?=.{{1,200}}\Z)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]{{1,150}}@refs/{REF_CHAR}+"
 # The same shapes as SECRET_SHAPES in validate_compatibility.py; a test keeps them equal. None starts with \b, so
 # a shape is still found in the JSON text after an escape such as \n or \u200e.
 SECRET_SHAPES = (
@@ -1012,7 +1016,7 @@ class Probe:
             "system": observed("github-actions", "env:GITHUB_ACTIONS") if system else inferred("local", "env:GITHUB_ACTIONS"),
             "event": gha("GITHUB_EVENT_NAME", r"[a-z_]{1,64}"),
             "repository": gha("GITHUB_REPOSITORY", r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}"),
-            "ref": gha("GITHUB_REF", r"refs/[A-Za-z0-9._/+-]{1,190}"),
+            "ref": gha("GITHUB_REF", GIT_REF),
             "run_id": gha("GITHUB_RUN_ID", r"[0-9]{1,20}"),
             "run_attempt": gha("GITHUB_RUN_ATTEMPT", r"[0-9]{1,10}"),
             "run_url": not_applicable(na),
@@ -1071,15 +1075,20 @@ class Probe:
         head, reason = self.read_git("HEAD")
         if head is None:
             return unknown(reason)
-        head = head.strip()
+        # Only ASCII blanks: a ref may end in another character str.strip() removes, such as U+3000.
+        head = head.strip(" \t\r\n")
         if SHA.fullmatch(head):
             return observed(head, "git:.git/HEAD")
         ref = head[len("ref: "):] if head.startswith("ref: ") else None
-        if ref is None or not re.fullmatch(r"refs/[A-Za-z0-9._/+-]{1,190}", ref) or ".." in ref:
+        # The ref is read as a path under .git, so, as git requires of a ref, it holds no ".." and no part of it is
+        # empty or starts with ".".
+        if ref is None or not re.fullmatch(GIT_REF, ref) or ".." in ref or any(not part or part.startswith(".") for part in ref.split("/")):
             return unknown(".git/HEAD has an unexpected form")
         loose, _ = self.read_git(ref)
         if loose is not None and SHA.fullmatch(loose.strip()):
-            return observed(loose.strip(), f"git:.git/{ref}")
+            # An evidence reference is printable ASCII, so a loose ref with another name is cited by .git/HEAD, which
+            # names it.
+            return observed(loose.strip(), f"git:.git/{ref}" if ref.isascii() else "git:.git/HEAD")
         packed, _ = self.read_git("packed-refs")
         for line in (packed or "").splitlines():
             sha, _, name = line.partition(" ")
@@ -1092,7 +1101,8 @@ class Probe:
             if not self.git_dir.is_dir():
                 return None, ".git is not a directory (no checkout, or a worktree)"
             return read_regular(self.git_dir / name, 1 << 20).decode("utf-8", "replace"), None
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError: a ref name the file system encoding cannot write.
             return None, f".git/{name} could not be read ({type(exc).__name__})"
 
     def compute(self):

@@ -945,9 +945,44 @@
         "features": {
           "$ref": "#/$defs/fact_slug_list"
         },
+        "probe": {
+          "$ref": "#/$defs/backend_probe"
+        },
         "extensions": {
           "$ref": "#/$defs/extensions"
         }
+      }
+    },
+    "backend_probe": {
+      "description": "Optional device-v1 observations. Tool/runtime presence, API/device enumeration, access and actual computation are independent facts. Execution is never inferred from discovery.",
+      "type": "object",
+      "required": ["tool", "runtime_installed", "api_enumerated", "device_enumerated", "device_accessible", "execution"],
+      "additionalProperties": false,
+      "properties": {
+        "tool": {"$ref": "#/$defs/text"},
+        "runtime_installed": {"$ref": "#/$defs/fact_boolean"},
+        "api_enumerated": {"$ref": "#/$defs/fact_boolean"},
+        "device_enumerated": {"$ref": "#/$defs/fact_boolean"},
+        "device_accessible": {"$ref": "#/$defs/fact_boolean"},
+        "execution": {"$ref": "#/$defs/compute_execution"}
+      }
+    },
+    "compute_execution": {
+      "description": "One operation attempt. executed means the operation completed, even when its result was incorrect. A failed attempt may have executed=false. run is copied from the enclosing Result to prevent evidence from another run being attached as a pass.",
+      "type": "object",
+      "required": ["status", "executed", "effective", "correct", "software_fallback", "runtime", "process_id", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["passed", "failed", "blocked", "not-run"]},
+        "executed": {"type": "boolean"},
+        "effective": {"type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9._+-]{0,63}$"},
+        "correct": {"$ref": "#/$defs/fact_boolean"},
+        "software_fallback": {"$ref": "#/$defs/fact_boolean"},
+        "runtime": {"$ref": "#/$defs/fact_string"},
+        "process_id": {"$ref": "#/$defs/fact_integer"},
+        "evidence": {"$ref": "#/$defs/evidence_list"},
+        "reason": {"$ref": "#/$defs/text"},
+        "run": {"$ref": "#/$defs/run"}
       }
     },
     "compute": {
@@ -958,6 +993,10 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "probe_contract": {
+          "description": "Profiles opt into the device evidence contract; their results must keep this marker and record every backend probe.",
+          "const": "device-v1"
+        },
         "backends": {
           "type": "array",
           "items": {

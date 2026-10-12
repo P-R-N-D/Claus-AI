@@ -145,7 +145,7 @@ TECHNOLOGY_KINDS = {
 KNOWN_TECHNOLOGIES = frozenset(TECHNOLOGY_KINDS)
 KNOWN_BACKEND_APIS = frozenset({
     "cpu", "cuda", "rocm", "oneapi", "level-zero", "opencl", "vulkan-compute", "directcompute",
-    "directml", "metal", "mps", "coreml", "qnn", "wasm", "webgpu", "webgl", "webnn",
+    "directml", "metal", "mps", "coreml", "mlx", "qnn", "wasm", "webgpu", "webgl", "webnn",
 })
 KNOWN_ORCHESTRATION = frozenset({"none", "kubernetes", "k3s", "openshift", "nomad", "compose", "quadlet", "systemd"})
 KNOWN_SERVICE_MANAGERS = frozenset({"none", "systemd", "launchd", "windows-scm", "openrc"})
@@ -836,6 +836,98 @@ def check_compute(document, findings):
             findings.error("backend-reference", f"/compute/backends/{index}/id", f"duplicate backend id {backend['id']!r}")
         if backend["api"] == "cpu" and backend["kind"] != "cpu":
             findings.error("backend-reference", f"/compute/backends/{index}", "the cpu API runs on the cpu backend kind")
+    check_device_probes(document, findings)
+
+
+def check_device_probes(document, findings):
+    """The opt-in device contract augments v1; it does not reinterpret legacy CPU records."""
+    required = document["compute"].get("probe_contract") == "device-v1"
+    backends = {backend["id"]: backend for backend in document["compute"]["backends"]}
+    for index, backend in enumerate(document["compute"]["backends"]):
+        base = f"/compute/backends/{index}/probe"
+        probe = backend.get("probe")
+        if document["kind"] == "profile":
+            if probe is not None:
+                findings.error("compute-probe", base, "profiles declare capabilities; execution probes belong to results")
+            continue
+        if probe is None:
+            if required:
+                findings.error("compute-probe", base, "device-v1 results record a probe for every backend, including unexecuted ones")
+            continue
+        if not required:
+            findings.error("compute-probe", base, "a result with device probes names compute.probe_contract device-v1")
+        # Availability requires an API, a device and access; merely finding a tool or driver proves none of these.
+        if known(backend["available"]) is True:
+            for field in ("api_enumerated", "device_enumerated", "device_accessible"):
+                if measured(probe[field]) is not True:
+                    findings.error("compute-availability", f"{base}/{field}", "available=true requires measured API enumeration, device enumeration and device access")
+        execution = probe["execution"]
+        path = f"{base}/execution"
+        status = execution["status"]
+        effective = backends.get(execution["effective"])
+        if execution["effective"] is not None and effective is None:
+            findings.error("backend-reference", f"{path}/effective", "the actual execution backend is absent from compute.backends")
+        if status != "passed" and not execution.get("reason"):
+            findings.error("compute-execution", f"{path}/reason", "an unpassed probe records the reason or error category")
+        if status in ("not-run", "blocked"):
+            if execution["executed"] or execution["effective"] is not None or known(execution["correct"]) is not None:
+                findings.error("compute-execution", path, "an unexecuted probe has no completed operation, actual backend or correctness result")
+            if status == "not-run" and execution["evidence"]:
+                findings.error("compute-execution", f"{path}/evidence", "an operation that was not run has no execution evidence")
+        if status in RAN:
+            if execution.get("run") != document["run"]:
+                findings.error("compute-evidence", f"{path}/run", "execution evidence must name the same run, tested/event/head/base SHAs, workflow and job as the Result")
+            if not execution["evidence"] or (not document["synthetic"] and not any(ref.startswith(STAGE_EVIDENCE) for ref in execution["evidence"])):
+                findings.error("compute-evidence", f"{path}/evidence", "an attempted operation cites its execution log or artifact")
+        if execution["executed"]:
+            if status not in RAN or effective is None:
+                findings.error("compute-execution", path, "a completed operation names its actual backend and passed/failed status")
+            pid = measured(execution["process_id"])
+            if measured(execution["runtime"]) is None or pid is None or pid < 1:
+                findings.error("compute-evidence", path, "a completed operation records its measured runtime and positive process ID")
+            if effective is not None and measured(effective["available"]) is not True:
+                findings.error("compute-availability", f"{path}/effective", "a completed operation's actual backend is measured available")
+        elif execution["effective"] is not None or known(execution["correct"]) is not None:
+            findings.error("compute-execution", path, "an operation that did not complete names no actual backend or correctness result")
+        if status == "passed":
+            if not execution["executed"] or measured(execution["correct"]) is not True:
+                findings.error("compute-execution", path, "passed requires a completed operation and measured correct result")
+            if backend["kind"] in ("gpu", "npu") and (execution["effective"] != backend["id"] or measured(execution["software_fallback"]) is not False):
+                findings.error("accelerator-fallback", path, "a hardware pass requires that requested backend to execute with software fallback measured false")
+
+
+def check_device_stage(document, name, stage, backends, findings):
+    """Bind workload stage claims to the requested backend's recorded operation, not discovery."""
+    if name not in WORKLOAD_STAGES or stage["status"] not in RAN:
+        return
+    compute = stage.get("compute")
+    required = document["compute"].get("probe_contract") == "device-v1"
+    if compute is None:
+        if required:
+            findings.error("compute-execution", f"/stages/{name}/compute", "a device workload stage records requested and actual backends")
+        return
+    backend = backends.get(compute["requested"])
+    if backend is None:
+        return  # The existing backend-reference rule reports this.
+    probe = backend.get("probe")
+    # Legacy synthetic fixtures remain shape examples. Real accelerator claims always need execution evidence.
+    if probe is None:
+        if required or (not document["synthetic"] and backend["kind"] in ("gpu", "npu") and stage["status"] == "passed"):
+            findings.error("compute-execution", f"/stages/{name}/compute", "a compute stage cannot pass from inventory or driver discovery alone")
+        return
+    execution = probe["execution"]
+    path = f"/stages/{name}"
+    if execution["status"] not in RAN or compute["effective"] != execution["effective"]:
+        findings.error("compute-execution", f"{path}/compute", "stage execution and actual backend must agree with the requested backend's probe")
+    if not set(stage.get("evidence", ())).intersection(execution["evidence"]):
+        findings.error("compute-evidence", f"{path}/evidence", "the stage must cite its backend probe's execution evidence")
+    if stage["status"] == "passed" and not execution["executed"]:
+        findings.error("compute-execution", f"{path}/status", "a stage cannot pass when its probe completed no operation")
+    if stage["status"] == "passed" and backend["kind"] in ("gpu", "npu") and measured(execution["software_fallback"]) is not False:
+        findings.error("accelerator-fallback", f"{path}/compute", "a hardware stage pass requires software fallback measured false, even if its probe failed correctness")
+    if name in ("correctness", "performance") and stage["status"] == "passed":
+        if execution["status"] != "passed" or measured(execution["correct"]) is not True:
+            findings.error("compute-execution", f"{path}/status", "correctness and performance passes require a passed, correct operation")
 
 
 # ---------------------------------------------------------------------------
@@ -876,6 +968,7 @@ def check_stages(document, findings):
             before = stages[prerequisite]["status"]
             if status in RAN and before not in ("passed", "not-applicable"):
                 findings.error("stage-order", f"{base}/status", f"{name} cannot have {status} while {prerequisite} is {before}; record it as blocked or not-run")
+        check_device_stage(document, name, stage, backends, findings)
         compute = stage.get("compute")
         if compute is None:
             continue
@@ -1313,6 +1406,8 @@ def check_against_profile(result, profile, findings):
         findings.error("profile-link", "/profile_id", f"the result names profile {result['profile_id']!r}, not {profile['id']!r}")
     if result["synthetic"] != profile["synthetic"]:
         findings.error("profile-link", "/synthetic", "a real result is checked against a real profile, and a synthetic one against a synthetic one")
+    if profile["compute"].get("probe_contract") != result["compute"].get("probe_contract"):
+        findings.error("profile-mismatch", "/compute/probe_contract", "the result must use its profile's compute probe contract")
     ci = result["run"]["ci"]
     job = known(ci["job"])
     if not profile["synthetic"] and measured(ci["system"]) != "github-actions":

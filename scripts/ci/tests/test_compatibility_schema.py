@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import time
@@ -112,6 +113,8 @@ def real_result():
     }
     profile["synthetic"] = False
     profile["support"]["status"] = "checked"
+    # The lane is checked for glibc 2.39 or newer, so a checked profile declares the glibc version its run measures.
+    profile["workload"]["runtimes"]["python"]["libc"] = fact("glibc 2.39", provenance="declared")
     profile["evidence_sources"] = [{"workflow": ".github/workflows/ci.yml", "job": "compatibility"}]
     profile.pop("extensions")
     return result, profile
@@ -726,7 +729,10 @@ class EnvironmentRuleTests(Case):
             with self.subTest(version=version):
                 self.assertEqual(validator.cpython_version(version), ("3", "12"))
                 self.assertValid(check(changed(result, lambda d: python(d).update(version=fact(version, "synthetic:x")))))
-                self.assertValid(check(changed(real, lambda d: python(d).update(version=fact(version, provenance="declared")))))
+                # Each is CPython 3.12, the lock's interpreter; the lane's checked status needs 3.12.13 or a later release.
+                claimed = check(changed(real, lambda d: python(d).update(version=fact(version, provenance="declared"))))
+                expected = [] if version == "3.12.15" else [("support-claim", "/workload/runtimes/python/version")]
+                self.assertEqual([(code, path) for _, code, path, _ in claimed.errors], expected)
         # Text after the version is not ignored: the version is an error, and the profile loses its lane.
         for version in ("3.12-not-python", "3.12.15garbage", "3.12x", "3.12+", "3.12rc1", "3.12.15 ", " 3.12.15", "3.12.15rc", "3.12.\u0661\u0665", "3.12.1\u0665", "3.12.015", "03.12.15", "3.012", "3.12.0a01", "3.12.0rc01"):
             with self.subTest(version=version):
@@ -1346,14 +1352,66 @@ class ProfileTests(Case):
         self.assertValid(check(changed(profile, lambda d: support(d).update(status="not-assessed"))))
         _, real = real_result()
         self.assertFinding(check(changed(real, lambda d: d["support"].update(status="not-assessed"))), "support-claim", "/support/status")
-        # A lane with one status per condition accepts each of them.
+        # The macOS Apple Silicon row gives one status per macOS version: statically resolvable for 15 or newer and not
+        # supported for 14 or older. A claim needs the version that gives its status, and a real profile copies it.
         mac = macos_profile()
-        for status, valid in (("statically-resolvable", True), ("not-supported", True), ("checked", False)):
-            with self.subTest(status=status):
-                findings = check(changed(mac, lambda d: d["support"].update(status=status, lane="macOS Apple Silicon")))
+        version = lambda text: lambda d: d["environment"]["layers"][-1]["os"].update(version=fact(text, provenance="declared") if text else unknown())  # noqa: E731
+        for status, os_version, valid in (
+            ("statically-resolvable", "15.5", True), ("statically-resolvable", "15", True), ("statically-resolvable", "26.0.1", True),
+            ("statically-resolvable", "14.7.1", False), ("statically-resolvable", None, False), ("statically-resolvable", "Sequoia", False),
+            ("not-supported", "14.7.1", True), ("not-supported", "13", True), ("not-supported", "15.0", False), ("not-supported", None, False),
+            ("checked", "15.5", False), ("not-assessed", None, True), ("not-assessed", "Sequoia", True),
+            ("not-assessed", "15.5", False), ("not-assessed", "14.7", False),
+        ):
+            with self.subTest(status=status, os_version=os_version):
+                claimed = changed(mac, lambda d: (d["support"].update(status=status, lane="macOS Apple Silicon"), version(os_version)(d)))
+                findings = check(claimed)
                 self.assertEqual(not findings.errors, valid, findings.items)
+                if not valid and status != "checked":
+                    path = "/support/status" if status == "not-assessed" else "/environment/layers/0/os/version"
+                    self.assertEqual([(code, where) for _, code, where, _ in findings.errors], [("support-claim", path)])
+        unread = check(changed(mac, lambda d: (d["support"].update(status="statically-resolvable", lane="macOS Apple Silicon"), version("Sequoia")(d))))
+        self.assertEqual([message for _, _, _, message in unread.errors], ["lane 'macOS Apple Silicon' is statically-resolvable for macOS 15 or newer, so a statically-resolvable claim declares a macOS version, such as 14.7 or 15.5; this profile declares 'Sequoia'"])
+        # The version is the innermost layer's: a macOS 15 guest on a macOS 14 host is macOS 15.
+        guest = changed(mac, lambda d: (d["support"].update(status="statically-resolvable", lane="macOS Apple Silicon"), version("15.5")(d)))
+        host = changed(guest["environment"]["layers"][0], lambda layer: layer.update(kind=fact("host", provenance="declared"),
+                                                                                    technology={"value": None, "provenance": "not-applicable", "reason": "the outermost host runs on hardware"}))
+        host["os"].update(version=fact("14.7", provenance="declared"))
+        guest["environment"]["layers"][0].update(kind=fact("vm", provenance="declared"), technology=fact("other", provenance="declared"))
+        guest["environment"]["layers"].insert(0, host)
+        for status, valid in (("statically-resolvable", True), ("not-supported", False)):
+            with self.subTest(guest=status):
+                findings = check(changed(guest, lambda d: d["support"].update(status=status)))
+                self.assertEqual(not findings.errors, valid, findings.items)
+        # The Linux x86-64 glibc row is checked for glibc 2.39 or newer and CPython 3.12.13 or newer; a real profile
+        # below either bound, or that does not declare the version, names the lane with not-assessed.
+        libc = lambda text: lambda d: d["workload"]["runtimes"]["python"].update(libc=fact(text, provenance="declared") if text else unknown())  # noqa: E731
+        cpython = lambda text: lambda d: d["workload"]["runtimes"]["python"].update(version=fact(text, provenance="declared"))  # noqa: E731
+        at_libc, at_version = ("support-claim", "/workload/runtimes/python/libc"), ("support-claim", "/workload/runtimes/python/version")
+        for label, change, checked_errors, not_assessed_valid in (
+            ("glibc 2.39", libc("glibc 2.39"), [], False),
+            ("glibc 2.41", libc("glibc 2.41"), [], False),
+            ("glibc 2.39.1", libc("glibc 2.39.1"), [], False),
+            ("GLIBC 2.40", libc("GLIBC 2.40"), [], False),
+            ("glibc 2.34, RHEL 9", libc("glibc 2.34"), [at_libc], True),
+            ("glibc 1.39", libc("glibc 1.39"), [at_libc], True),
+            ("glibc without a version", libc("glibc"), [at_libc], True),
+            ("glibc from the ABI tag only", libc(None), [at_libc], True),
+            ("CPython 3.12.13", cpython("3.12.13"), [], False),
+            ("CPython 3.12.12", cpython("3.12.12"), [at_version], True),
+            ("CPython 3.12.13rc1", cpython("3.12.13rc1"), [at_version], True),
+            ("CPython 3.12.14+", cpython("3.12.14+"), [at_version], True),
+            ("CPython 3.12", cpython("3.12"), [at_version], True),
+        ):
+            with self.subTest(label):
+                claimed = changed(real, change)
+                self.assertEqual([(code, path) for _, code, path, _ in check(claimed).errors], checked_errors)
+                findings = check(changed(claimed, lambda d: d["support"].update(status="not-assessed")))
+                self.assertEqual(not findings.errors, not_assessed_valid, findings.items)
+        message = [message for _, code, _, message in check(changed(real, libc("glibc 2.34"))).errors if code == "support-claim"][0]
+        self.assertEqual(message, "lane 'Linux x86-64 glibc' is checked for glibc 2.39 or newer; this profile declares 'glibc 2.34'")
         # The lane table and the platform agree with this claim, so only the synthetic marking can reject it.
-        on_checked_lane = changed(fixture("linux-x64-vm.profile"), lambda d: support(d).update(status="checked"))
+        on_checked_lane = changed(fixture("linux-x64-vm.profile"), lambda d: (support(d).update(status="checked"), libc("glibc 2.39")(d)))
         self.assertCodes(check(on_checked_lane), "support-claim")
         self.assertEqual([path for _, code, path, _ in check(on_checked_lane).errors], ["/support/status"])
 
@@ -1382,8 +1440,8 @@ class ProfileTests(Case):
             ("interpreter not declared", lambda d: python(d).update(free_threaded_build=unknown()), "/workload/runtimes/python"),
             ("another architecture", aarch64, "/workload/runtimes/python/arch"),
             ("architecture not declared", lambda d: python(d).update(arch=unknown(), execution=unknown()), "/workload/runtimes/python/arch"),
-            ("musl", lambda d: python(d).update(soabi=fact("cpython-312-x86_64-linux-musl", provenance="declared")), "/workload/runtimes/python/soabi"),
-            ("C library not declared", lambda d: python(d).update(soabi=unknown()), "/workload/runtimes/python/soabi"),
+            ("musl", lambda d: python(d).update(libc=unknown(), soabi=fact("cpython-312-x86_64-linux-musl", provenance="declared")), "/workload/runtimes/python/soabi"),
+            ("C library not declared", lambda d: python(d).update(libc=unknown(), soabi=unknown()), "/workload/runtimes/python/soabi"),
             ("another OS", lambda d: layers(d)[1]["os"].update(family=fact("freebsd", provenance="declared")), "/environment/layers/1/os/family"),
         ):
             with self.subTest(label):
@@ -1445,6 +1503,28 @@ class ProfileTests(Case):
 
     def test_the_validator_knows_every_lane_in_the_table(self):
         self.assertEqual(set(validator.LANE_TARGETS), set(LANES))
+
+    def test_the_validator_keeps_the_version_bounds_of_the_table(self):
+        # Each bound the validator keeps is written in the sentence of its lane's backend lock cell that names the
+        # status, and each bound a cell writes is one the validator keeps for that lane.
+        cells = {}
+        for line in STRATEGY.read_text(encoding="utf-8").splitlines():
+            parts = [part.strip() for part in line.strip().strip("|").split("|")]
+            if line.startswith("| ") and len(parts) >= 3 and parts[0] in LANES:
+                cells[parts[0]] = parts[2]
+        self.assertEqual(set(cells), set(LANES))
+        words, kept = dict(validator.STATUS_WORDS), {}
+        for (lane, status), bounds in validator.STATUS_CONDITIONS.items():
+            with self.subTest(lane=lane, status=status):
+                self.assertIn(status, LANES[lane])
+                texts = [validator.bound_text(bound) for bound in bounds]
+                kept.setdefault(lane, set()).update(texts)
+                sentences = [sentence for sentence in re.split(r"\.\s+", cells[lane]) if re.search(rf"\b(?:{words[status]})\b", sentence, re.IGNORECASE)]
+                self.assertTrue(any(all(text in sentence for text in texts) for sentence in sentences), cells[lane])
+        for lane, cell in cells.items():
+            with self.subTest(lane=lane):
+                self.assertEqual(set(re.findall(r"\w+ [0-9][0-9.]* or (?:newer|older)\b", cell)), kept.get(lane, set()))
+        self.assertEqual(validator.bound_text(("CPython", (3, 12, 13), "or newer")), "CPython 3.12.13 or newer")
 
     def test_a_checked_claim_needs_the_lane_table(self):
         _, profile = real_result()
@@ -1623,15 +1703,21 @@ class ProfileTests(Case):
                 self.assertCodes(check(elsewhere, profile), "profile-link")
                 self.assertFinding(check(elsewhere, profile), "profile-link", "/run/ci/workflow_ref")
         self.assertFinding(check(other_workflow, profile), "profile-link", "/run/ci/workflow_ref")
-        self.assertValid(check(changed(result, lambda d: d["run"]["ci"].update(workflow_ref=unknown())), profile))
-        # Without a workflow_ref, only the job is compared.
-        no_ref = changed(other_job, lambda d: d["run"]["ci"].update(workflow_ref=unknown()))
-        self.assertFinding(check(no_ref, profile), "profile-link", "/run/ci/job")
-        # Nor is a known workflow_ref compared without the repository: only the job is, and the record fails as CI evidence.
-        no_repository = changed(other_workflow, lambda d: d["run"]["ci"].update(repository=unknown()))
-        self.assertCodes(check(no_repository, profile), "ci-evidence")
-        no_repository_job = changed(no_repository, lambda d: d["run"]["ci"].update(job=fact("backend", "env:GITHUB_JOB")))
-        self.assertFinding(check(no_repository_job, profile), "profile-link", "/run/ci/job")
+        # A ref that names no workflow file or no ref links to no workflow.
+        for ref in ("P-R-N-D/Claus-AI/.github/workflows/ci.yml", "P-R-N-D/Claus-AI/@refs/pull/1/merge", "P-R-N-D/Claus-AI/.github/workflows/ci.yml@"):
+            with self.subTest(workflow_ref=ref):
+                partial = changed(result, lambda d: d["run"]["ci"].update(workflow_ref=fact(ref, "env:GITHUB_WORKFLOW_REF")))
+                self.assertEqual(check(partial, profile).errors, [("error", "profile-link", "/run/ci/workflow_ref", f"the workflow ref {ref!r} does not name a workflow file and a ref")])
+        # A run is linked by its workflow and its job, so a record without its workflow ref or its repository links to
+        # no profile, even with the profile's job, and fails as CI evidence too.
+        for label, change in (("no workflow ref", lambda d: d["run"]["ci"].update(workflow_ref=unknown())),
+                              ("no repository", lambda d: d["run"]["ci"].update(repository=unknown())),
+                              ("neither", lambda d: d["run"]["ci"].update(workflow_ref=unknown(), repository=unknown()))):
+            with self.subTest(label):
+                findings = check(changed(result, change), profile)
+                self.assertCodes(findings, "ci-evidence", "profile-link")
+                self.assertFinding(findings, "profile-link", "/run/ci/workflow_ref")
+        self.assertFinding(check(changed(other_job, lambda d: d["run"]["ci"].update(workflow_ref=unknown())), profile), "profile-link", "/run/ci/workflow_ref")
 
     def test_a_github_actions_record_names_its_run_and_commits(self):
         result, profile = real_result()
@@ -1654,13 +1740,14 @@ class ProfileTests(Case):
             with self.subTest(label):
                 self.assertCodes(check(changed(result, change), profile), "ci-evidence")
         # A declared run or commit is a claim the record cannot back, so each must be observed or inferred.
-        for group, names in ((ci, ("event", "repository", "run_id", "run_attempt", "run_url", "job")), (revision, ("tested_sha", "event_sha", "pr_head_sha", "pr_base_sha"))):
+        for group, names in ((ci, ("event", "repository", "run_id", "run_attempt", "run_url", "workflow_ref", "job")), (revision, ("tested_sha", "event_sha", "pr_head_sha", "pr_base_sha"))):
             for name in names:
                 with self.subTest(declared=name):
                     path = f"/run/{'ci' if group is ci else 'revision'}/{name}"
                     declared = changed(result, lambda d: group(d).update({name: fact(group(d)[name]["value"], provenance="declared")}))
                     self.assertFinding(check(declared, profile), "ci-evidence", path)
         self.assertFinding(check(changed(result, lambda d: ci(d).update(job=unknown())), profile), "ci-evidence", "/run/ci/job")
+        self.assertFinding(check(changed(result, lambda d: ci(d).update(workflow_ref=unknown())), profile), "ci-evidence", "/run/ci/workflow_ref")
         # A URL with no attempt names the run, whatever its attempt; one with an attempt names that attempt.
         attempt = lambda n, url: lambda d: ci(d).update(run_attempt=fact(n, "env:GITHUB_RUN_ATTEMPT"), run_url=fact(url, "env:x", provenance="inferred"))  # noqa: E731
         run = "https://github.com/P-R-N-D/Claus-AI/actions/runs/100"

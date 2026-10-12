@@ -191,9 +191,8 @@
           "provenance": "declared"
         },
         "libc": {
-          "value": null,
-          "provenance": "unknown",
-          "reason": "the runner image's glibc; each run records it"
+          "value": "glibc 2.39",
+          "provenance": "declared"
         },
         "execution": {
           "value": "native",

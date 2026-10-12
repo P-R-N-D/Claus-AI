@@ -113,6 +113,15 @@ LANE_TARGETS = {
 }
 # The lane table's backend lock column describes backend/locks/cp312-linux-x86_64.txt: CPython 3.12 with the GIL.
 LOCK_INTERPRETER = ("cpython", "3.12", False)
+# Statuses the lane table gives a lane for some versions only, with the bounds that decide them. Each bound reads as
+# the table writes it, "<name> <version> or newer" or "or older", and a test finds it in the sentence of the lane's
+# backend lock cell that names the status. A lane listed here gives a profile a status only where the versions the
+# profile declares meet all of that status's bounds.
+STATUS_CONDITIONS = {
+    ("Linux x86-64 glibc", "checked"): (("glibc", (2, 39), "or newer"), ("CPython", (3, 12, 13), "or newer")),
+    ("macOS Apple Silicon", "statically-resolvable"): (("macOS", (15,), "or newer"),),
+    ("macOS Apple Silicon", "not-supported"): (("macOS", (14,), "or older"),),
+}
 
 ARCH_ALIASES = {
     "amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64", "i386": "x86", "i486": "x86",
@@ -911,7 +920,7 @@ def check_run(document, findings):
     if known(ci["system"]) != "github-actions":
         return
     # The run and the commits are evidence only when measured; a declared value is a claim the record cannot back.
-    for name in ("event", "repository", "run_id", "run_attempt", "run_url", "job"):
+    for name in ("event", "repository", "run_id", "run_attempt", "run_url", "workflow_ref", "job"):
         if measured(ci[name]) is None:
             findings.error("ci-evidence", f"/run/ci/{name}", "a GitHub Actions record names its run, as observed or inferred")
     if measured(ci["run_attempt"]) == 0:
@@ -1108,8 +1117,20 @@ def check_support(profile, strategy_lanes, findings):
         findings.error("support-claim", "/support/lane", f"no lane {lane!r} is known; name a row of the docs/DEPENDENCY-STRATEGY.md lane table exactly")
         return
     matches = lane_matches(profile, target, status, findings)
+    conditional = {name: bounds for (row, name), bounds in STATUS_CONDITIONS.items() if row == lane}
+    for bound in conditional.get(status, ()):
+        met = bound_met(profile, bound)
+        _, path, written, form = declared_version(profile, bound[0])
+        shown = "none" if written is None else repr(written)
+        if met is None:
+            findings.error("support-claim", path, f"lane {lane!r} is {status} for {bound_text(bound)}, so a {status} claim declares {form}; this profile declares {shown}")
+        elif not met:
+            findings.error("support-claim", path, f"lane {lane!r} is {status} for {bound_text(bound)}; this profile declares {shown}")
+    # Such a lane covers a profile only where the profile's versions meet all the bounds of one of its statuses.
+    if conditional and not any(all(bound_met(profile, bound) is True for bound in bounds) for bounds in conditional.values()):
+        matches = False
     if status == "not-assessed" and not synthetic and matches:
-        findings.error("support-claim", "/support/status", "a real profile whose platform and interpreter are what its docs/DEPENDENCY-STRATEGY.md lane covers copies the lane's status")
+        findings.error("support-claim", "/support/status", "a real profile whose platform, interpreter and versions are what its docs/DEPENDENCY-STRATEGY.md lane covers copies the lane's status")
     if strategy_lanes is None:
         if status == "checked":
             findings.warning("support-claim-unverified", "/support/status", "checked claim not compared with docs/DEPENDENCY-STRATEGY.md; pass --dependency-strategy")
@@ -1157,6 +1178,46 @@ def lane_matches(profile, target, status, findings):
         if status != "not-assessed":
             findings.error("support-claim", "/workload/runtimes/python", f"the lane table's statuses are for the backend lock's interpreter, CPython {LOCK_INTERPRETER[1]} with the GIL; this profile declares {interpreter[0]} {declared} (free-threaded build: {interpreter[2]}), so it records not-assessed")
     return matches
+
+
+def declared_version(profile, name):
+    """(the version a profile declares for a STATUS_CONDITIONS name as a tuple of numbers, or None when it declares
+    none that can be read; the path of its fact; the fact's value as written; the form a bound reads).
+
+    macOS is the innermost layer's OS version; glibc is the Python's libc fact, written as the collector writes it in
+    any ASCII letter case; CPython is a release version, so a pre-release, a build after a release (3.12.14+) or a
+    major.minor version gives None.
+    """
+    layers, python = layers_of(profile), profile["workload"]["runtimes"]["python"]
+    path, fact, pattern, form = {
+        "macOS": (f"/environment/layers/{len(layers) - 1}/os/version", layers[-1]["os"]["version"],
+                  r"([0-9]{1,4}(?:\.[0-9]{1,4}){0,2})", "a macOS version, such as 14.7 or 15.5"),
+        "glibc": ("/workload/runtimes/python/libc", python["libc"],
+                  r"(?ai:glibc) ([0-9]{1,4}(?:\.[0-9]{1,4}){1,2})", "a libc fact with the glibc version, such as glibc 2.39"),
+        "CPython": ("/workload/runtimes/python/version", python["version"],
+                    r"([0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})", "a CPython release version, such as 3.12.15"),
+    }[name]
+    written = known(fact)
+    match = re.fullmatch(pattern, written) if isinstance(written, str) else None
+    version = tuple(int(part) for part in match.group(1).split(".")) if match else None
+    return version, path, written, form
+
+
+def bound_met(profile, bound):
+    """Whether the version a profile declares meets a bound: True, False, or None when it declares none to compare.
+
+    A version is compared on as many parts as the bound has, so macOS 14.7.1 is 14 or older."""
+    name, limit, direction = bound
+    version = declared_version(profile, name)[0]
+    if version is None or len(version) < len(limit):
+        return None
+    head = version[:len(limit)]
+    return head >= limit if direction == "or newer" else head <= limit
+
+
+def bound_text(bound):
+    name, limit, direction = bound
+    return f"{name} {'.'.join(str(part) for part in limit)} {direction}"
 
 
 def check_accelerator(profile, findings):
@@ -1250,19 +1311,20 @@ def check_against_profile(result, profile, findings):
     if not profile["synthetic"] and measured(ci["system"]) != "github-actions":
         findings.error("profile-link", "/run/ci/system", f"profile {profile['id']} is recorded by GitHub Actions jobs; this record was not shown to come from one")
     if known(ci["system"]) == "github-actions":
-        # GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>; the job is compared with the workflow it ran in when both are known.
+        # GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>. A run is linked to a profile by the workflow and the
+        # job it ran, so a record that does not name both its repository and its workflow ref links to no profile.
         repository, workflow_ref = known(ci["repository"]), known(ci["workflow_ref"])
         sources = [(source["workflow"], source["job"]) for source in profile["evidence_sources"]]
-        if isinstance(repository, str) and isinstance(workflow_ref, str):
-            # A known workflow ref is compared when the repository is known too; otherwise the job is compared alone.
-            if not workflow_ref.startswith(repository + "/"):
-                findings.error("profile-link", "/run/ci/workflow_ref", f"the workflow ref {workflow_ref!r} is not in repository {repository!r}")
-            else:
-                workflow = workflow_ref[len(repository) + 1:].partition("@")[0]
-                if (workflow, job) not in sources:
-                    findings.error("profile-link", "/run/ci/workflow_ref", f"job {job!r} of {workflow!r} is not an evidence source of profile {profile['id']}")
-        elif job not in [source_job for _, source_job in sources]:
-            findings.error("profile-link", "/run/ci/job", f"job {job!r} is not an evidence source of profile {profile['id']}")
+        if not isinstance(repository, str) or not isinstance(workflow_ref, str):
+            findings.error("profile-link", "/run/ci/workflow_ref", f"a GitHub Actions record is linked to profile {profile['id']} by its repository, workflow ref and job; this one does not name its repository and workflow ref")
+        elif not workflow_ref.startswith(repository + "/"):
+            findings.error("profile-link", "/run/ci/workflow_ref", f"the workflow ref {workflow_ref!r} is not in repository {repository!r}")
+        else:
+            workflow, _, ref = workflow_ref[len(repository) + 1:].partition("@")
+            if not workflow or not ref:
+                findings.error("profile-link", "/run/ci/workflow_ref", f"the workflow ref {workflow_ref!r} does not name a workflow file and a ref")
+            elif (workflow, job) not in sources:
+                findings.error("profile-link", "/run/ci/workflow_ref", f"job {job!r} of {workflow!r} is not an evidence source of profile {profile['id']}")
 
     def compare(path, declared_fact, observed_fact):
         # Only a measured value establishes what the profile declares; a declared value in the result does not.

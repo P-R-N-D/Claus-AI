@@ -41,12 +41,26 @@ if probe.tags is None:
 SHA = {name: (name * 64)[:64] for name in "abcdef0123456789"}
 
 
-def wheel(filename, sha="a", yanked=False):
-    return {"filename": filename, "digests": {"sha256": SHA[sha]}, "yanked": yanked}
+def wheel(filename, sha="a", yanked=False, requires_python=None):
+    return {"filename": filename, "digests": {"sha256": SHA[sha]}, "yanked": yanked, "requires_python": requires_python}
 
 
 def release(*entries):
     return {"urls": [*entries, {"filename": "cbor2-6.1.5.tar.gz", "digests": {"sha256": SHA["f"]}}]}
+
+
+class Distribution:
+    """An installed distribution as importlib.metadata shows it, with only what the probe reads."""
+
+    def __init__(self, name, version, requires=(), wheel_tags=(), files=()):
+        self.metadata = {"Name": name}
+        self.version = version
+        self.requires = list(requires)
+        self.wheel_tags = list(wheel_tags)
+        self.files = [pathlib.PurePosixPath(item) for item in files]
+
+    def read_text(self, name):
+        return "".join(f"Tag: {tag}\n" for tag in self.wheel_tags) if name == "WHEEL" else None
 
 
 # Tags as packaging lists them for CPython 3.15 on Linux x86-64, abridged and in its order of preference.
@@ -169,6 +183,18 @@ class TagTests(unittest.TestCase):
         files[0]["yanked"] = True
         self.assertEqual(probe.compatible(files[:1], GIL_TAGS, {SHA["a"]}), ([], []))
 
+    def test_requires_python_excludes_a_wheel_as_installers_do(self):
+        files = probe.wheel_files(release(wheel("cbor2-6.1.5-py3-none-any.whl", "a", requires_python=">=3.16"),
+                                          wheel("cbor2-6.1.5-cp315-cp315-manylinux_2_28_x86_64.whl", "b", requires_python=">=3.10"),
+                                          wheel("cbor2-6.1.5-cp39-abi3-manylinux_2_28_x86_64.whl", "c", requires_python="not a specifier")), "cbor2", "6.1.5")
+        self.assertEqual([item["requires_python"] for item in files], [">=3.16", ">=3.10", "not a specifier"])
+        in_lock, _ = probe.compatible(files, GIL_TAGS, {SHA["a"], SHA["b"], SHA["c"]}, "3.15.0")
+        # The py3 wheel needs 3.16; an unreadable Requires-Python excludes nothing, as pip treats it.
+        self.assertEqual([item["sha256"] for item in in_lock], [SHA["b"], SHA["c"]])
+        in_lock, _ = probe.compatible(files, GIL_TAGS, {SHA["a"], SHA["b"], SHA["c"]}, "3.16.0")
+        self.assertEqual([item["sha256"] for item in in_lock], [SHA["b"], SHA["c"], SHA["a"]])
+        self.assertTrue(probe.admits(None, "3.15.0"))
+
     def test_abi_categories(self):
         files = self.files(("cbor2-6.1.5-cp315-cp315-manylinux_2_28_x86_64.whl", "a"), ("cbor2-6.1.5-cp315-cp315t-manylinux_2_28_x86_64.whl", "b"),
                            ("cbor2-6.1.5-cp315-cp315t-win_arm64.whl", "c"), ("cbor2-6.1.5-cp39-abi3-manylinux_2_28_x86_64.whl", "d"))
@@ -224,6 +250,10 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(probe.overall([item("dependency-blocked")])[0], "blocked")
         self.assertEqual(probe.overall([item("dependency-failed")])[0], "failed")
         self.assertEqual(probe.overall([item("contradiction")])[0], "failed")
+        # A package that enables the GIL a free-threaded build started without fails, though it imports and runs.
+        reenabled = item("installed", "passed", "passed")
+        reenabled["probe"]["gil_reenabled"] = True
+        self.assertEqual(probe.overall([reenabled])[0::2], ("passed", "failed"))
 
     def test_the_install_stage(self):
         wheels = {"uncovered": ["cryptography", "psycopg-binary"], "published_not_in_lock": ["psycopg-binary"]}
@@ -241,14 +271,39 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(probe.install_stage(0, 0, "", None)[0], "failed")
         self.assertEqual(probe.install_stage(0, 0, "", {"uncovered": []}), ("passed", "the lock installed binary-only with its hashes, and uv pip check passed"))
         # Windows x64: every wheel exists, and tzdata, which Django and psycopg require on win32, is not in the lock.
-        missing = {"missing": [{"requirement": "tzdata", "required_by": "django", "in_lock": False},
-                               {"requirement": "tzdata", "required_by": "psycopg", "in_lock": False}]}
-        self.assertEqual(probe.install_stage(0, 1, "", {"uncovered": []}, missing),
+        # The log is what uv 0.12.24 printed on that lane.
+        missing = {"missing": [{"requirement": "tzdata", "required_by": "django", "in_lock": False, "installed": None},
+                               {"requirement": "tzdata", "required_by": "psycopg", "in_lock": False, "installed": None}]}
+        check_log = ("Checked 50 packages in 2ms\nFound 2 incompatibilities\n"
+                     "The package `psycopg` requires `tzdata ; sys_platform == 'win32'`, but it's not installed\n"
+                     "The package `django` requires `tzdata ; sys_platform == 'win32'`, but it's not installed\n")
+        self.assertEqual(probe.install_stage(0, 1, check_log, {"uncovered": []}, missing),
                          ("blocked", "the lock does not pin requirements this platform needs: tzdata (required by django, psycopg)"))
         # A requirement the lock pins but the install lacks, or a check failure nothing explains, is a failure.
-        self.assertEqual(probe.install_stage(0, 1, "", {"uncovered": []}, {"missing": [{"requirement": "idna", "required_by": "anyio", "in_lock": True}, *missing["missing"]]})[0], "failed")
-        self.assertEqual(probe.install_stage(0, 1, "", {"uncovered": []}, {"missing": []})[0], "failed")
-        self.assertEqual(probe.install_stage(0, 1, "", {"uncovered": []}, None)[0], "failed")
+        self.assertEqual(probe.install_stage(0, 1, check_log, {"uncovered": []}, {"missing": [{"requirement": "idna", "required_by": "anyio", "in_lock": True}, *missing["missing"]]})[0], "failed")
+        self.assertEqual(probe.install_stage(0, 1, check_log, {"uncovered": []}, {"missing": []})[0], "failed")
+        self.assertEqual(probe.install_stage(0, 1, check_log, {"uncovered": []}, None)[0], "failed")
+        # An installed version a requirement excludes is a failure, even beside a requirement the lock lacks.
+        conflict = {"requirement": "asgiref", "required_by": "django", "in_lock": True, "installed": "3.8.0"}
+        self.assertEqual(probe.install_stage(0, 1, check_log, {"uncovered": []}, {"missing": [conflict, *missing["missing"]]})[0], "failed")
+        # So is a problem uv pip check reports that the requirements report does not model, such as a version
+        # conflict, or a count that does not match the problem lines, or no problem lines at all.
+        mixed = check_log.replace("Found 2 incompatibilities", "Found 3 incompatibilities") + "The package `django` requires `asgiref>=3.9`, but `3.8.0` is installed\n"
+        self.assertEqual(probe.install_stage(0, 1, mixed, {"uncovered": []}, missing),
+                         ("failed", "uv pip check reported 1 of 3 problems that are not a requirement missing from the lock; see the install log"))
+        self.assertEqual(probe.install_stage(0, 1, check_log.replace("Found 2", "Found 3"), {"uncovered": []}, missing)[0], "failed")
+        self.assertEqual(probe.install_stage(0, 1, "", {"uncovered": []}, missing)[0], "failed")
+        self.assertEqual(probe.install_stage(0, 1, check_log.replace("tzdata ;", "tzdata2 ;"), {"uncovered": []}, missing)[0], "failed")
+
+    def test_only_a_line_that_says_a_wheel_is_missing_names_one(self):
+        # What uv 0.12.24 printed on the macOS x64 and Windows on Arm lanes.
+        log = ("  cause: Because autobahn==26.7.1 has no usable wheels and you require autobahn==26.7.1, we can conclude that your requirements are unsatisfiable.\n"
+               "hint: Wheels are required for `autobahn` because building from source is disabled for all packages (i.e., with `--no-build`)\n")
+        self.assertTrue(probe.names_a_missing_wheel(log, ["autobahn"]))
+        self.assertTrue(probe.names_a_missing_wheel(log.splitlines()[1], ["autobahn"]))
+        self.assertFalse(probe.names_a_missing_wheel(log, ["cryptography"]))
+        # A line about a wheel that does not say it is missing, such as a failed download, names none.
+        self.assertFalse(probe.names_a_missing_wheel("error: Failed to download `autobahn` wheel: connection reset\n", ["autobahn"]))
 
     def test_the_install_stage_command(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -273,6 +328,133 @@ class OutcomeTests(unittest.TestCase):
     def test_output_lines_cannot_be_forged(self):
         with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(probe.ProbeError, "spans lines"):
             probe.write_output(pathlib.Path(directory) / "o", [("reason", "x\nstatus=passed")])
+
+    def test_recorded_text_has_no_paths_or_control_characters(self):
+        text = probe.scrub(f"DeprecationWarning: {sys.prefix}/lib\nnext\tline\x1b[0m" + "x" * 400)
+        self.assertTrue(text.startswith("DeprecationWarning: <path>/lib next line [0m"))
+        self.assertEqual(len(text), 300)
+
+
+class RequirementTests(unittest.TestCase):
+    def test_unmet_requirements_name_missing_and_excluded_versions(self):
+        environment = {**probe.markers.default_environment(), "sys_platform": "win32"}
+        installed = [Distribution("Django", "6.1", ["asgiref>=3.9", "sqlparse>=0.5", "tzdata; sys_platform == 'win32'", "argon2-cffi>=23; extra == 'argon2'"]),
+                     Distribution("asgiref", "3.8.0"), Distribution("tzdata-free", "1.0", ["Django>=6"])]
+        with mock.patch.object(probe.importlib.metadata, "distributions", return_value=installed), \
+                mock.patch.object(probe.markers, "default_environment", return_value=environment):
+            missing = probe.unmet_requirements({"django": {}, "asgiref": {}, "sqlparse": {}})
+        # A requirement of an extra nobody asked for is not counted; a met one is not listed.
+        self.assertEqual(missing, [
+            {"requirement": "asgiref", "required_by": "django", "in_lock": True, "installed": "3.8.0"},
+            {"requirement": "sqlparse", "required_by": "django", "in_lock": True, "installed": None},
+            {"requirement": "tzdata", "required_by": "django", "in_lock": False, "installed": None},
+        ])
+
+
+class PackageProbeTests(unittest.TestCase):
+    """probe_package and the packages command, with uv, the installed distributions and the import probe replaced."""
+
+    LOCK_TEXT = (f"cffi==2.0.0 \\\n    --hash=sha256:{SHA['a']}\n    # via cryptography\n"
+                 f"pycparser==2.23 \\\n    --hash=sha256:{SHA['b']}\n    # via cffi\n")
+    CFFI = "cffi-2.0.0-cp315-cp315-manylinux_2_28_x86_64.whl"
+    # An extension module suffix of the interpreter that runs the tests, such as .cpython-315t-darwin.so or .cp315-win_amd64.pyd.
+    SUFFIX = importlib.machinery.EXTENSION_SUFFIXES[0]
+    PASSED = {"gil_before": True, "import": "passed", "gil_after_import": True, "call": "passed", "gil_after_call": True, "warnings": [], "gil_reenabled": False}
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = pathlib.Path(directory.name)
+        self.metadata(wheel(self.CFFI, "a"))
+        (self.path / "pycparser-2.23.json").write_text(json.dumps({"urls": [wheel("pycparser-2.23-py3-none-any.whl", "b")]}), encoding="utf-8")
+        (self.path / "lock.txt").write_text(self.LOCK_TEXT, encoding="utf-8")
+        self.lock = probe.parse_lock(self.LOCK_TEXT)
+        self.installed = {}
+        self.uv_calls = []
+
+    def metadata(self, *entries):
+        probe._METADATA.clear()
+        (self.path / "cffi-2.0.0.json").write_text(json.dumps({"urls": list(entries)}), encoding="utf-8")
+
+    def run_probe(self, uv_status=(0, 0), probe_out=None, unmet=()):
+        statuses = list(uv_status)
+
+        def run_uv(uv, lock, names):
+            self.uv_calls.append(sorted(names))
+            status = statuses.pop(0)
+            if status == 0:
+                for name in names:
+                    self.installed[name] = Distribution(name, lock[name]["version"], wheel_tags=["cp315-cp315-manylinux_2_28_x86_64"] if name == "cffi" else ["py3-none-any"],
+                                                        files=[f"_cffi_backend{self.SUFFIX}"] if name == "cffi" else ["pycparser/__init__.py"])
+            return status
+
+        with mock.patch.object(probe, "run_uv", run_uv), mock.patch.object(probe, "installed_distribution", lambda name: self.installed.get(name)), \
+                mock.patch.object(probe, "unmet_requirements", return_value=list(unmet)), \
+                mock.patch.object(probe, "import_probe", return_value=dict(probe_out or self.PASSED)) as import_probe:
+            item = probe.probe_package("cffi", self.lock, "uv", GIL_TAGS, self.path)
+        return item, import_probe.call_count
+
+    def test_an_installed_package_is_imported_and_called(self):
+        item, imports = self.run_probe()
+        self.assertEqual(self.uv_calls, [["cffi"], ["pycparser"]])
+        self.assertEqual(item["install"], {"status": "installed"})
+        self.assertEqual(item["selected"], {"filename": self.CFFI, "sha256": SHA["a"], "in_lock": True, "tags": ["cp315-cp315-manylinux_2_28_x86_64"], "preferred": True})
+        self.assertEqual(item["extension_suffixes"], [self.SUFFIX])
+        self.assertEqual((item["probe"]["import"], item["probe"]["call"], imports), ("passed", "passed", 1))
+        self.assertEqual(item["thread_safety"]["status"], "not-tested")
+
+    def test_install_outcomes(self):
+        # A dependency that has a wheel here and still fails to install is an unexpected failure.
+        item, imports = self.run_probe(uv_status=(0, 1))
+        self.assertEqual((item["install"], imports), ({"status": "dependency-failed", "dependencies": ["pycparser"]}, 0))
+        # A requirement the lock does not pin is a missing prerequisite; one whose installed version is excluded is not.
+        self.installed.clear()
+        item, _ = self.run_probe(unmet=[{"requirement": "tzdata", "required_by": "cffi", "in_lock": False, "installed": None}])
+        self.assertEqual(item["install"], {"status": "dependency-blocked", "dependencies": ["tzdata"]})
+        self.installed.clear()
+        item, _ = self.run_probe(unmet=[{"requirement": "pycparser", "required_by": "cffi", "in_lock": True, "installed": "2.22"}])
+        self.assertEqual(item["install"]["status"], "dependency-failed")
+        # No wheel for this interpreter: uv is asked once and nothing is imported.
+        self.installed.clear()
+        self.uv_calls.clear()
+        self.metadata(wheel("cffi-2.0.0-cp315-cp315-win_arm64.whl", "a"))
+        item, imports = self.run_probe(uv_status=(1,))
+        self.assertEqual((item["install"], item["probe"]["import"], imports, self.uv_calls), ({"status": "no-wheel"}, "not-run", 0, [["cffi"]]))
+
+    def packages(self, probe_out=None):
+        argv = ["packages", "--lock", str(self.path / "lock.txt"), "--uv", "uv", "--output", str(self.path / "out.json"),
+                "--metadata-dir", str(self.path), "--target", "cffi", "--github-output", str(self.path / "github")]
+        (self.path / "github").write_text("", encoding="utf-8")
+        statuses = [0, 0]
+
+        def run_uv(uv, lock, names):
+            status = statuses.pop(0)
+            for name in names:
+                self.installed[name] = Distribution(name, lock[name]["version"], wheel_tags=["cp315-cp315-manylinux_2_28_x86_64"] if name == "cffi" else ["py3-none-any"])
+            return status
+
+        with mock.patch.object(probe, "interpreter_tags", return_value=GIL_TAGS), mock.patch.object(probe, "run_uv", run_uv), \
+                mock.patch.object(probe, "installed_distribution", lambda name: self.installed.get(name)), \
+                mock.patch.object(probe, "unmet_requirements", return_value=[]), \
+                mock.patch.object(probe, "import_probe", return_value=dict(probe_out or self.PASSED)), contextlib.redirect_stdout(io.StringIO()):
+            status = probe.main(argv)
+        report = json.loads((self.path / "out.json").read_text(encoding="utf-8"))
+        return status, report, (self.path / "github").read_text(encoding="utf-8").splitlines()
+
+    def test_the_packages_command(self):
+        status, report, outputs = self.packages()
+        self.assertEqual(status, 0)
+        self.assertEqual(report["schema"], "claus-python-abi/1")
+        self.assertEqual(report["lock"]["sha256"], probe.hashlib.sha256(self.LOCK_TEXT.encode()).hexdigest())
+        self.assertEqual(report["wheels"]["uncovered"], [])
+        self.assertEqual(report["packages"]["outcome"], {"install": "passed", "install_reason": "every package installed", "execute": "passed"})
+        self.assertEqual(outputs, ["install=passed", "install-reason=every package installed", "execute=passed"])
+        # A package that enables the GIL again fails the command, though its import and call passed.
+        self.installed.clear()
+        status, report, outputs = self.packages({**self.PASSED, "gil_before": False, "gil_after_import": True, "gil_after_call": True, "gil_reenabled": True})
+        self.assertEqual(status, 1)
+        self.assertEqual(outputs[-1], "execute=failed")
+        self.assertIn("| cffi 2.0.0 | installed | " + self.CFFI + " | - | False / True | passed | passed |", "\n".join(probe.summary_lines(report)))
 
 
 class ImportProbeTests(unittest.TestCase):

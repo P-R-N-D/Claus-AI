@@ -168,6 +168,7 @@ jobs:
           # pytest exits 5 when it collects no test, so an empty run fails.
           "$VENV_PYTHON" -m pytest
       - name: Install npm 11.21.0 and the locked frontend dependencies
+        id: frontend-install
         if: ${{ !cancelled() && matrix.frontend }}
         working-directory: frontend
         run: |
@@ -176,6 +177,7 @@ jobs:
           test "$(npm --version)" = 11.21.0
           npm ci
       - name: Frontend lint, type check, build, and unit tests
+        id: frontend
         if: ${{ !cancelled() && matrix.frontend }}
         working-directory: frontend
         run: |
@@ -197,6 +199,9 @@ jobs:
           INITIALIZE: ${{ steps.initialize.outcome }}
           EXECUTE: ${{ steps.execute.outcome }}
           CORRECTNESS: ${{ steps.correctness.outcome }}
+          FRONTEND_ENABLED: ${{ matrix.frontend }}
+          FRONTEND_INSTALL: ${{ steps.frontend-install.outcome }}
+          FRONTEND: ${{ steps.frontend.outcome }}
         run: |
           args=()
           ran() {  # stage, status, log reference, reason
@@ -229,6 +234,18 @@ jobs:
           for name in wheels requirements; do
             if [ -f "$RECORDS/$name.json" ]; then args+=(--extension "x-$name=$RECORDS/$name.json"); fi
           done
+          # The stages describe the backend; the frontend steps' outcomes go in x-frontend, by the same mapping.
+          if [ "$FRONTEND_ENABLED" = true ]; then frontend_reason="the step did not run"; else frontend_reason="this lane runs no frontend step"; fi
+          frontend() {  # outcome, step name
+            case "$1" in
+              success) printf '{"status": "passed", "evidence": ["log:compatibility.yml#platform/%s"]}' "$2" ;;
+              failure) printf '{"status": "failed", "evidence": ["log:compatibility.yml#platform/%s"]}' "$2" ;;
+              *) printf '{"status": "not-run", "reason": "%s"}' "$frontend_reason" ;;
+            esac
+          }
+          printf '{"install": %s, "checks": %s}\n' "$(frontend "$FRONTEND_INSTALL" "Install npm 11.21.0 and the locked frontend dependencies")" \
+            "$(frontend "$FRONTEND" "Frontend lint, type check, build, and unit tests")" > "$RECORDS/frontend.json"
+          args+=(--extension "x-frontend=$RECORDS/frontend.json")
           "$VENV_PYTHON" -I scripts/ci/collect_environment.py --profile-id "$PROFILE" --output "$RECORDS/$PROFILE.result.json" \
             --summary "$GITHUB_STEP_SUMMARY" "${args[@]}"
       - name: Check the record and the committed profiles

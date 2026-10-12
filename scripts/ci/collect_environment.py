@@ -37,7 +37,9 @@ On Linux it fills in the layers, identity and isolation facts. On macOS and
 Windows it records the OS, the machine's architecture, whether the system runs
 in a VM, whether each runtime is emulated, and who the workload runs as (on
 Windows, whether its token is an administrator's); the Linux isolation
-interfaces are not-applicable there. On other systems it records the OS
+interfaces are not-applicable there, except that on Windows the capabilities
+are unknown: the token's privileges, their counterpart, are not read, so a
+Windows record does not pass minimal-capabilities. On other systems it records the OS
 family, the user and group IDs on FreeBSD (os.getresuid), the Python and Node
 runtimes and the run, and leaves the layer kind and the isolation facts
 unknown, so the least-privilege policy fails there until a probe measures them.
@@ -1023,8 +1025,15 @@ class Probe:
         return identity
 
     def isolation(self):
-        if self.system in ("Darwin", "Windows"):
-            return isolation_not_applicable(f"a Linux interface; not applicable on {'macOS' if self.system == 'Darwin' else 'Windows'}")
+        if self.system == "Darwin":
+            return isolation_not_applicable("a Linux interface; not applicable on macOS")
+        if self.system == "Windows":
+            isolation = isolation_not_applicable("a Linux interface; not applicable on Windows")
+            # A Windows token holds privileges, such as SeDebugPrivilege, in place of capabilities. They are not read, so
+            # the policy cannot be shown to hold: unknown, not not-applicable (docs/CI-MATRIX.md).
+            reason = "Windows token privileges, the counterpart of Linux capabilities, are not read"
+            isolation["capabilities"] = {"effective": unknown(reason), "permitted": unknown(reason), "bounding": unknown(reason)}
+            return isolation
         if self.system != "Linux":
             return isolation_fallback("this probe reads Linux interfaces only")
         fields, reason = self.status_fields()

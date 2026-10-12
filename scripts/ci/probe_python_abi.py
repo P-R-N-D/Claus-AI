@@ -13,7 +13,8 @@ wheels: for every package the lock pins, the published wheels of that version th
   interpreter can install, and whether the lock holds the hash of one of them. A
   package with none is "uncovered": the lock cannot be installed binary-only here.
 requirements: the requirements of the installed distributions that are not
-  installed, as uv pip check reports them, and whether the lock pins each one.
+  installed, or whose installed version they exclude, as uv pip check reports
+  them, and whether the lock pins each one.
 packages: for each package in TARGETS, the wheel tags published for this
   interpreter's platform, which of them it accepts, then an install with uv from
   the lock's hashes, binary only, the selected wheel's file name and SHA-256, the
@@ -22,9 +23,9 @@ packages: for each package in TARGETS, the wheel tags published for this
 install-stage: the status of a lane's install stage, from the exit statuses of
   uv pip sync and uv pip check, the installer's log, and the wheels and
   requirements reports: blocked when the lock lacks a wheel the installer names
-  or a requirement this platform needs, failed for any other failure or when the
-  install contradicts a report, passed when both commands passed. It exits 1
-  when the stage failed.
+  or a requirement this platform needs and uv pip check reports nothing else,
+  failed for any other failure or when the install contradicts a report, passed
+  when both commands passed. It exits 1 when the stage failed.
 pin: the lock's lines, with their hashes, for the packages named, so that one
   of them (packaging) can be installed alone, binary only and hash-checked.
 
@@ -61,9 +62,9 @@ import time
 import urllib.request
 
 try:
-    from packaging import markers, requirements, tags, utils, version as versions
+    from packaging import markers, requirements, specifiers, tags, utils, version as versions
 except ImportError:  # Reported by main(); the functions below that need it are not reached.
-    markers = requirements = tags = utils = versions = None
+    markers = requirements = specifiers = tags = utils = versions = None
 
 SCHEMA = "claus-python-abi/1"
 PYPI = "https://pypi.org/pypi/{name}/{version}/json"
@@ -78,6 +79,9 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 WHEEL_FILE = re.compile(r"[A-Za-z0-9._+-]{1,200}\.whl")
 LOCK_PIN = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s\\]+)")
 LOCK_HASH = re.compile(r"--hash=sha256:([0-9a-f]{64})")
+# uv pip check prints "Found N incompatibilities", then one line per problem that starts "The package `NAME`".
+CHECK_COUNT = re.compile(r"Found ([0-9]+) incompatibilit(?:y|ies)")
+CHECK_NOT_INSTALLED = re.compile(r"The package `[^`]+` requires `([A-Za-z0-9][A-Za-z0-9._-]*)[^`]*`, but it's not installed")
 
 # The packages in the backend lock that build CPython extension modules, with code that imports each one and code that
 # calls it. Other lock packages they need are installed from the lock too; COMPANIONS are lock packages that import a
@@ -240,7 +244,9 @@ def wheel_files(document, name, version):
             raise ProbeError(f"the index lists a wheel of {name} whose name cannot be read") from None
         if canonical(str(parsed_name)) != name or parsed_version != versions.Version(version):
             raise ProbeError(f"the index lists {filename} under {name} {version}")
-        files.append({"filename": filename, "sha256": sha256, "tags": sorted(str(tag) for tag in wheel_tags), "yanked": bool(entry.get("yanked"))})
+        requires_python = entry.get("requires_python")
+        files.append({"filename": filename, "sha256": sha256, "tags": sorted(str(tag) for tag in wheel_tags), "yanked": bool(entry.get("yanked")),
+                      "requires_python": requires_python if isinstance(requires_python, str) else None})
     return files
 
 
@@ -253,13 +259,27 @@ def interpreter_tags():
     return [str(tag) for tag in tags.sys_tags()]
 
 
-def compatible(files, supported, lock_hashes):
+def admits(requires_python, python_version):
+    """Whether a wheel's Requires-Python admits this Python version. An unreadable one excludes nothing, as pip treats it."""
+    if not requires_python:
+        return True
+    try:
+        return specifiers.SpecifierSet(requires_python).contains(python_version, prereleases=True)
+    except specifiers.InvalidSpecifier:
+        return True
+
+
+def compatible(files, supported, lock_hashes, python_version=None):
     """Split a release's wheels into those this interpreter accepts whose hash the lock holds, and those it does not hold.
 
-    Each list is ordered by the interpreter's preference, as an installer ranks them.
+    A wheel is accepted when one of its tags is supported, it is not yanked, and its Requires-Python admits this
+    version (its release, without a pre-release part, as pip compares it), as installers check. Each list is ordered
+    by the interpreter's preference, as an installer ranks them.
     """
+    python_version = python_version or ".".join(str(part) for part in sys.version_info[:3])
     rank = {tag: index for index, tag in enumerate(supported)}
-    usable = [(min(rank[tag] for tag in item["tags"] if tag in rank), item) for item in files if not item["yanked"] and any(tag in rank for tag in item["tags"])]
+    usable = [(min(rank[tag] for tag in item["tags"] if tag in rank), item) for item in files
+              if not item["yanked"] and admits(item.get("requires_python"), python_version) and any(tag in rank for tag in item["tags"])]
     usable.sort(key=lambda pair: (pair[0], pair[1]["filename"]))
     in_lock = [item for _, item in usable if item["sha256"] in lock_hashes]
     not_in_lock = [item for _, item in usable if item["sha256"] not in lock_hashes]
@@ -318,10 +338,15 @@ INSTALL_FAILED = ("error", "contradiction", "dependency-failed")
 
 
 def overall(packages):
-    """(install status, reason, execute status) for the packages report."""
+    """(install status, reason, execute status) for the packages report.
+
+    The import and call fail when either raised, or when a package enabled the GIL that a free-threaded build
+    started without (docs/DEPENDENCY-STRATEGY.md: GIL re-enablement is a failed qualification).
+    """
     blocked = [item["name"] for item in packages if item["install"]["status"] in INSTALL_BLOCKED]
     failed = [item["name"] for item in packages if item["install"]["status"] in INSTALL_FAILED]
-    broken = [item["name"] for item in packages if item["probe"]["import"] == "failed" or item["probe"]["call"] == "failed"]
+    broken = [item["name"] for item in packages
+              if item["probe"]["import"] == "failed" or item["probe"]["call"] == "failed" or item["probe"].get("gil_reenabled") is True]
     ran = [item["name"] for item in packages if item["probe"]["call"] == "passed"]
     if failed:
         install = ("failed", f"unexpected install failures: {', '.join(failed)}")
@@ -334,8 +359,12 @@ def overall(packages):
 
 
 def names_a_missing_wheel(log_text, names):
-    """Whether the installer's output names one of these packages on a line about wheels, as uv does when it finds none."""
-    lines = [line.lower() for line in log_text.splitlines() if "wheel" in line.lower()]
+    """Whether the installer's output names one of these packages on a line that says it has no wheel, as uv does when it finds none.
+
+    uv 0.12 prints "Because NAME==VERSION has no usable wheels" or "has no wheels with a matching platform tag", and
+    "Wheels are required for `NAME`".
+    """
+    lines = [line.lower() for line in log_text.splitlines() if re.search(r"\bno (?:usable |compatible )?wheels?\b|\bwheels are required for\b", line.lower())]
     return any(re.search(rf"(?<![a-z0-9_.-]){re.escape(spelling)}(?![a-z0-9_-])", line)
                for name in names for spelling in {name, name.replace("-", "_")} for line in lines)
 
@@ -367,11 +396,32 @@ def install_stage(sync, check, log_text, wheels, requirements_report=None):
     if requirements_report is None:
         return "failed", "uv pip check failed and the requirements report is missing; see the install log"
     missing = requirements_report.get("missing", [])
-    outside = sorted({item["requirement"] for item in missing if not item["in_lock"]})
-    if outside and all(not item["in_lock"] for item in missing):
-        needed = "; ".join(f"{name} (required by {', '.join(sorted({item['required_by'] for item in missing if item['requirement'] == name}))})" for name in outside)
-        return "blocked", f"the lock does not pin requirements this platform needs: {needed}"
-    return "failed", "uv pip check failed for a reason the requirements report does not explain; see the install log"
+    # Only a requirement that is not installed and that the lock does not pin is a prerequisite the lock lacks;
+    # one the lock pins, or an installed version the requirement excludes, is a failure.
+    outside = sorted({item["requirement"] for item in missing if not item["in_lock"] and item.get("installed") is None})
+    if not outside or any(item["in_lock"] or item.get("installed") is not None for item in missing):
+        return "failed", "uv pip check failed for a reason the requirements report does not explain; see the install log"
+    unexplained = unexplained_check_problems(log_text, set(outside))
+    if unexplained:
+        return "failed", f"uv pip check reported {unexplained}; see the install log"
+    needed = "; ".join(f"{name} (required by {', '.join(sorted({item['required_by'] for item in missing if item['requirement'] == name}))})" for name in outside)
+    return "blocked", f"the lock does not pin requirements this platform needs: {needed}"
+
+
+def unexplained_check_problems(log_text, outside):
+    """Which problems uv pip check printed are not one of these requirements missing, as a phrase, or None when none are.
+
+    Each problem line must say that a requirement named in `outside` is not installed, and the count uv prints must
+    match the lines, so that a version conflict, a broken or duplicate distribution, or output this does not
+    recognise is a failure rather than a missing prerequisite.
+    """
+    lines = [line.strip() for line in log_text.splitlines()]
+    problems = [line for line in lines if line.startswith("The package `")]
+    counts = [int(match.group(1)) for line in lines if (match := CHECK_COUNT.fullmatch(line))]
+    if counts != [len(problems)] or not problems:
+        return "a problem count that does not match its problem lines"
+    others = [line for line in problems if not (match := CHECK_NOT_INSTALLED.fullmatch(line)) or canonical(match.group(1)) not in outside]
+    return f"{len(others)} of {len(problems)} problems that are not a requirement missing from the lock" if others else None
 
 
 # ---------------------------------------------------------------------------
@@ -379,11 +429,11 @@ def install_stage(sync, check, log_text, wheels, requirements_report=None):
 
 
 def scrub(text):
-    """Text without this environment's paths, so that a report holds no home directory."""
+    """Text without this environment's paths or control characters, so that a report holds no home directory and stays on one line."""
     for path in sorted({sys.prefix, sys.base_prefix, str(pathlib.Path.home())}, key=len, reverse=True):
         if path and len(path) > 1:
             text = text.replace(path, "<path>")
-    return text[:300]
+    return re.sub(r"[\x00-\x1f\x7f]", " ", text)[:300]
 
 
 def interpreter_facts():
@@ -438,9 +488,12 @@ def extension_suffixes(distribution):
 
 
 def unmet_requirements(lock):
-    """Requirements of installed distributions that are not installed, with the distributions that need them."""
+    """Requirements of installed distributions that are not met, with the distributions that need them.
+
+    "installed" is None when the requirement is not installed, and the installed version when the requirement excludes it.
+    """
     environment = markers.default_environment()
-    installed = {canonical(item.metadata["Name"]) for item in importlib.metadata.distributions() if item.metadata["Name"]}
+    installed = {canonical(item.metadata["Name"]): item.version for item in importlib.metadata.distributions() if item.metadata["Name"]}
     missing = []
     for distribution in importlib.metadata.distributions():
         name = canonical(distribution.metadata["Name"] or "")
@@ -450,7 +503,14 @@ def unmet_requirements(lock):
                 continue
             needed = canonical(requirement.name)
             if needed not in installed:
-                missing.append({"requirement": needed, "required_by": name, "in_lock": needed in lock})
+                missing.append({"requirement": needed, "required_by": name, "in_lock": needed in lock, "installed": None})
+                continue
+            try:
+                met = requirement.specifier.contains(installed[needed], prereleases=True)
+            except versions.InvalidVersion:
+                met = False
+            if not met:
+                missing.append({"requirement": needed, "required_by": name, "in_lock": needed in lock, "installed": installed[needed]})
     return sorted(missing, key=lambda item: (item["requirement"], item["required_by"]))
 
 
@@ -557,7 +617,8 @@ def probe_package(target, lock, uv, supported, metadata_dir=None):
             return item
     unmet = [entry for entry in unmet_requirements(lock) if entry["required_by"] in ({target} | others | set(COMPANIONS.get(target, ())))]
     if unmet:
-        item["install"] = {"status": "dependency-blocked" if all(not entry["in_lock"] for entry in unmet) else "dependency-failed", "dependencies": sorted({entry["requirement"] for entry in unmet})}
+        blocked = all(not entry["in_lock"] and entry.get("installed") is None for entry in unmet)
+        item["install"] = {"status": "dependency-blocked" if blocked else "dependency-failed", "dependencies": sorted({entry["requirement"] for entry in unmet})}
         return item
     item["probe"] = import_probe(target)
     return item

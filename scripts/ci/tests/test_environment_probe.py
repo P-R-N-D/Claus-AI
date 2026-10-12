@@ -866,14 +866,18 @@ class OtherSystemTests(Case):
         self.assertFact(python["arch"], "aarch64", "observed")
         self.assertEqual(python["execution"], {"value": "native", "provenance": "inferred", "evidence": ["python:sysconfig.get_platform", "python:IsWow64Process2#nativeMachine"]})
         self.assertEqual(python["libc"]["provenance"], "unknown")
-        self.assertEqual({provenance for _, provenance in walk_provenance(result["workload"]["isolation"])}, {"not-applicable"})
+        isolation = result["workload"]["isolation"]
+        self.assertEqual({provenance for _, provenance in walk_provenance({k: v for k, v in isolation.items() if k != "capabilities"})}, {"not-applicable"})
+        # The token's privileges, which stand in for capabilities, are not read.
+        self.assertEqual({fact["provenance"] for fact in isolation["capabilities"].values()}, {"unknown"})
         identity = result["workload"]["identity"]
         self.assertFact(identity["superuser"], False, "observed")
         self.assertEqual({identity[name]["provenance"] for name in ("uid", "real_uid", "saved_uid", "gid")}, {"not-applicable"})
         self.assertEqual(result["probe_errors"], [])
         self.assertValidRecord(result, policy=False)
-        # A token without administrator rights, in a VM the record shows, meets every rule the record can show.
-        self.assertEqual(self.policy_codes(result), [])
+        # A token without administrator rights, in a VM the record shows, still fails minimal-capabilities, which
+        # nothing on Windows measures.
+        self.assertEqual(self.policy_codes(result), ["policy-minimal-capabilities"])
 
     def test_an_x64_process_emulated_on_windows_on_arm(self):
         result = self.windows(interpreter="x86_64")
@@ -908,13 +912,13 @@ class OtherSystemTests(Case):
                 result = self.windows(token=token)
                 self.assertEqual(result["workload"]["identity"]["superuser"], {"value": True, "provenance": "observed", "evidence": evidence})
                 self.assertValidRecord(result, policy=False)
-                self.assertEqual(self.policy_codes(result), ["policy-app-non-root"])
+                self.assertEqual(self.policy_codes(result), ["policy-app-non-root", "policy-minimal-capabilities"])
         # A token that cannot be read, or is read in part, does not show a non-root user.
         for token in (None, {"elevated": False, "administrators": None, "local_system": False}):
             with self.subTest(token=token):
                 result = self.windows(token=token)
                 self.assertEqual(result["workload"]["identity"]["superuser"]["provenance"], "unknown")
-                self.assertEqual(self.policy_codes(result), ["policy-app-non-root"])
+                self.assertEqual(self.policy_codes(result), ["policy-app-non-root", "policy-minimal-capabilities"])
 
     def test_the_bios_values_name_the_hypervisor(self):
         for bios, technology, evidence in (
@@ -934,7 +938,7 @@ class OtherSystemTests(Case):
                 self.assertEqual(kinds(result), [None])
                 self.assertIn(reason, result["environment"]["layers"][0]["kind"]["reason"])
                 self.assertValidRecord(result, policy=False)
-                self.assertEqual(self.policy_codes(result), ["policy-minimal-devices", "policy-no-privileged-container"])
+                self.assertEqual(self.policy_codes(result), ["policy-minimal-capabilities", "policy-minimal-devices", "policy-no-privileged-container"])
         result = self.windows(version="10.0.26100; x")
         self.assertEqual(result["environment"]["layers"][-1]["os"]["version"]["provenance"], "unknown")
 

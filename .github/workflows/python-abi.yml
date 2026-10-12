@@ -1,0 +1,168 @@
+name: Python ABI
+
+# Probes CPython 3.15.0 and its free-threaded build (3.15t) on the GitHub-hosted runners: the interpreter's
+# ABI facts (SOABI, Py_GIL_DISABLED, the GIL state, extension suffixes, platform and C library), which wheel
+# of each native package in the backend lock this interpreter accepts and installs, and whether the package
+# imports and runs once in a fresh process without enabling the GIL. Thread safety is not tested. The lock is
+# resolved for CPython 3.12 with the GIL, so a pass here is no support status; see docs/DEPENDENCY-STRATEGY.md.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/python-abi.yml'
+      - 'backend/locks/**'
+      - 'scripts/ci/**'
+      - 'tests/compatibility/**'
+      - 'docs/CI-MATRIX.md'
+      - 'docs/DEPENDENCY-STRATEGY.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer run for the same pull request cancels the older one; a manual dispatch gets its own group.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  abi:
+    name: Python ABI / ${{ matrix.platform.lane }} / ${{ matrix.build }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        build: [cp315, cp315t]
+        platform:
+          - lane: linux-x64
+            runner: ubuntu-24.04
+            python: linux-x86_64-gnu
+            policy: default
+          - lane: linux-arm64
+            runner: ubuntu-24.04-arm
+            python: linux-aarch64-gnu
+            policy: default
+          - lane: windows-x64
+            runner: windows-2025
+            python: windows-x86_64-none
+            # The runner's user holds an elevated administrator token, which app-non-root rejects.
+            policy: skip
+          - lane: windows-arm64
+            runner: windows-11-arm
+            python: windows-aarch64-none
+            policy: skip
+          - lane: macos-arm64
+            runner: macos-15
+            python: macos-aarch64-none
+            policy: default
+          - lane: macos-x64
+            runner: macos-15-intel
+            python: macos-x86_64-none
+            policy: default
+    env:
+      # uv ignores uv.toml and pyproject.toml files, which a pull request could add.
+      UV_NO_CONFIG: '1'
+      LOCK: backend/locks/cp312-linux-x86_64.txt
+      PROFILE: gha-${{ matrix.platform.lane }}-${{ matrix.build }}
+      PYTHON_REQUEST: cpython-3.15.0${{ matrix.build == 'cp315t' && '+freethreaded' || '' }}-${{ matrix.platform.python }}
+      FREE_THREADED: ${{ matrix.build == 'cp315t' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          # The first uv release with CPython 3.15.0 builds; setup-uv v10.3.0 checks its download against the
+          # checksum it embeds. The backend jobs keep uv 0.12.24.
+          version: '0.13.0'
+          enable-cache: false
+          # With a Python version given, setup-uv does not look for an interpreter in the checkout and run it.
+          python-version: cpython-3.15.0${{ matrix.build == 'cp315t' && '+freethreaded' || '' }}-${{ matrix.platform.python }}
+      - name: Create a CPython 3.15.0 environment
+        run: |
+          mkdir -p "$RUNNER_TEMP/python-abi"
+          echo "RECORDS=$RUNNER_TEMP/python-abi" >> "$GITHUB_ENV"
+          uv --version
+          uv venv --managed-python --python "$PYTHON_REQUEST"
+          if [ "$RUNNER_OS" = Windows ]; then
+            venv_python="$GITHUB_WORKSPACE/.venv/Scripts/python.exe"
+            uv_path=$(cygpath -w "$(command -v uv)")
+          else
+            venv_python="$GITHUB_WORKSPACE/.venv/bin/python"
+            uv_path=$(command -v uv)
+          fi
+          echo "VENV_PYTHON=$venv_python" >> "$GITHUB_ENV"
+          echo "UV_PATH=$uv_path" >> "$GITHUB_ENV"
+          "$venv_python" -VV
+          test "$("$venv_python" -c 'import platform; print(platform.python_version())')" = 3.15.0
+          # Py_GIL_DISABLED is 1 in a free-threaded build and 0 otherwise.
+          test "$("$venv_python" -c 'import sysconfig; print(sysconfig.get_config_var("Py_GIL_DISABLED") or 0)')" = "$FREE_THREADED"
+      - name: Install packaging from the lock
+        # The probe reads wheel tags with packaging, a pure-Python wheel pinned and hashed in the lock.
+        run: |
+          "$VENV_PYTHON" -I scripts/ci/probe_python_abi.py pin --lock "$LOCK" --name packaging --output "$RUNNER_TEMP/packaging.txt"
+          uv pip install --python "$VENV_PYTHON" --require-hashes --only-binary :all: --no-deps -r "$RUNNER_TEMP/packaging.txt"
+      - name: Test the probe on this interpreter
+        run: |
+          "$VENV_PYTHON" -I scripts/ci/tests/test_python_abi_probe.py --verbose
+      - name: Probe the lock's native packages
+        # For each package: the wheels PyPI lists for the locked version and the ABI each serves, the one this
+        # interpreter installs from the lock (binary only, with the lock's hashes, without dependencies), and an
+        # import and a call in a fresh process with the GIL state before and after. Exits 1 on an unexpected
+        # install failure or a failed import or call; a package with no wheel for this interpreter is blocked.
+        id: packages
+        run: |
+          "$VENV_PYTHON" -I scripts/ci/probe_python_abi.py packages --lock "$LOCK" --uv "$UV_PATH" \
+            --output "$RECORDS/python-abi.json" --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
+      - name: Record this runner's environment
+        id: collect
+        if: ${{ !cancelled() }}
+        env:
+          OUTCOME: ${{ steps.packages.outcome }}
+          INSTALL: ${{ steps.packages.outputs.install }}
+          INSTALL_REASON: ${{ steps.packages.outputs.install-reason }}
+        run: |
+          evidence="log:python-abi.yml#abi/Probe the lock's native packages"
+          case "$INSTALL" in
+            passed|failed) args=(--stage "install=$INSTALL" --stage-evidence "install=$evidence" --stage-escalation install=none --stage-reason "install=$INSTALL_REASON") ;;
+            blocked) args=(--stage install=blocked --stage-reason "install=$INSTALL_REASON" --stage-evidence "install=$evidence") ;;
+            *)
+              if [ "$OUTCOME" = failure ]; then
+                args=(--stage install=failed --stage-evidence "install=$evidence" --stage-escalation install=none --stage-reason "install=the probe failed before it set a status")
+              else
+                args=(--stage install=blocked --stage-reason "install=the probe did not run because an earlier step failed")
+              fi ;;
+          esac
+          for stage in initialize execute correctness; do
+            args+=(--stage "$stage=not-run" --stage-reason "$stage=this lane probes the lock's native packages only; x-python-abi has each import and call")
+          done
+          args+=(--stage security=not-run --stage-reason "security=no security check runs on this lane")
+          args+=(--stage performance=not-run --stage-reason "performance=not measured on shared runners")
+          if [ -f "$RECORDS/python-abi.json" ]; then args+=(--extension "x-python-abi=$RECORDS/python-abi.json"); fi
+          "$VENV_PYTHON" -I scripts/ci/collect_environment.py --no-node --profile-id "$PROFILE" --output "$RECORDS/$PROFILE.result.json" \
+            --summary "$GITHUB_STEP_SUMMARY" "${args[@]}"
+      - name: Check the record and the committed profiles
+        if: ${{ !cancelled() && steps.collect.outcome != 'skipped' }}
+        env:
+          POLICY: ${{ matrix.platform.policy }}
+        run: |
+          policy=()
+          if [ "$POLICY" = skip ]; then policy=(--no-policy); fi
+          "$VENV_PYTHON" -I scripts/ci/validate_compatibility.py --require-real --dependency-strategy docs/DEPENDENCY-STRATEGY.md "${policy[@]}" \
+            --profile "tests/compatibility/profiles/$PROFILE.json" --summary "$GITHUB_STEP_SUMMARY" \
+            "$RECORDS/$PROFILE.result.json" tests/compatibility/profiles/*.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: python-abi-${{ matrix.platform.lane }}-${{ matrix.build }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/python-abi/
+          if-no-files-found: warn
+          # The record and the probe report are the lane's only machine-readable evidence: keep them 90 days, GitHub's default for logs.
+          retention-days: 90

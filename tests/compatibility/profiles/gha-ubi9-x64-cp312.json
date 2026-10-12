@@ -1,0 +1,362 @@
+{
+  "schema_version": 1,
+  "kind": "profile",
+  "synthetic": false,
+  "id": "gha-ubi9-x64-cp312",
+  "title": "UBI 9 9.8 in rootless Podman on a GitHub-hosted ubuntu-24.04 runner",
+  "description": "The ubi job of .github/workflows/compatibility.yml: UBI 9 pinned by digest, in rootless Podman as the runner's user, all capabilities dropped, no-new-privileges, unprivileged, no device; the backend lock, Django check, Django tests and pytest with uv's CPython 3.12.15, not the image's Python. Not a RHEL host: the kernel, SELinux mode and systemd are the Ubuntu VM's. Its glibc 2.34 is below the checked bound of glibc 2.39, so it is not-assessed.",
+  "support": {
+    "status": "not-assessed",
+    "lane": "Linux x86-64 glibc",
+    "reference": "docs/DEPENDENCY-STRATEGY.md#platform-and-accelerator-lanes"
+  },
+  "evidence_sources": [
+    {
+      "workflow": ".github/workflows/compatibility.yml",
+      "job": "ubi"
+    }
+  ],
+  "runner": {
+    "runner_environment": {
+      "value": "github-hosted",
+      "provenance": "declared"
+    },
+    "runner_os": {
+      "value": "Linux",
+      "provenance": "declared"
+    },
+    "runner_arch": {
+      "value": "X64",
+      "provenance": "declared"
+    }
+  },
+  "required_stages": [
+    "detect",
+    "install",
+    "initialize",
+    "execute",
+    "correctness"
+  ],
+  "environment": {
+    "layers": [
+      {
+        "label": "Physical host, not visible to the runner",
+        "kind": {
+          "value": "host",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "the outermost host runs on hardware"
+        },
+        "os": {
+          "family": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "version": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "execution": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "GitHub does not document the physical hosts, and a VM guest cannot see them"
+          }
+        }
+      },
+      {
+        "label": "GitHub-hosted runner virtual machine (runs-on: ubuntu-24.04), seen from the container",
+        "kind": {
+          "value": "vm",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "GitHub does not document the hypervisor; each run records what the VM shows"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "the container sees its own os-release, not the VM's"
+          },
+          "version": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "the container sees its own os-release, not the VM's"
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "changes with runner image updates; each run records it"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": "x86_64",
+            "provenance": "declared"
+          },
+          "execution": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "whether the hypervisor emulates the CPU is not visible from inside the VM"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "not visible from the container"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "not visible from the container"
+          }
+        }
+      },
+      {
+        "label": "UBI 9 container in rootless Podman, run as the runner's user",
+        "kind": {
+          "value": "container",
+          "provenance": "declared"
+        },
+        "technology": {
+          "value": "podman",
+          "provenance": "declared"
+        },
+        "os": {
+          "family": {
+            "value": "linux",
+            "provenance": "declared"
+          },
+          "name": {
+            "value": "rhel",
+            "provenance": "declared"
+          },
+          "version": {
+            "value": "9.8",
+            "provenance": "declared"
+          },
+          "kernel": {
+            "value": null,
+            "provenance": "not-applicable",
+            "reason": "a container shares the kernel of the layer below"
+          }
+        },
+        "cpu": {
+          "arch": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "each run records it"
+          },
+          "execution": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "each run records it"
+          }
+        },
+        "service_manager": {
+          "name": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "systemd is not running as the service manager here; other managers are not probed"
+          },
+          "scope": {
+            "value": null,
+            "provenance": "unknown",
+            "reason": "no service manager seen"
+          }
+        },
+        "container": {
+          "engine_mode": {
+            "value": "rootless",
+            "provenance": "declared"
+          },
+          "privileged": {
+            "value": false,
+            "provenance": "declared"
+          },
+          "devices": {
+            "value": [],
+            "provenance": "declared"
+          },
+          "orchestration": {
+            "name": {
+              "value": null,
+              "provenance": "unknown",
+              "reason": "each run records it"
+            },
+            "version": {
+              "value": null,
+              "provenance": "unknown",
+              "reason": "each run records it"
+            },
+            "scope": {
+              "value": null,
+              "provenance": "unknown",
+              "reason": "each run records it"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "workload": {
+    "runtimes": {
+      "python": {
+        "implementation": {
+          "value": "cpython",
+          "provenance": "declared"
+        },
+        "version": {
+          "value": "3.12.15",
+          "provenance": "declared"
+        },
+        "cache_tag": {
+          "value": "cpython-312",
+          "provenance": "declared"
+        },
+        "soabi": {
+          "value": "cpython-312-x86_64-linux-gnu",
+          "provenance": "declared"
+        },
+        "platform": {
+          "value": "linux-x86_64",
+          "provenance": "declared"
+        },
+        "arch": {
+          "value": "x86_64",
+          "provenance": "declared"
+        },
+        "pointer_bits": {
+          "value": 64,
+          "provenance": "declared"
+        },
+        "free_threaded_build": {
+          "value": false,
+          "provenance": "declared"
+        },
+        "gil_enabled": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "libc": {
+          "value": "glibc 2.34",
+          "provenance": "declared"
+        },
+        "execution": {
+          "value": "native",
+          "provenance": "declared"
+        }
+      },
+      "node": {
+        "version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "this job records no Node (--no-node)"
+        },
+        "modules_abi": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "this job records no Node (--no-node)"
+        },
+        "napi_version": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "this job records no Node (--no-node)"
+        },
+        "platform": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "this job records no Node (--no-node)"
+        },
+        "arch": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "this job records no Node (--no-node)"
+        },
+        "execution": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "this job records no Node (--no-node)"
+        }
+      }
+    }
+  },
+  "compute": {
+    "backends": [
+      {
+        "id": "cpu",
+        "kind": "cpu",
+        "api": "cpu",
+        "available": {
+          "value": true,
+          "provenance": "declared"
+        },
+        "device": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "GitHub does not fix the CPU model of hosted runners"
+        },
+        "version": {
+          "value": null,
+          "provenance": "not-applicable",
+          "reason": "a CPU has no backend version"
+        },
+        "features": {
+          "value": null,
+          "provenance": "unknown",
+          "reason": "not declared"
+        }
+      }
+    ],
+    "accelerator_inventory": {
+      "value": null,
+      "provenance": "not-applicable",
+      "reason": "this lane uses the CPU only"
+    }
+  },
+  "policy": {
+    "rules": {},
+    "exceptions": []
+  }
+}

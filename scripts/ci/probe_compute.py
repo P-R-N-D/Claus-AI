@@ -235,6 +235,8 @@ def import_browser(result, report, environment_sha256, artifact_ref):
         raise ValueError("browser report must contain exactly the four API observations")
     if not isinstance(report.get("reason"), str) or not re.fullmatch(r"[a-z0-9-]{1,100}", report["reason"]):
         raise ValueError("invalid browser reason")
+    if report["status"] != "failed" and report["reason"].endswith("-failed"):
+        raise ValueError("a browser report with a failed probe must fail")
     backends = {backend["id"]: backend for backend in result["compute"]["backends"]}
     seen = set()
     for raw in probes:
@@ -268,11 +270,25 @@ def import_browser(result, report, environment_sha256, artifact_ref):
                 raise ValueError("an unexecuted browser report cannot contain observed browser facts")
         if report["status"] == "passed" and execution["status"] == "failed":
             raise ValueError("a browser report with a failed operation cannot pass")
+        # Detection failures leave GPU/NPU operation status not-run. Their
+        # producer reason still records a failure of the browser probe.
+        if report["status"] != "failed" and reason.endswith("-failed"):
+            raise ValueError("a browser report with a failed probe must fail")
         if api != "wasm" and (execution["status"] != "not-run" or execution["executed"]):
             raise ValueError("this browser probe performs no GPU or NPU kernel")
         runtime, pid = execution.get("runtime"), execution.get("process_id")
-        if runtime is not None and (not isinstance(runtime, str) or not re.fullmatch(r"chromium [0-9]+(?:\.[0-9]+){1,3}; node-controller [0-9]+(?:\.[0-9]+){2}", runtime)):
-            raise ValueError("invalid browser runtime")
+        if runtime is not None:
+            match = re.fullmatch(r"chromium [0-9]+(?:\.[0-9]+){1,3}; node-controller ([0-9]+(?:\.[0-9]+){2})", runtime) if isinstance(runtime, str) else None
+            if not match:
+                raise ValueError("invalid browser runtime")
+            node_version = validator.measured(result["workload"]["runtimes"]["node"]["version"])
+            if node_version is None or match.group(1) != node_version:
+                raise ValueError("browser controller runtime differs from the measured environment Node runtime")
+        elif (report["status"] == "passed" or execution["status"] != "not-run"
+              or any(type(raw.get(field)) is bool for field in (
+                  "runtime_installed", "api_enumerated", "device_enumerated", "device_accessible",
+                  "context_available", "adapter_available", "software_adapter"))):
+            raise ValueError("browser observations require a controller runtime")
         if pid is not None and (type(pid) is not int or not 1 <= pid <= 4294967295):
             raise ValueError("invalid browser controller PID")
         converted = {

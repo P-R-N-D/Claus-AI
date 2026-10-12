@@ -856,12 +856,14 @@ def check_device_probes(document, findings):
             continue
         if not required:
             findings.error("compute-probe", base, "a result with device probes names compute.probe_contract device-v1")
-        # Availability requires an API, a device and access; merely finding a tool or driver proves none of these.
+        execution = probe["execution"]
+        if (known(backend["available"]) is True or execution["executed"]) and measured(probe["runtime_installed"]) is not True:
+            findings.error("compute-availability", f"{base}/runtime_installed", "availability or a completed operation requires measured runtime installation")
+        # Runtime installation, API/device enumeration and access are separate prerequisites for availability.
         if known(backend["available"]) is True:
             for field in ("api_enumerated", "device_enumerated", "device_accessible"):
                 if measured(probe[field]) is not True:
                     findings.error("compute-availability", f"{base}/{field}", "available=true requires measured API enumeration, device enumeration and device access")
-        execution = probe["execution"]
         path = f"{base}/execution"
         status = execution["status"]
         effective = backends.get(execution["effective"])
@@ -1465,15 +1467,19 @@ def check_against_profile(result, profile, findings):
     for name, fact in profile.get("runner", {}).items():
         compare(f"/run/ci/{name}", fact, ci[name])
     accelerator = profile.get("accelerator_backend")
+    required_backends = {accelerator} if accelerator is not None else set()
+    if accelerator is None and profile["compute"].get("probe_contract") == "device-v1":
+        required_backends = {backend["id"] for backend in profile["compute"]["backends"] if backend["kind"] == "cpu"}
     for name in profile["required_stages"]:
         stage = result["stages"][name]
         if stage["status"] != "passed":
             findings.error("required-stage", f"/stages/{name}/status", f"profile {profile['id']} requires {name} to pass; it is {stage['status']}")
-        elif accelerator is not None and name in WORKLOAD_STAGES:
+        elif required_backends and name in WORKLOAD_STAGES:
             compute = stage.get("compute") or {}
-            if compute.get("requested") != accelerator or compute.get("effective") != accelerator:
+            if compute.get("requested") not in required_backends or compute.get("effective") != compute.get("requested"):
                 ran = compute.get("effective") or "no recorded backend"
-                findings.error("required-stage", f"/stages/{name}/compute", f"profile {profile['id']} requires {name} to run on {accelerator}; it ran on {ran}")
+                allowed = ", ".join(sorted(required_backends))
+                findings.error("required-stage", f"/stages/{name}/compute", f"profile {profile['id']} requires {name} to request and run on the same declared backend ({allowed}); it ran on {ran}")
 
 
 STATUS_WORDS = (

@@ -125,9 +125,105 @@ class CLITests(unittest.TestCase):
                                "--log", str(directory / "cpu-reference.log"), "--cpu-case", case, *extra],
                               cwd=ROOT, capture_output=True, text=True, timeout=30)
 
-    def write_environment(self, directory):
-        environment = probe.collector.build_result(probe.collector.Probe(probe_node=False))
+    def write_environment(self, directory, probe_node=False):
+        environment = probe.collector.build_result(probe.collector.Probe(probe_node=probe_node))
         (directory / "environment.json").write_text(json.dumps(environment), encoding="utf-8")
+        return environment
+
+    def browser_cli(self, directory, report, environment):
+        (directory / "environment.json").write_text(json.dumps(environment), encoding="utf-8")
+        report["environment_sha256"] = probe.hashlib.sha256((directory / "environment.json").read_bytes()).hexdigest()
+        browser = directory / "browser.json"
+        browser.write_text(json.dumps(report), encoding="utf-8")
+        return self.cli(directory, extra=("--browser-report", str(browser)))
+
+    def browser_report(self, environment):
+        sample = BrowserImportTests()
+        sample.setUp()
+        report = sample.report
+        version = probe.validator.measured(environment["workload"]["runtimes"]["node"]["version"])
+        self.assertIsNotNone(version, "these CLI cases require the installed Node runtime")
+        for raw in report["probes"]:
+            raw["execution"]["runtime"] = f"chromium 150.0.1.2; node-controller {version}"
+        return report
+
+    def test_cli_rejects_pass_with_producer_failure_reasons(self):
+        failures = ((0, "wasm-operation-failed"), (1, "webgl-context-probe-failed"),
+                    (2, "webgpu-adapter-probe-failed"), (None, "chromium-launch-failed"),
+                    (None, "browser-observation-failed"), (None, "browser-cleanup-failed"),
+                    (None, "browser-probe-failed"))
+        for index, reason in failures:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+                directory = pathlib.Path(temporary)
+                environment = self.write_environment(directory, probe_node=True)
+                report = self.browser_report(environment)
+                if index is None:
+                    report["reason"] = reason
+                else:
+                    report["probes"][index]["execution"]["reason"] = reason
+                run = self.browser_cli(directory, report, environment)
+                self.assertEqual(run.returncode, 2, run.stderr + run.stdout)
+                self.assertNotIn("Traceback", run.stderr)
+                self.assertFalse((directory / "result.json").exists())
+
+    def test_cli_failed_detection_retains_no_kernel_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            environment = self.write_environment(directory, probe_node=True)
+            report = self.browser_report(environment)
+            report.update(status="failed", reason="browser-probe-failed")
+            report["probes"][2]["execution"]["reason"] = "webgpu-adapter-probe-failed"
+            run = self.browser_cli(directory, report, environment)
+            self.assertEqual(run.returncode, 1, run.stderr + run.stdout)
+            result = json.loads((directory / "result.json").read_text())
+            self.assertEqual(result["extensions"]["x-browser-probe"]["status"], "failed")
+            webgpu = next(backend for backend in result["compute"]["backends"] if backend["id"] == "browser-webgpu")
+            self.assertEqual(webgpu["probe"]["execution"]["status"], "not-run")
+            self.assertFalse(webgpu["probe"]["execution"]["executed"])
+
+    def test_cli_matching_node_with_absent_features_passes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            environment = self.write_environment(directory, probe_node=True)
+            report = self.browser_report(environment)
+            for raw in report["probes"][1:]:
+                raw["api_enumerated"] = False
+            report["probes"][1]["context_available"] = False
+            report["probes"][2].update(adapter_available=False, software_adapter="unknown")
+            run = self.browser_cli(directory, report, environment)
+            self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
+
+    def test_cli_rejects_node_controller_version_mismatch_for_every_api(self):
+        for index, api in enumerate(probe.BROWSER_APIS):
+            with self.subTest(api=api), tempfile.TemporaryDirectory() as temporary:
+                directory = pathlib.Path(temporary)
+                environment = self.write_environment(directory, probe_node=True)
+                report = self.browser_report(environment)
+                report["probes"][index]["execution"]["runtime"] = "chromium 150.0.1.2; node-controller 99.99.99"
+                run = self.browser_cli(directory, report, environment)
+                self.assertEqual(run.returncode, 2, run.stderr + run.stdout)
+                self.assertFalse((directory / "result.json").exists())
+
+    def test_cli_browser_observations_require_measured_node_version(self):
+        for fact in (probe.unknown("not probed"), probe.collector.declared("24.19.0", "tool:test")):
+            with self.subTest(provenance=fact["provenance"]), tempfile.TemporaryDirectory() as temporary:
+                directory = pathlib.Path(temporary)
+                environment = self.write_environment(directory, probe_node=True)
+                report = self.browser_report(environment)
+                environment["workload"]["runtimes"]["node"]["version"] = fact
+                run = self.browser_cli(directory, report, environment)
+                self.assertEqual(run.returncode, 2, run.stderr + run.stdout)
+                self.assertFalse((directory / "result.json").exists())
+
+    def test_cli_not_run_browser_limitation_accepts_unknown_node(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            environment = self.write_environment(directory)
+            sample = BrowserImportTests()
+            sample.setUp()
+            sample.make_not_run_report()
+            run = self.browser_cli(directory, sample.report, environment)
+            self.assertEqual(run.returncode, 0, run.stderr + run.stdout)
 
     def test_cli_success_and_negative_inputs_write_real_artifacts(self):
         for case, expected_status in (("success", 0), ("mismatch", 1), ("error", 1)):
@@ -185,6 +281,7 @@ class CLITests(unittest.TestCase):
 class BrowserImportTests(unittest.TestCase):
     def setUp(self):
         environment = probe.collector.build_result(probe.collector.Probe(probe_node=False))
+        environment["workload"]["runtimes"]["node"]["version"] = probe.observed("24.19.0", "tool:test-node")
         self.result, _ = probe.build_result(environment)
         self.report = {
             "schema_version": 1, "kind": "browser-compute-probe", "tool": "playwright-chromium",
@@ -260,7 +357,7 @@ class BrowserImportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate"):
             self.import_report()
 
-    def test_browser_not_run_reason_remains_unexecuted(self):
+    def make_not_run_report(self):
         self.report.update(status="not-run", reason="chromium-sandbox-unavailable")
         for raw in self.report["probes"]:
             for field in ("runtime_installed", "api_enumerated", "device_enumerated", "device_accessible"):
@@ -268,6 +365,9 @@ class BrowserImportTests(unittest.TestCase):
             raw["execution"].update(status="not-run", executed=False, effective=None, correct="unknown", software_fallback="unknown",
                                     runtime=None, process_id=None, evidence=[], reason="chromium-sandbox-unavailable")
             raw["actual"] = None
+
+    def test_browser_not_run_reason_remains_unexecuted(self):
+        self.make_not_run_report()
         self.import_report()
         self.assertEqual(self.result["extensions"]["x-browser-probe"]["status"], "not-run")
         for backend in self.result["compute"]["backends"]:

@@ -58,6 +58,16 @@ def add_gpu(result):
     return gpu
 
 
+def add_browser_wasm(result):
+    browser = copy.deepcopy(result["compute"]["backends"][0])
+    browser.update(id="browser-wasm", kind="cpu", api="wasm")
+    browser["probe"]["tool"] = "playwright-chromium"
+    browser["probe"]["execution"].update(
+        effective="browser-wasm", runtime=fact("chromium", LOG))
+    result["compute"]["backends"].append(browser)
+    return browser
+
+
 class DeviceContractTests(unittest.TestCase):
     def setUp(self):
         self.result, self.profile = device_pair()
@@ -74,6 +84,99 @@ class DeviceContractTests(unittest.TestCase):
 
     def test_completed_cpu_reference_contract_is_valid(self):
         self.assertEqual(self.check().errors, [])
+
+    def test_available_backend_requires_measured_installed_runtime(self):
+        for runtime in (fact(False, LOG), unknown("runtime not inspected"),
+                        fact(True, provenance="declared")):
+            with self.subTest(runtime=runtime):
+                self.cpu["probe"]["runtime_installed"] = runtime
+                self.assertRejected("compute-availability")
+
+    def test_completed_failed_operation_requires_installed_runtime(self):
+        self.execution.update(status="failed", correct=fact(False, LOG), reason="reference mismatch")
+        self.result["stages"]["correctness"].update(status="failed", reason="reference mismatch")
+        self.result["overall"] = "failed"
+        self.cpu["probe"]["runtime_installed"] = unknown("runtime not inspected")
+        findings = self.check()
+        self.assertIn(("compute-availability", "/compute/backends/0/probe/runtime_installed"),
+                      [(code, path) for _, code, path, _ in findings.errors], findings.items)
+
+    def test_available_unexecuted_browser_requires_installed_runtime(self):
+        browser = add_browser_wasm(self.result)
+        browser["probe"]["runtime_installed"] = unknown("runtime not inspected")
+        browser["probe"]["execution"].update(
+            status="not-run", executed=False, effective=None, correct=unknown(),
+            runtime=unknown(), process_id=unknown(), evidence=[], reason="operation not attempted")
+        self.assertRejected("compute-availability")
+
+    def test_completed_operation_requires_runtime_even_when_request_unavailable(self):
+        browser = add_browser_wasm(self.result)
+        browser["available"] = unknown("requested runtime unavailable")
+        browser["probe"]["runtime_installed"] = fact(False, LOG)
+        browser["probe"]["execution"].update(effective="cpu", software_fallback=fact(True, LOG))
+        self.assertRejected("compute-availability")
+
+    def test_inferred_runtime_installation_can_support_completed_operation(self):
+        self.cpu["probe"]["runtime_installed"] = fact(True, LOG, provenance="inferred")
+        self.assertEqual(self.check().errors, [])
+
+    def test_required_cpu_stages_cannot_be_replaced_by_extra_browser_operation(self):
+        add_browser_wasm(self.result)
+        self.execution.update(status="not-run", executed=False, effective=None,
+                              correct=unknown(), evidence=[], reason="CPU reference not attempted")
+        for name in ("execute", "correctness"):
+            self.result["stages"][name]["compute"] = {
+                "requested": "browser-wasm", "effective": "browser-wasm"}
+        findings = self.check()
+        for name in ("execute", "correctness"):
+            self.assertIn(("required-stage", f"/stages/{name}/compute"),
+                          [(code, path) for _, code, path, _ in findings.errors], findings.items)
+        self.assertNotIn("schema", findings.codes(), findings.items)
+
+    def test_required_performance_also_uses_profile_cpu(self):
+        add_browser_wasm(self.result)
+        self.profile["required_stages"].append("performance")
+        self.result["stages"]["performance"] = copy.deepcopy(self.result["stages"]["correctness"])
+        self.result["stages"]["performance"]["compute"] = {
+            "requested": "browser-wasm", "effective": "browser-wasm"}
+        self.assertRejected("required-stage")
+
+    def test_extra_completed_browser_operation_does_not_replace_cpu(self):
+        add_browser_wasm(self.result)
+        self.assertEqual(self.check().errors, [])
+
+    def test_optional_stage_can_use_extra_browser_backend(self):
+        add_browser_wasm(self.result)
+        self.result["stages"]["performance"] = copy.deepcopy(self.result["stages"]["correctness"])
+        self.result["stages"]["performance"]["compute"] = {
+            "requested": "browser-wasm", "effective": "browser-wasm"}
+        self.assertEqual(self.check().errors, [])
+
+    def test_cpu_binding_uses_profile_id_instead_of_literal_cpu(self):
+        self.cpu["id"] = self.profile["compute"]["backends"][0]["id"] = "reference-cpu"
+        self.execution["effective"] = "reference-cpu"
+        for name in ("execute", "correctness"):
+            self.result["stages"][name]["compute"] = {
+                "requested": "reference-cpu", "effective": "reference-cpu"}
+        self.assertEqual(self.check().errors, [])
+
+    def test_unexecuted_optional_browser_allows_unknown_or_absent_runtime(self):
+        browser = add_browser_wasm(self.result)
+        browser["available"] = unknown("browser capability not established")
+        for field in ("api_enumerated", "device_enumerated", "device_accessible"):
+            browser["probe"][field] = unknown("browser not inspected")
+        browser["probe"]["execution"] = {
+            "status": "not-run", "executed": False, "effective": None,
+            "correct": unknown(), "software_fallback": unknown(),
+            "runtime": unknown(), "process_id": unknown(), "evidence": [],
+            "reason": "browser not configured",
+        }
+        for status in ("not-run", "blocked"):
+            for runtime in (unknown("runtime not inspected"), fact(False, LOG)):
+                with self.subTest(status=status, runtime=runtime):
+                    browser["probe"]["execution"]["status"] = status
+                    browser["probe"]["runtime_installed"] = runtime
+                    self.assertEqual(self.check().errors, [])
 
     def test_device_contract_cannot_be_stripped_from_profile_result(self):
         self.result["compute"].pop("probe_contract")

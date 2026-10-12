@@ -146,8 +146,8 @@ CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\
 # CONTROL refuses in any value, taken from CONTROL itself.
 REF_CHAR = "[^ ~^:?*\\[\\\\" + CONTROL.pattern[1:]
 # GITHUB_REF, and the ref .git/HEAD names: actions/checkout checks a branch out by its name, so a run from a branch
-# named with any of these characters records its ref, and its commit unless checkout_sha does not follow that name.
-# Within the schema's 200 characters.
+# named with any of these characters records its ref, if it is ASCII or the file system encoding is UTF-8, and its
+# commit unless checkout_sha does not follow that name. Within the schema's 200 characters.
 GIT_REF = rf"(?=.{{1,200}}\Z)refs/{REF_CHAR}+"
 # GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>, and the validator links a run to its profile by it, so it
 # is recorded for any of those refs. The whole value stays within the schema's 200 characters.
@@ -1013,15 +1013,23 @@ class Probe:
         def gha(name, pattern):
             return self.env_value(name, pattern) if system else not_applicable(na)
 
+        def gha_ref(name, pattern):
+            # Python decodes the environment in the file system encoding, and git names refs in UTF-8: under another
+            # encoding a ref that is not ASCII would be recorded as other characters.
+            fact = gha(name, pattern)
+            if fact["value"] is not None and not fact["value"].isascii() and sys.getfilesystemencoding() != "utf-8":
+                return unknown(f"{name} is not ASCII, and the file system encoding is not UTF-8", f"env:{name}")
+            return fact
+
         ci = {
             "system": observed("github-actions", "env:GITHUB_ACTIONS") if system else inferred("local", "env:GITHUB_ACTIONS"),
             "event": gha("GITHUB_EVENT_NAME", r"[a-z_]{1,64}"),
             "repository": gha("GITHUB_REPOSITORY", r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}"),
-            "ref": gha("GITHUB_REF", GIT_REF),
+            "ref": gha_ref("GITHUB_REF", GIT_REF),
             "run_id": gha("GITHUB_RUN_ID", r"[0-9]{1,20}"),
             "run_attempt": gha("GITHUB_RUN_ATTEMPT", r"[0-9]{1,10}"),
             "run_url": not_applicable(na),
-            "workflow_ref": gha("GITHUB_WORKFLOW_REF", WORKFLOW_REF),
+            "workflow_ref": gha_ref("GITHUB_WORKFLOW_REF", WORKFLOW_REF),
             "job": gha("GITHUB_JOB", r"[A-Za-z0-9_-]{1,100}"),
             "runner_environment": gha("RUNNER_ENVIRONMENT", r"github-hosted|self-hosted"),
             "runner_os": gha("RUNNER_OS", r"[A-Za-z0-9]{1,40}"),
@@ -1089,8 +1097,14 @@ class Probe:
         # a name that is not ASCII could open another branch's file, and packed-refs alone could hold an older commit.
         if not ref.isascii() and sys.getfilesystemencoding() != "utf-8":
             return unknown("a ref that is not ASCII is followed only when the file system encoding is UTF-8")
-        loose, _ = self.read_git(ref)
-        if loose is not None and SHA.fullmatch(loose.strip()):
+        # packed-refs is read only when there is no loose ref: git writes an update as a loose ref, so a loose ref that
+        # cannot be read, or holds no commit ID (such as a symbolic ref), may be newer than the packed one.
+        loose, reason = self.read_git(ref, absent_ok=True)
+        if reason is not None:
+            return unknown(reason)
+        if loose is not None:
+            if not SHA.fullmatch(loose.strip()):
+                return unknown(f".git/{ref} does not hold a commit ID")
             # An evidence reference is printable ASCII, so a loose ref with another name is cited by .git/HEAD, which
             # names it.
             return observed(loose.strip(), f"git:.git/{ref}" if ref.isascii() else "git:.git/HEAD")
@@ -1102,7 +1116,8 @@ class Probe:
                 return observed(sha, "git:.git/packed-refs")
         return unknown(f"{ref} is not resolved in .git")
 
-    def read_git(self, name):
+    def read_git(self, name, absent_ok=False):
+        """(text, None), or (None, reason); with absent_ok, (None, None) when the file does not exist."""
         try:
             if not self.git_dir.is_dir():
                 return None, ".git is not a directory (no checkout, or a worktree)"
@@ -1110,7 +1125,9 @@ class Probe:
             # would turn it into U+FFFD, the name of another branch.
             return read_regular(self.git_dir / name, 1 << 20).decode("utf-8", "surrogateescape"), None
         except (OSError, ValueError) as exc:
-            # ValueError: a ref name the file system encoding cannot write.
+            if absent_ok and isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+                return None, None
+            # ValueError: a name the file system encoding cannot write, which checkout_sha does not follow.
             return None, f".git/{name} could not be read ({type(exc).__name__})"
 
     def compute(self):

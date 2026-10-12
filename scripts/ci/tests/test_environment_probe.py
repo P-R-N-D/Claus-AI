@@ -969,6 +969,19 @@ class RunEvidenceTests(Case):
                 env = dict(self.run_env(directory, "workflow_dispatch", {}), GITHUB_REF=ref)
                 with self.subTest(ref=ref), FakeMachine(env=env) as machine:
                     self.assertEqual(machine.result()["run"]["ci"]["ref"]["provenance"], "observed" if recorded else "unknown")
+            # Python decodes the environment in the file system encoding, so under another one than UTF-8 a ref that is
+            # not ASCII is not git's ref; an ASCII one still is.
+            for branch, encoding, recorded in (("feat/caf\u00e9", "utf-8", True), ("feat/caf\u00e9", "iso8859-1", False), ("main", "iso8859-1", True)):
+                env = dict(self.run_env(directory, "workflow_dispatch", {}), GITHUB_REF=f"refs/heads/{branch}",
+                           GITHUB_WORKFLOW_REF=f"P-R-N-D/Claus-AI/.github/workflows/ci.yml@refs/heads/{branch}")
+                with self.subTest(branch=branch, encoding=encoding), FakeMachine(env=env) as machine, \
+                        mock.patch.object(collector.sys, "getfilesystemencoding", return_value=encoding):
+                    ci = machine.result()["run"]["ci"]
+                    for name, key in (("GITHUB_REF", "ref"), ("GITHUB_WORKFLOW_REF", "workflow_ref")):
+                        expected = {"value": None, "provenance": "unknown", "reason": f"{name} is not ASCII, and the file system encoding is not UTF-8", "evidence": [f"env:{name}"]}
+                        self.assertEqual(ci[key]["provenance"] == "observed", recorded)
+                        if not recorded:
+                            self.assertEqual(ci[key], expected)
             odd = dict(push, GITHUB_REPOSITORY="owner/repo|x", RUNNER_ENVIRONMENT="custom", GITHUB_SHA="not-a-sha")
             with FakeMachine(env=odd) as machine:
                 ci = machine.result()["run"]
@@ -1052,26 +1065,36 @@ class RunEvidenceTests(Case):
                     self.assertEqual(machine.probe().checkout_sha(), {"value": sha, "provenance": "observed", "evidence": ["git:.git/packed-refs"]})
             # Under a file system encoding other than UTF-8, the path of a ref that is not ASCII is not git's name for
             # it, so that ref is not followed, not even when packed-refs lists it.
+            # The loose ref holds a newer commit than packed-refs, so the guard is shown to come before either is read.
             (machine.git / "packed-refs").write_text(f"{sha} refs/heads/feat/caf\u00e9\n{sha} refs/heads/main\n", encoding="utf-8")
-            for branch, encoding, expected in (("feat/caf\u00e9", "utf-8", sha), ("feat/caf\u00e9", "iso8859-1", None),
+            (machine.git / "refs/heads/feat").mkdir(parents=True, exist_ok=True)
+            (machine.git / "refs/heads/feat/caf\u00e9").write_text("e" * 40 + "\n", encoding="utf-8")
+            for branch, encoding, expected in (("feat/caf\u00e9", "utf-8", "e" * 40), ("feat/caf\u00e9", "iso8859-1", None),
                                                ("feat/caf\u00e9", "ascii", None), ("main", "iso8859-1", sha)):
                 (machine.git / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
                 with self.subTest(branch=branch, encoding=encoding), mock.patch.object(collector.sys, "getfilesystemencoding", return_value=encoding):
                     result = machine.probe().checkout_sha()
-                self.assertEqual(value(result), expected)
-                if expected is None:
-                    self.assertEqual(result["reason"], "a ref that is not ASCII is followed only when the file system encoding is UTF-8")
-            # A loose ref that cannot be read, here because of an encoding error, is looked up in packed-refs.
+                    self.assertEqual(value(result), expected)
+                    if expected is None:
+                        self.assertEqual(result["reason"], "a ref that is not ASCII is followed only when the file system encoding is UTF-8")
+            (machine.git / "refs/heads/feat/caf\u00e9").unlink()
+            # Only a loose ref that does not exist is looked up in packed-refs: one that exists but cannot be read, or
+            # holds no commit ID, such as a symbolic ref, may be newer than the packed commit.
             read_regular = collector.read_regular
-
-            def unencodable(path, limit):
-                if pathlib.Path(path).name not in ("HEAD", "packed-refs"):
-                    raise UnicodeEncodeError("ascii", str(path), 0, 1, "not encodable")
-                return read_regular(path, limit)
             (machine.git / "HEAD").write_text("ref: refs/heads/feat/caf\u00e9\n", encoding="utf-8")
             (machine.git / "packed-refs").write_text(f"{sha} refs/heads/feat/caf\u00e9\n", encoding="utf-8")
-            with mock.patch.object(collector, "read_regular", side_effect=unencodable):
-                self.assertEqual(machine.probe().checkout_sha(), {"value": sha, "provenance": "observed", "evidence": ["git:.git/packed-refs"]})
+            for error, expected in ((FileNotFoundError, sha), (NotADirectoryError, sha), (PermissionError, None), (collector.NotRegularFile, None),
+                                    (UnicodeEncodeError("ascii", "x", 0, 1, "not encodable"), None)):
+
+                def failing(path, limit, error=error):
+                    if pathlib.Path(path).name not in ("HEAD", "packed-refs"):
+                        raise error
+                    return read_regular(path, limit)
+                with self.subTest(error=error), mock.patch.object(collector, "read_regular", side_effect=failing):
+                    self.assertEqual(value(machine.probe().checkout_sha()), expected)
+            (machine.git / "refs/heads/feat/caf\u00e9").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            self.assertEqual(machine.probe().checkout_sha(), {"value": None, "provenance": "unknown", "reason": ".git/refs/heads/feat/caf\u00e9 does not hold a commit ID"})
+            (machine.git / "refs/heads/feat/caf\u00e9").unlink()
 
     def test_only_allowlisted_variables_are_read(self):
         probe = collector.Probe(env={"GITHUB_TOKEN": "x"})

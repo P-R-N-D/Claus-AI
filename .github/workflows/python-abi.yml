@@ -114,7 +114,7 @@ jobs:
           "$VENV_PYTHON" -I scripts/ci/tests/test_python_abi_probe.py --verbose
       - name: Probe the lock's native packages
         # For each package: the wheels PyPI lists for the locked version and the ABI each serves, the one this
-        # interpreter installs from the lock (binary only, with the lock's hashes, without dependencies), and an
+        # interpreter installs from the lock (binary only, with the lock's hashes, with only the lock packages it needs), and an
         # import and a call in a fresh process with the GIL state before and after. Exits 1 on an unexpected
         # install failure or a failed import or call; a package with no wheel for this interpreter is blocked.
         id: packages

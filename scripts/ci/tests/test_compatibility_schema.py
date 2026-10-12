@@ -524,6 +524,7 @@ class ProvenanceTests(Case):
         paths = [path for _, code, path, _ in long.items if code == "control-character"]
         # Sets, so that a failure lists the paths that differ rather than diffing 1000 similar lines.
         self.assertEqual(len(paths), 1000)
+        self.assertLessEqual(max(map(len, paths)), validator.PATH_KEYS * (validator.KEY_LIMIT + 1))
         self.assertEqual(set(paths), {f"/extensions/x-a/{named('k' * 100000)}/{index}" for index in range(1000)})
         keys = [f"a{index}" for index in range(40)]
         nested = "\u0001"
@@ -531,8 +532,9 @@ class ProvenanceTests(Case):
             nested = {key: nested}
         deep = check(changed(result, lambda d: d["extensions"].update({"x-a": nested})))
         self.assertFinding(deep, "control-character", "/" + "/".join(["extensions", "x-a", *keys[:6], "~...", *keys[-7:]]))
-        # The limit is on the escaped key, and a replaced key keeps the start of its digest, so keys of one length
-        # stay apart. An escaped key holds "~" only before "0" or "1", so a key that looks like a marker is not one.
+        # The limit is on the escaped key, and a replaced key keeps the first 8 hex digits of its digest, so keys of
+        # one length are told apart unless those digits agree. An escaped key holds "~" only before "0" or "1", so a
+        # key that looks like a marker is not one.
         kept = ("k" * 128, "~" * 64, "/" * 64, "...", "~...", "(5 characters)")
         self.assertEqual([validator.pointer("", key) for key in kept], ["/" + "k" * 128, "/" + "~0" * 64, "/" + "~1" * 64, "/...", "/~0...", "/(5 characters)"])
         replaced = ("k" * 129, "~" * 65, "/" * 65, "x" * 200, "y" * 200, "\ud800" * 200)
@@ -541,10 +543,11 @@ class ProvenanceTests(Case):
         sixteen = "/" + "/".join(str(index) for index in range(15))
         self.assertEqual((validator.pointer(sixteen, 15), validator.pointer(validator.pointer(sixteen, 15), 16)),
                          (sixteen + "/15", "/0/1/2/3/4/5/6/7/~.../10/11/12/13/14/15/16"))
-        # However long and deep the keys, a path keeps at most PATH_KEYS keys of at most KEY_LIMIT characters.
+        # However long and deep the keys, a path keeps at most PATH_KEYS keys of at most KEY_LIMIT characters. Each
+        # chain key is under KEY_LIMIT characters but over it once escaped, and a finding sits under every long key.
         chain = "\u0001"
         for index in range(40):
-            chain = {"~" * 63 + chr(ord("a") + index % 26): chain, "~" * 200: index}
+            chain = {"~" * 100 + chr(ord("a") + index % 26): chain, "~" * 200: "\u0001"}
         bounded = check(changed(result, lambda d: d["extensions"].update({"x-a": chain})))
         self.assertTrue(bounded.items)
         self.assertLessEqual(max(len(path) for _, _, path, _ in bounded.items), validator.PATH_KEYS * (validator.KEY_LIMIT + 1))
@@ -555,6 +558,7 @@ class ProvenanceTests(Case):
             values = validator.walk({"a": list(range(1000))})
             self.assertEqual([path for path, _ in (next(values) for _ in range(3))], ["", "/a", "/a/999"])
         self.assertEqual(len(built), 2)
+
 
 class EnvironmentRuleTests(Case):
     def test_layer_structure(self):

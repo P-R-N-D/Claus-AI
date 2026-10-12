@@ -1253,26 +1253,29 @@ def check_evidence_sources(profile, findings):
             findings.error("evidence-source", f"{base}/job", f"{source['workflow']!r} has no job {source['job']!r}")
 
 
-JOBS_KEY = re.compile(r"""(?:jobs|"jobs"|'jobs')[ \t]*:[ \t]*(?:#.*)?""")
+# An unindented jobs key, plain or quoted, with nothing after its colon but blanks and a comment that follows a blank.
+# MULTILINE makes ^ and $ match at "\n" only, as the reader below splits lines.
+JOBS_KEY = re.compile(r"""^(?:jobs|"jobs"|'jobs')[ \t]*:(?:[ \t]+(?:#.*)?)?$""", re.MULTILINE)
 
 
 def workflow_has_job(text, job):
     """Whether a workflow's top-level `jobs` mapping has the key `job`.
 
-    The workflow is read as text, not parsed as YAML. The mapping is the block after an unindented `jobs:` line, up
-    to the next line that does not start with a space (blank and comment lines aside), and its keys are the lines at
-    the indentation of its first key, plain or quoted, with a colon followed by a space, a comment or the end of the
-    line. A `jobs` mapping written in flow style names no job."""
+    The workflow is read as text, not parsed as YAML, and split into lines at "\n" only, one line at a time. The
+    mapping is the block after an unindented `jobs:` line (or `"jobs":`, `'jobs':` or `jobs :`, with an optional
+    comment after a blank), up to the next line that does not start with a space (blank and comment lines aside),
+    and its keys are the lines at the indentation of its first key, plain or quoted, with a colon followed by a
+    space, a tab or the end of the line. A `jobs` mapping written in flow style names no job."""
     key = re.compile(rf"""(?:{re.escape(job)}|"{re.escape(job)}"|'{re.escape(job)}')[ \t]*:(?:[ \t]|$)""")
-    lines = iter(text.splitlines())
-    for line in lines:
-        if JOBS_KEY.fullmatch(line):
-            break
-    else:
+    jobs = JOBS_KEY.search(text)
+    if not jobs:
         return False
-    indent = None
-    for line in lines:
-        if not line.strip() or line.lstrip().startswith("#"):
+    indent, start = None, jobs.end() + 1
+    while start < len(text):
+        end = text.find("\n", start)
+        end = len(text) if end < 0 else end
+        line, start = text[start:end], end + 1
+        if not line.strip(" \t") or line.lstrip(" \t").startswith("#"):
             continue
         if not line.startswith(" "):
             return False

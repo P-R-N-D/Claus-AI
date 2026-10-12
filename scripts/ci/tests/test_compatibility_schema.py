@@ -1573,9 +1573,17 @@ class ProfileTests(Case):
                 self.assertFinding(check(long), "evidence-source", "/evidence_sources/0/workflow")
                 self.assertIn("cannot read workflow file", check(long).items[0][3])
                 # A job is a key of the unindented jobs mapping at the indentation of its first key, plain or
-                # quoted, with a colon followed by a space, a comment or the end of the line.
+                # quoted, with a colon followed by a space, a tab or the end of the line. Lines end at "\n" only.
                 for label, text, defined in (
                     ("four spaces", "on: push\njobs:\n    backend:\n        runs-on: x\n    compatibility:\n        runs-on: x\n", True),
+                    ("a quoted jobs key", '"jobs":\n  compatibility:\n    runs-on: x\n', True),
+                    ("a jobs key with a blank before the colon", "jobs :\n  compatibility:\n    runs-on: x\n", True),
+                    ("a tab after the colon", "jobs:\t# all\n  compatibility:\t# probe\n    runs-on: x\n", True),
+                    ("U+0085 inside a value", 'jobs:\n  backend:\n    name: "a\x85b"\n  compatibility:\n    runs-on: x\n', True),
+                    ("U+2028 inside a value", 'jobs:\n  backend:\n    name: "x\u2028  compatibility: y"\n', False),
+                    ("a comment right after the jobs colon", "jobs:#c:\n  compatibility:\n    runs-on: x\n", False),
+                    ("a block scalar", "jobs: |\n  compatibility: x\n", False),
+                    ("a comment right after the job colon", "jobs:\n  compatibility:#c\n", False),
                     ("double quotes", 'jobs:\n  "compatibility":\n    runs-on: x\n', True),
                     ("single quotes and a space", "jobs:\n  'compatibility' :\n    runs-on: x\n", True),
                     ("comments after the keys", "jobs: # all\n  compatibility: # schema and probe\n    runs-on: x\n", True),
@@ -1594,6 +1602,12 @@ class ProfileTests(Case):
                             self.assertValid(check(profile))
                         else:
                             self.assertFinding(check(profile), "evidence-source", "/evidence_sources/0/job")
+                # A job name is matched as written, so a dot in it matches only a dot.
+                dotted = changed(profile, lambda d: d.update(evidence_sources=[{"workflow": ".github/workflows/ci.yml", "job": "a.b"}]))
+                for text, defined in (("jobs:\n  a.b:\n    runs-on: x\n", True), ("jobs:\n  axb:\n    runs-on: x\n", False)):
+                    with self.subTest(dotted=text):
+                        workflow.write_text(text, encoding="utf-8")
+                        self.assertEqual(check(dotted).codes(), [] if defined else ["evidence-source"])
 
     def test_a_result_is_checked_against_what_its_profile_declares(self):
         result, profile = pair("windows-arm64-wsl2-podman")
@@ -1883,11 +1897,27 @@ class CommandTests(Case):
                 except OSError:
                     pass
                 for summary in spellings:
-                    with self.subTest("missing workflow", summary=summary.name):
+                    with self.subTest("missing workflow", summary=str(summary.relative_to(directory))):
                         code, output = self.run_main(paths["missing"], "--summary", summary)
                         self.assertEqual(code, 2)
                         self.assertIn("is a workflow file a profile of this run names as its evidence source", output)
                         self.assertFalse(missing.exists())
+                # Any other summary path is written: the profile fails for its missing workflow, and the summary says so.
+                elsewhere = directory / "workflows" / "missing.yml"
+                elsewhere.parent.mkdir()
+                code, output = self.run_main(paths["missing"], "--summary", elsewhere)
+                self.assertEqual(code, 1, output)
+                self.assertIn("evidence-source", elsewhere.read_text(encoding="utf-8"))
+                self.assertFalse(missing.exists())
+                # A summary path that loops is a usage error, not a traceback, also where resolving it raises.
+                try:
+                    (directory / "loop.md").symlink_to(directory / "loop.md")
+                except OSError:
+                    pass
+                else:
+                    code, output = self.run_main(paths["profile"], "--summary", directory / "loop.md")
+                    self.assertEqual(code, 2)
+                    self.assertIn("cannot write the summary", output)
 
     def test_argparse_errors_cannot_forge_output_lines(self):
         # argparse repeats an argument it rejects, and the program name, in its usage line too; both are written as every other line is.

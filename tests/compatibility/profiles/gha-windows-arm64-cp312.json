@@ -4,7 +4,7 @@
   "synthetic": false,
   "id": "gha-windows-arm64-cp312",
   "title": "Windows on Arm on a GitHub-hosted windows-11-arm runner, native Arm64",
-  "description": "The platform job of .github/workflows/compatibility.yml on a windows-11-arm virtual machine with a native Arm64 CPython 3.12.15 (win-arm64) and an arm64 Node 24.21.0. The runner's user holds an administrator token, so the job checks the record with --no-policy and the record is no non-root evidence.",
+  "description": "The platform-windows job of .github/workflows/compatibility.yml on a windows-11-arm virtual machine with a native Arm64 CPython 3.12.15 (win-arm64) and an arm64 Node 24.21.0. It runs only for a pull request from a branch of this repository or a manual run on main. The runner's user holds an administrator token, so the job checks the record with --no-policy under the temporary exception in docs/SECURITY-ARCHITECTURE.md; the record is no non-administrator evidence.",
   "support": {
     "status": "not-supported",
     "lane": "Windows on Arm, native (`win_arm64`)",
@@ -13,7 +13,7 @@
   "evidence_sources": [
     {
       "workflow": ".github/workflows/compatibility.yml",
-      "job": "platform"
+      "job": "platform-windows"
     }
   ],
   "runner": {

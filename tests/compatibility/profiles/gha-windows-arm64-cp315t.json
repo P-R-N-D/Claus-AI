@@ -4,7 +4,7 @@
   "synthetic": false,
   "id": "gha-windows-arm64-cp315t",
   "title": "Free-threaded CPython 3.15.0 (3.15t) on a GitHub-hosted windows-11-arm runner",
-  "description": "The abi job of .github/workflows/python-abi.yml: free-threaded CPython 3.15.0 (3.15t) from uv 0.13.0 on windows-11-arm, as the runner's user. The job installs the backend lock's native packages that have a wheel for this interpreter, binary-only and with the lock's hashes, imports and calls each once in a fresh process, and records the wheel tags, files and GIL state; thread safety is not tested. The lane table's statuses are for CPython 3.12 with the GIL, so the profile is not-assessed.",
+  "description": "The abi-windows job of .github/workflows/python-abi.yml: free-threaded CPython 3.15.0 from uv 0.13.0 on windows-11-arm, which installs, imports and calls the lock's native packages that have a wheel here; thread safety is not tested. Not assessed: the lane table is for CPython 3.12. It runs only for a pull request from a branch of this repository or a manual run on main. The runner's user holds an administrator token, so the record is checked with --no-policy (docs/SECURITY-ARCHITECTURE.md).",
   "support": {
     "status": "not-assessed",
     "lane": "Windows on Arm, native (`win_arm64`)",
@@ -13,7 +13,7 @@
   "evidence_sources": [
     {
       "workflow": ".github/workflows/python-abi.yml",
-      "job": "abi"
+      "job": "abi-windows"
     }
   ],
   "runner": {

@@ -4,7 +4,7 @@
   "synthetic": false,
   "id": "gha-windows-x64-cp312",
   "title": "Windows x64 on a GitHub-hosted windows-2025 runner",
-  "description": "The platform job of .github/workflows/compatibility.yml on a windows-2025 x64 virtual machine with an x64 CPython 3.12.15 and Node 24.21.0. The runner's user holds an administrator token, so the job checks the record with --no-policy and the record is no non-root evidence.",
+  "description": "The platform-windows job of .github/workflows/compatibility.yml on a windows-2025 x64 virtual machine with an x64 CPython 3.12.15 and Node 24.21.0. It runs only for a pull request from a branch of this repository or a manual run on main. The runner's user holds an administrator token, so the job checks the record with --no-policy under the temporary exception in docs/SECURITY-ARCHITECTURE.md; the record is no non-administrator evidence.",
   "support": {
     "status": "not-supported",
     "lane": "Windows x64, native",
@@ -13,7 +13,7 @@
   "evidence_sources": [
     {
       "workflow": ".github/workflows/compatibility.yml",
-      "job": "platform"
+      "job": "platform-windows"
     }
   ],
   "runner": {

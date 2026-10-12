@@ -4,7 +4,7 @@
   "synthetic": false,
   "id": "gha-windows-arm64-x64-cp312",
   "title": "x64 CPython emulated on a GitHub-hosted windows-11-arm runner",
-  "description": "The platform job of .github/workflows/compatibility.yml on a windows-11-arm virtual machine with an x64 CPython 3.12.15 (win-amd64) and an x64 Node 24.21.0, which Windows runs through its x64 emulation. No lane in the lane table describes emulated x64 on Windows on Arm, so the profile names none. The runner's user holds an administrator token, so the job checks the record with --no-policy.",
+  "description": "The platform-windows job of .github/workflows/compatibility.yml on a windows-11-arm virtual machine with an x64 CPython 3.12.15 (win-amd64) and an x64 Node 24.21.0, run through Windows' x64 emulation; no lane in the lane table describes it, so the profile names none. It runs only for a pull request from a branch of this repository or a manual run on main. The runner's user holds an administrator token, so the record is checked with --no-policy (docs/SECURITY-ARCHITECTURE.md).",
   "support": {
     "status": "not-assessed",
     "lane": null,
@@ -13,7 +13,7 @@
   "evidence_sources": [
     {
       "workflow": ".github/workflows/compatibility.yml",
-      "job": "platform"
+      "job": "platform-windows"
     }
   ],
   "runner": {

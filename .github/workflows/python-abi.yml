@@ -32,6 +32,7 @@ defaults:
 
 jobs:
   abi:
+    # The Windows runners run the same steps in abi-windows below.
     name: Python ABI / ${{ matrix.platform.lane }} / ${{ matrix.build }}
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 30
@@ -44,36 +45,24 @@ jobs:
           - lane: linux-x64
             runner: ubuntu-24.04
             python: linux-x86_64-gnu
-            policy: default
           - lane: linux-arm64
             runner: ubuntu-24.04-arm
             python: linux-aarch64-gnu
-            policy: default
-          - lane: windows-x64
-            runner: windows-2025
-            python: windows-x86_64-none
-            # The runner's user holds an elevated administrator token, which app-non-root rejects.
-            policy: skip
-          - lane: windows-arm64
-            runner: windows-11-arm
-            python: windows-aarch64-none
-            policy: skip
           - lane: macos-arm64
             runner: macos-15
             python: macos-aarch64-none
-            policy: default
           - lane: macos-x64
             runner: macos-15-intel
             python: macos-x86_64-none
-            policy: default
-    env:
+    env: &abi_env
       # uv ignores uv.toml and pyproject.toml files, which a pull request could add.
       UV_NO_CONFIG: '1'
       LOCK: backend/locks/cp312-linux-x86_64.txt
       PROFILE: gha-${{ matrix.platform.lane }}-${{ matrix.build }}
       PYTHON_REQUEST: cpython-3.15.0${{ matrix.build == 'cp315t' && '+freethreaded' || '' }}-${{ matrix.platform.python }}
       FREE_THREADED: ${{ matrix.build == 'cp315t' && '1' || '0' }}
-    steps:
+    # abi-windows runs these steps too (a YAML alias); they read GITHUB_JOB where the two jobs differ.
+    steps: &abi_steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -87,6 +76,8 @@ jobs:
           python-version: cpython-3.15.0${{ matrix.build == 'cp315t' && '+freethreaded' || '' }}-${{ matrix.platform.python }}
       - name: Create a CPython 3.15.0 environment
         run: |
+          # The Windows runners' administrator token is allowed only in abi-windows, under its condition and exception.
+          if [ "$RUNNER_OS" = Windows ] && [ "$GITHUB_JOB" != abi-windows ]; then echo "::error::Windows lanes run only in the abi-windows job"; exit 1; fi
           mkdir -p "$RUNNER_TEMP/python-abi"
           echo "RECORDS=$RUNNER_TEMP/python-abi" >> "$GITHUB_ENV"
           uv --version
@@ -129,7 +120,7 @@ jobs:
           INSTALL: ${{ steps.packages.outputs.install }}
           INSTALL_REASON: ${{ steps.packages.outputs.install-reason }}
         run: |
-          evidence="log:python-abi.yml#abi/Probe the lock's native packages"
+          evidence="log:python-abi.yml#$GITHUB_JOB/Probe the lock's native packages"
           case "$INSTALL" in
             passed|failed) args=(--stage "install=$INSTALL" --stage-evidence "install=$evidence" --stage-escalation install=none --stage-reason "install=$INSTALL_REASON") ;;
             blocked) args=(--stage install=blocked --stage-reason "install=$INSTALL_REASON" --stage-evidence "install=$evidence") ;;
@@ -143,18 +134,33 @@ jobs:
           for stage in initialize execute correctness; do
             args+=(--stage "$stage=not-run" --stage-reason "$stage=this lane probes the lock's native packages only; x-python-abi has each import and call")
           done
-          args+=(--stage security=not-run --stage-reason "security=no security check runs on this lane")
+          security="no security check runs on this lane"
+          if [ "$GITHUB_JOB" = abi-windows ] && [ "$RUNNER_OS" = Windows ]; then
+            # The temporary Windows administrator-token exception (docs/SECURITY-ARCHITECTURE.md): the record itself
+            # says that the policy is skipped and security is not verified, so it never reads as a non-administrator result.
+            security="not verified: no security check runs on this lane, and the privilege policy is skipped under the temporary Windows administrator-token exception"
+            printf '%s\n' '{"policy": "skipped", "security": "not-verified", "compatibility": "incomplete", "non_administrator_run": "not-run", "reason": "GitHub-hosted Windows runners give the job user an elevated administrator token only", "exception": "docs/SECURITY-ARCHITECTURE.md#temporary-exception-windows-administrator-token"}' > "$RECORDS/policy-exception.json"
+            args+=(--extension "x-policy-exception=$RECORDS/policy-exception.json")
+          fi
+          args+=(--stage security=not-run --stage-reason "security=$security")
           args+=(--stage performance=not-run --stage-reason "performance=not measured on shared runners")
           if [ -f "$RECORDS/python-abi.json" ]; then args+=(--extension "x-python-abi=$RECORDS/python-abi.json"); fi
           "$VENV_PYTHON" -I scripts/ci/collect_environment.py --no-node --profile-id "$PROFILE" --output "$RECORDS/$PROFILE.result.json" \
             --summary "$GITHUB_STEP_SUMMARY" "${args[@]}"
       - name: Check the record and the committed profiles
         if: ${{ !cancelled() && steps.collect.outcome != 'skipped' }}
-        env:
-          POLICY: ${{ matrix.platform.policy }}
         run: |
           policy=()
-          if [ "$POLICY" = skip ]; then policy=(--no-policy); fi
+          if [ "$GITHUB_JOB" = abi-windows ] && [ "$RUNNER_OS" = Windows ]; then
+            # Only here, under the temporary Windows administrator-token exception (docs/SECURITY-ARCHITECTURE.md): the
+            # job's user is an administrator, so the record cannot pass app-non-root. The validator reports policy-skipped.
+            policy=(--no-policy)
+            echo "::warning title=Privilege policy skipped::Windows administrator token: policy skipped, security not verified, compatibility incomplete. This is not a non-administrator result."
+            printf '%s\n' "### Windows administrator-token exception" "" \
+              "- Privilege policy: skipped (\`--no-policy\`); the validator reports \`policy-skipped\`." \
+              "- Security: not verified. Compatibility: incomplete." \
+              "- Not a non-administrator result. See docs/SECURITY-ARCHITECTURE.md, \"Temporary exception: Windows administrator token\"." "" >> "$GITHUB_STEP_SUMMARY"
+          fi
           "$VENV_PYTHON" -I scripts/ci/validate_compatibility.py --require-real --dependency-strategy docs/DEPENDENCY-STRATEGY.md "${policy[@]}" \
             --profile "tests/compatibility/profiles/$PROFILE.json" --summary "$GITHUB_STEP_SUMMARY" \
             "$RECORDS/$PROFILE.result.json" tests/compatibility/profiles/*.json
@@ -166,3 +172,30 @@ jobs:
           if-no-files-found: warn
           # The record and the probe report are the lane's only machine-readable evidence: keep them 90 days, GitHub's default for logs.
           retention-days: 90
+
+  abi-windows:
+    # The abi steps on GitHub-hosted Windows runners, whose job user holds an elevated administrator token only.
+    # They run under the temporary exception in docs/SECURITY-ARCHITECTURE.md ("Temporary exception: Windows
+    # administrator token"): for a pull request from a branch of this repository, and for a manual run on main,
+    # which needs write access to start. A fork's pull request skips this job: an intentional not-run, never a pass.
+    # A job's if is evaluated before its matrix is expanded, so it reads only the github context.
+    if: >-
+      ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    name: Python ABI / ${{ matrix.platform.lane }} / ${{ matrix.build }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        build: [cp315, cp315t]
+        platform:
+          - lane: windows-x64
+            runner: windows-2025
+            python: windows-x86_64-none
+          - lane: windows-arm64
+            runner: windows-11-arm
+            python: windows-aarch64-none
+    env: *abi_env
+    steps: *abi_steps

@@ -38,6 +38,7 @@ jobs:
     # The same steps on every lane. The install step reports blocked, and passes, only when the
     # reports explain the failure: a wheel the lock lacks for this platform, which the installer
     # names, or a platform requirement the lock does not pin. Any other failure fails the job.
+    # The Windows lanes run the same steps in platform-windows below.
     name: Platform / ${{ matrix.lane }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
@@ -51,53 +52,30 @@ jobs:
             python: cpython-3.12.15-linux-x86_64-gnu
             node-arch: x64
             frontend: true
-            policy: default
           - lane: linux-arm64
             runner: ubuntu-24.04-arm
             python: cpython-3.12.15-linux-aarch64-gnu
             node-arch: arm64
             frontend: true
-            policy: default
-          - lane: windows-x64
-            runner: windows-2025
-            python: cpython-3.12.15-windows-x86_64-none
-            node-arch: x64
-            frontend: true
-            # The runner's user holds an elevated administrator token, which app-non-root rejects.
-            policy: skip
-          - lane: windows-arm64
-            runner: windows-11-arm
-            python: cpython-3.12.15-windows-aarch64-none
-            node-arch: arm64
-            frontend: true
-            policy: skip
-          - lane: windows-arm64-x64
-            # An x64 Python and Node on Windows on Arm, which Windows runs through its x64 emulation.
-            runner: windows-11-arm
-            python: cpython-3.12.15-windows-x86_64-none
-            node-arch: x64
-            frontend: false
-            policy: skip
           - lane: macos-arm64
             runner: macos-15
             python: cpython-3.12.15-macos-aarch64-none
             node-arch: arm64
             frontend: true
-            policy: default
           - lane: macos-x64
             runner: macos-15-intel
             python: cpython-3.12.15-macos-x86_64-none
             node-arch: x64
             frontend: true
-            policy: default
-    env:
+    env: &platform_env
       # uv ignores uv.toml and pyproject.toml files, which a pull request could add.
       UV_NO_CONFIG: '1'
       LOCK: backend/locks/cp312-linux-x86_64.txt
       TEST_LOCK: backend/locks/cp312-linux-x86_64-test.txt
       PROFILE: gha-${{ matrix.lane }}-cp312
       PYTHON_REQUEST: ${{ matrix.python }}
-    steps:
+    # platform-windows runs these steps too (a YAML alias); they read GITHUB_JOB where the two jobs differ.
+    steps: &platform_steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -114,6 +92,8 @@ jobs:
           package-manager-cache: false
       - name: Create a CPython 3.12.15 environment
         run: |
+          # The Windows runners' administrator token is allowed only in platform-windows, under its condition and exception.
+          if [ "$RUNNER_OS" = Windows ] && [ "$GITHUB_JOB" != platform-windows ]; then echo "::error::Windows lanes run only in the platform-windows job"; exit 1; fi
           mkdir -p "$RUNNER_TEMP/compatibility"
           echo "RECORDS=$RUNNER_TEMP/compatibility" >> "$GITHUB_ENV"
           uv venv --managed-python --python "$PYTHON_REQUEST"
@@ -204,24 +184,25 @@ jobs:
           FRONTEND: ${{ steps.frontend.outcome }}
         run: |
           args=()
+          job="compatibility.yml#$GITHUB_JOB"
           ran() {  # stage, status, log reference, reason
             args+=(--stage "$1=$2" --stage-evidence "$1=log:$3" --stage-escalation "$1=none")
             if [ -n "$4" ]; then args+=(--stage-reason "$1=$4"); fi
           }
           step() {  # stage, outcome, step name, the stage it needs
             case "$2" in
-              success) ran "$1" passed "compatibility.yml#platform/$3" "" ;;
-              failure) ran "$1" failed "compatibility.yml#platform/$3" "the step failed; see its log" ;;
+              success) ran "$1" passed "$job/$3" "" ;;
+              failure) ran "$1" failed "$job/$3" "the step failed; see its log" ;;
               skipped) args+=(--stage "$1=blocked" --stage-reason "$1=$4 did not pass") ;;
               *) args+=(--stage "$1=not-run" --stage-reason "$1=the step did not run") ;;
             esac
           }
           case "$INSTALL_STATUS" in
-            passed|failed) ran install "$INSTALL_STATUS" "compatibility.yml#platform/Install the hashed backend lock" "$INSTALL_REASON" ;;
-            blocked) args+=(--stage install=blocked --stage-reason "install=$INSTALL_REASON" --stage-evidence "install=log:compatibility.yml#platform/Install the hashed backend lock") ;;
+            passed|failed) ran install "$INSTALL_STATUS" "$job/Install the hashed backend lock" "$INSTALL_REASON" ;;
+            blocked) args+=(--stage install=blocked --stage-reason "install=$INSTALL_REASON" --stage-evidence "install=log:$job/Install the hashed backend lock") ;;
             *)
               if [ "$INSTALL_OUTCOME" = failure ]; then
-                ran install failed "compatibility.yml#platform/Install the hashed backend lock" "the install step failed before it set a status"
+                ran install failed "$job/Install the hashed backend lock" "the install step failed before it set a status"
               else
                 args+=(--stage install=blocked --stage-reason "install=the install step did not run because an earlier step failed")
               fi ;;
@@ -229,7 +210,15 @@ jobs:
           step initialize "$INITIALIZE" "Django check and migration drift" install
           step execute "$EXECUTE" "Django tests" initialize
           step correctness "$CORRECTNESS" "pytest from the hashed test lock" execute
-          args+=(--stage security=not-run --stage-reason "security=no security check runs on this lane")
+          security="no security check runs on this lane"
+          if [ "$GITHUB_JOB" = platform-windows ] && [ "$RUNNER_OS" = Windows ]; then
+            # The temporary Windows administrator-token exception (docs/SECURITY-ARCHITECTURE.md): the record itself
+            # says that the policy is skipped and security is not verified, so it never reads as a non-administrator result.
+            security="not verified: no security check runs on this lane, and the privilege policy is skipped under the temporary Windows administrator-token exception"
+            printf '%s\n' '{"policy": "skipped", "security": "not-verified", "compatibility": "incomplete", "non_administrator_run": "not-run", "reason": "GitHub-hosted Windows runners give the job user an elevated administrator token only", "exception": "docs/SECURITY-ARCHITECTURE.md#temporary-exception-windows-administrator-token"}' > "$RECORDS/policy-exception.json"
+            args+=(--extension "x-policy-exception=$RECORDS/policy-exception.json")
+          fi
+          args+=(--stage security=not-run --stage-reason "security=$security")
           args+=(--stage performance=not-run --stage-reason "performance=not measured on shared runners")
           for name in wheels requirements; do
             if [ -f "$RECORDS/$name.json" ]; then args+=(--extension "x-$name=$RECORDS/$name.json"); fi
@@ -238,8 +227,8 @@ jobs:
           if [ "$FRONTEND_ENABLED" = true ]; then frontend_reason="the step did not run"; else frontend_reason="this lane runs no frontend step"; fi
           frontend() {  # outcome, step name
             case "$1" in
-              success) printf '{"status": "passed", "evidence": ["log:compatibility.yml#platform/%s"]}' "$2" ;;
-              failure) printf '{"status": "failed", "evidence": ["log:compatibility.yml#platform/%s"]}' "$2" ;;
+              success) printf '{"status": "passed", "evidence": ["log:%s/%s"]}' "$job" "$2" ;;
+              failure) printf '{"status": "failed", "evidence": ["log:%s/%s"]}' "$job" "$2" ;;
               *) printf '{"status": "not-run", "reason": "%s"}' "$frontend_reason" ;;
             esac
           }
@@ -250,13 +239,18 @@ jobs:
             --summary "$GITHUB_STEP_SUMMARY" "${args[@]}"
       - name: Check the record and the committed profiles
         if: ${{ !cancelled() && steps.collect.outcome != 'skipped' }}
-        env:
-          POLICY: ${{ matrix.policy }}
         run: |
           policy=()
-          # Skipped where the runner's user is an administrator, so the record cannot pass app-non-root; the
-          # validator reports policy-skipped, and the lane's install stage shows whether it did more than detect.
-          if [ "$POLICY" = skip ]; then policy=(--no-policy); fi
+          if [ "$GITHUB_JOB" = platform-windows ] && [ "$RUNNER_OS" = Windows ]; then
+            # Only here, under the temporary Windows administrator-token exception (docs/SECURITY-ARCHITECTURE.md): the
+            # job's user is an administrator, so the record cannot pass app-non-root. The validator reports policy-skipped.
+            policy=(--no-policy)
+            echo "::warning title=Privilege policy skipped::Windows administrator token: policy skipped, security not verified, compatibility incomplete. This is not a non-administrator result."
+            printf '%s\n' "### Windows administrator-token exception" "" \
+              "- Privilege policy: skipped (\`--no-policy\`); the validator reports \`policy-skipped\`." \
+              "- Security: not verified. Compatibility: incomplete." \
+              "- Not a non-administrator result. See docs/SECURITY-ARCHITECTURE.md, \"Temporary exception: Windows administrator token\"." "" >> "$GITHUB_STEP_SUMMARY"
+          fi
           "$VENV_PYTHON" -I scripts/ci/validate_compatibility.py --require-real --dependency-strategy docs/DEPENDENCY-STRATEGY.md "${policy[@]}" \
             --profile "tests/compatibility/profiles/$PROFILE.json" --summary "$GITHUB_STEP_SUMMARY" \
             "$RECORDS/$PROFILE.result.json" tests/compatibility/profiles/*.json
@@ -275,6 +269,42 @@ jobs:
           if-no-files-found: warn
           # The record and the reports are the lane's only machine-readable evidence: keep them 90 days, GitHub's default for logs.
           retention-days: 90
+
+  platform-windows:
+    # The platform steps on GitHub-hosted Windows runners, whose job user holds an elevated administrator token
+    # only. They run under the temporary exception in docs/SECURITY-ARCHITECTURE.md ("Temporary exception: Windows
+    # administrator token"): for a pull request from a branch of this repository, and for a manual run on main,
+    # which needs write access to start. A fork's pull request skips this job: an intentional not-run, never a pass.
+    # A job's if is evaluated before its matrix is expanded, so it reads only the github context.
+    if: >-
+      ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    name: Platform / ${{ matrix.lane }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - lane: windows-x64
+            runner: windows-2025
+            python: cpython-3.12.15-windows-x86_64-none
+            node-arch: x64
+            frontend: true
+          - lane: windows-arm64
+            runner: windows-11-arm
+            python: cpython-3.12.15-windows-aarch64-none
+            node-arch: arm64
+            frontend: true
+          - lane: windows-arm64-x64
+            # An x64 Python and Node on Windows on Arm, which Windows runs through its x64 emulation.
+            runner: windows-11-arm
+            python: cpython-3.12.15-windows-x86_64-none
+            node-arch: x64
+            frontend: false
+    env: *platform_env
+    steps: *platform_steps
 
   ubi:
     # UBI 9 and 10 in rootless Podman on the Ubuntu runners: the container runs as the runner's own user

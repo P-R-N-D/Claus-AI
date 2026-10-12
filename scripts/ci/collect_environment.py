@@ -145,8 +145,8 @@ CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\
 # A character git allows in a ref: none of space, "~", "^", ":", "?", "*", "[" or "\", and none of the characters
 # CONTROL refuses in any value, taken from CONTROL itself.
 REF_CHAR = "[^ ~^:?*\\[\\\\" + CONTROL.pattern[1:]
-# GITHUB_REF, and the ref .git/HEAD names: actions/checkout checks a branch out by its name, so a run from any branch
-# git allows records its ref and commit. Within the schema's 200 characters.
+# GITHUB_REF, and the ref .git/HEAD names: actions/checkout checks a branch out by its name, so a run from a branch
+# named with any of these characters records its ref and commit. Within the schema's 200 characters.
 GIT_REF = rf"(?=.{{1,200}}\Z)refs/{REF_CHAR}+"
 # GITHUB_WORKFLOW_REF is <owner>/<repository>/<path>@<ref>, and the validator links a run to its profile by it, so it
 # is recorded for any of those refs. The whole value stays within the schema's 200 characters.
@@ -1080,9 +1080,9 @@ class Probe:
         if SHA.fullmatch(head):
             return observed(head, "git:.git/HEAD")
         ref = head[len("ref: "):] if head.startswith("ref: ") else None
-        # The ref is read as a path under .git, so, as git requires of a ref, it holds no ".." and no part of it is
-        # empty or starts with ".".
-        if ref is None or not re.fullmatch(GIT_REF, ref) or ".." in ref or any(not part or part.startswith(".") for part in ref.split("/")):
+        # The ref is read as a path under .git, so it is followed only as git would name a ref: no ".." or "@{", and
+        # no part that is empty, starts with ".", or ends with ".lock" or "." (which Windows drops from a file name).
+        if ref is None or not re.fullmatch(GIT_REF, ref) or ".." in ref or "@{" in ref or any(not part or part.startswith(".") or part.endswith((".lock", ".")) for part in ref.split("/")):
             return unknown(".git/HEAD has an unexpected form")
         loose, _ = self.read_git(ref)
         if loose is not None and SHA.fullmatch(loose.strip()):
@@ -1090,8 +1090,9 @@ class Probe:
             # names it.
             return observed(loose.strip(), f"git:.git/{ref}" if ref.isascii() else "git:.git/HEAD")
         packed, _ = self.read_git("packed-refs")
-        for line in (packed or "").splitlines():
-            sha, _, name = line.partition(" ")
+        # Lines end at "\n" only: str.splitlines() also ends one at characters a ref name may hold, such as U+2028.
+        for line in (packed or "").split("\n"):
+            sha, _, name = line.removesuffix("\r").partition(" ")
             if name == ref and SHA.fullmatch(sha):
                 return observed(sha, "git:.git/packed-refs")
         return unknown(f"{ref} is not resolved in .git")
@@ -1100,7 +1101,9 @@ class Probe:
         try:
             if not self.git_dir.is_dir():
                 return None, ".git is not a directory (no checkout, or a worktree)"
-            return read_regular(self.git_dir / name, 1 << 20).decode("utf-8", "replace"), None
+            # A byte that is not UTF-8 becomes a lone surrogate, which no ref the collector follows holds; "replace"
+            # would turn it into U+FFFD, the name of another branch.
+            return read_regular(self.git_dir / name, 1 << 20).decode("utf-8", "surrogateescape"), None
         except (OSError, ValueError) as exc:
             # ValueError: a ref name the file system encoding cannot write.
             return None, f".git/{name} could not be read ({type(exc).__name__})"
@@ -1318,7 +1321,7 @@ def plain(text):
 
 def markdown_cell(value):
     """Text for one Markdown table cell: control characters become spaces, and Markdown and HTML syntax is escaped."""
-    return re.sub(r"([\\`*_~\[\]()<>!|])", r"\\\1", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value)))
+    return re.sub(r"([\\`*_~\[\]()<>!|&])", r"\\\1", re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", str(value)))
 
 
 def describe(fact):

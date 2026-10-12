@@ -1484,7 +1484,7 @@ def plain(text):
 
 def markdown_cell(text):
     """Text for one Markdown table cell: control characters become spaces, and Markdown and HTML syntax is escaped."""
-    return re.sub(r"([\\`*_~\[\]()<>!|])", r"\\\1", plain(text))
+    return re.sub(r"([\\`*_~\[\]()<>!|&])", r"\\\1", plain(text))
 
 
 class ArgumentParser(argparse.ArgumentParser):

@@ -1013,6 +1013,9 @@ class RunEvidenceTests(Case):
                 ("ref: refs/heads/./main\n", {"refs/heads/main": sha + "\n"}, None),
                 ("ref: refs//main\n", {"refs/main": sha + "\n"}, None),
                 ("ref: refs/heads/a..b\n", {"refs/heads/a..b": sha + "\n"}, None),
+                # packed-refs lines end at "\n" only, so U+2028 inside a ref name does not end this line at "refs/heads/b".
+                ("ref: refs/heads/b\n", {"packed-refs": f"{sha} refs/heads/b\u2028c\n"}, None),
+                ("ref: refs/heads/main\n", {"packed-refs": f"{sha} refs/heads/main\r\n"}, sha),
                 ("ref: refs/heads/../../../etc/passwd\n", {}, None),
                 ("ref: refs/../../outside\n", {}, None),
                 ("garbage\n", {}, None),
@@ -1026,9 +1029,26 @@ class RunEvidenceTests(Case):
                     self.assertEqual(value(machine.probe().checkout_sha()), expected)
                 for name in files:
                     (machine.git / name).unlink()
-            # A ref name the file system encoding cannot write leaves the commit unknown.
-            with mock.patch.object(collector, "read_regular", side_effect=UnicodeEncodeError("ascii", "x", 0, 1, "not encodable")):
-                self.assertEqual(machine.probe().checkout_sha(), {"value": None, "provenance": "unknown", "reason": ".git/HEAD could not be read (UnicodeEncodeError)"})
+            # A ref with a character, a length or a form that git or GIT_REF refuses is not followed, even when
+            # packed-refs lists it. A HEAD that is not UTF-8 is not read as U+FFFD, which names another branch here.
+            refused = ("refs/heads/a b", "refs/heads/a\u202eb", "refs/heads/a\x01b", "refs/heads/" + "x/" * 95 + "x",
+                       "refs/heads/main.", "refs/heads/x.lock", "refs/heads/x.lock/y", "refs/heads/a@{b}", "refs/heads/a./b")
+            for ref, listed in [(ref.encode(), ref.encode()) for ref in refused] + [(b"refs/heads/x/a\xff", "refs/heads/x/a\ufffd".encode())]:
+                (machine.git / "HEAD").write_bytes(b"ref: " + ref + b"\n")
+                (machine.git / "packed-refs").write_bytes(sha.encode() + b" " + listed + b"\n")
+                with self.subTest(head=ref):
+                    self.assertEqual(machine.probe().checkout_sha(), {"value": None, "provenance": "unknown", "reason": ".git/HEAD has an unexpected form"})
+            # A loose ref whose name the file system encoding cannot write is looked up in packed-refs.
+            read_regular = collector.read_regular
+
+            def unencodable(path, limit):
+                if pathlib.Path(path).name not in ("HEAD", "packed-refs"):
+                    raise UnicodeEncodeError("ascii", str(path), 0, 1, "not encodable")
+                return read_regular(path, limit)
+            (machine.git / "HEAD").write_text("ref: refs/heads/feat/caf\u00e9\n", encoding="utf-8")
+            (machine.git / "packed-refs").write_text(f"{sha} refs/heads/feat/caf\u00e9\n", encoding="utf-8")
+            with mock.patch.object(collector, "read_regular", side_effect=unencodable):
+                self.assertEqual(machine.probe().checkout_sha(), {"value": sha, "provenance": "observed", "evidence": ["git:.git/packed-refs"]})
 
     def test_only_allowlisted_variables_are_read(self):
         probe = collector.Probe(env={"GITHUB_TOKEN": "x"})
@@ -1506,6 +1526,7 @@ class CommandTests(Case):
 
     def test_the_summary_escapes_table_cells(self):
         self.assertEqual(collector.markdown_cell("a|b`c\nd"), "a\\|b\\`c d")
+        self.assertEqual(collector.markdown_cell("&#x202e;"), "\\&#x202e;")
         self.assertEqual(collector.markdown_cell("[x](https://example.invalid) <b>\\"), "\\[x\\]\\(https://example.invalid\\) \\<b\\>\\\\")
         # A VERSION_ID with Markdown in it passes the printable check, so the summary must escape it.
         hostile = 'ID=ubuntu\nVERSION_ID="24.04|**x**](https://example.invalid)`<b>"\n'

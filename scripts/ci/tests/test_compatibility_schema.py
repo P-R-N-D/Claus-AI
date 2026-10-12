@@ -2089,6 +2089,7 @@ class CommandTests(Case):
 
     def test_summary_cells_escape_markdown(self):
         self.assertEqual(validator.markdown_cell("a|b`c\nd"), "a\\|b\\`c d")
+        self.assertEqual(validator.markdown_cell("&#x202e;"), "\\&#x202e;")
         self.assertEqual(validator.markdown_cell("[x](https://example.invalid) <b>\\"), "\\[x\\]\\(https://example.invalid\\) \\<b\\>\\\\")
 
     def test_summary_states_what_a_valid_record_means(self):

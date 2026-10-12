@@ -1492,6 +1492,28 @@ class ProfileTests(Case):
                 long = changed(profile, lambda d: d.update(evidence_sources=[{"workflow": ".github/workflows/##[error]" + "a" * 300 + ".yml", "job": "compatibility"}]))
                 self.assertFinding(check(long), "evidence-source", "/evidence_sources/0/workflow")
                 self.assertIn("cannot read workflow file", check(long).items[0][3])
+                # A job is a key of the unindented jobs mapping at the indentation of its first key, plain or
+                # quoted, with a colon followed by a space, a comment or the end of the line.
+                for label, text, defined in (
+                    ("four spaces", "on: push\njobs:\n    backend:\n        runs-on: x\n    compatibility:\n        runs-on: x\n", True),
+                    ("double quotes", 'jobs:\n  "compatibility":\n    runs-on: x\n', True),
+                    ("single quotes and a space", "jobs:\n  'compatibility' :\n    runs-on: x\n", True),
+                    ("comments after the keys", "jobs: # all\n  compatibility: # schema and probe\n    runs-on: x\n", True),
+                    ("a deeper key", "jobs:\n  backend:\n    compatibility:\n      x: 1\n", False),
+                    ("a deeper key under four spaces", "jobs:\n    backend:\n      compatibility: 1\n", False),
+                    ("a longer name", "jobs:\n  compatibility-x:\n    runs-on: x\n", False),
+                    ("a name that ends with it", "jobs:\n  pre-compatibility:\n    runs-on: x\n", False),
+                    ("no space after the colon", "jobs:\n  compatibility:x\n", False),
+                    ("mismatched quotes", "jobs:\n  \"compatibility':\n    runs-on: x\n", False),
+                    ("an indented jobs key", "on:\n  jobs:\n    compatibility: x\n", False),
+                    ("flow style", "jobs: {compatibility: {runs-on: x}}\n", False),
+                ):
+                    with self.subTest(label):
+                        workflow.write_text(text, encoding="utf-8")
+                        if defined:
+                            self.assertValid(check(profile))
+                        else:
+                            self.assertFinding(check(profile), "evidence-source", "/evidence_sources/0/job")
 
     def test_a_result_is_checked_against_what_its_profile_declares(self):
         result, profile = pair("windows-arm64-wsl2-podman")
@@ -1763,6 +1785,22 @@ class CommandTests(Case):
                             self.assertEqual(code, 2)
                             self.assertIn("is a workflow file a profile of this run names as its evidence source", output)
                             self.assertEqual(workflow.read_bytes(), before)
+                # A workflow file that is missing is refused too, however its path is written, and is not created.
+                missing = directory / ".github" / "workflows" / "missing.yml"
+                paths["missing"] = directory / "missing.json"
+                paths["missing"].write_text(json.dumps(changed(profile, lambda d: d.update(evidence_sources=[{"workflow": ".github/workflows/missing.yml", "job": "compatibility"}]))), encoding="utf-8")
+                spellings = [missing, directory / ".github" / "workflows" / ".." / "workflows" / "missing.yml"]
+                try:
+                    (directory / "dangling.md").symlink_to(missing)
+                    spellings.append(directory / "dangling.md")
+                except OSError:
+                    pass
+                for summary in spellings:
+                    with self.subTest("missing workflow", summary=summary.name):
+                        code, output = self.run_main(paths["missing"], "--summary", summary)
+                        self.assertEqual(code, 2)
+                        self.assertIn("is a workflow file a profile of this run names as its evidence source", output)
+                        self.assertFalse(missing.exists())
 
     def test_argparse_errors_cannot_forge_output_lines(self):
         # argparse repeats an argument it rejects, and the program name, in its usage line too; both are written as every other line is.

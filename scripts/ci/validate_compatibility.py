@@ -1188,9 +1188,38 @@ def check_evidence_sources(profile, findings):
         if text is None:
             findings.error("evidence-source", f"{base}/workflow", f"no workflow file {source['workflow']!r}")
             continue
-        jobs = re.search(r"^jobs:[ \t]*\n(.*?)(?=^[^\s#]|\Z)", text, re.MULTILINE | re.DOTALL)
-        if not jobs or not re.search(rf"^  {re.escape(source['job'])}:[ \t]*$", jobs.group(1), re.MULTILINE):
+        if not workflow_has_job(text, source["job"]):
             findings.error("evidence-source", f"{base}/job", f"{source['workflow']!r} has no job {source['job']!r}")
+
+
+JOBS_KEY = re.compile(r"""(?:jobs|"jobs"|'jobs')[ \t]*:[ \t]*(?:#.*)?""")
+
+
+def workflow_has_job(text, job):
+    """Whether a workflow's top-level `jobs` mapping has the key `job`.
+
+    The workflow is read as text, not parsed as YAML. The mapping is the block after an unindented `jobs:` line, up
+    to the next line that does not start with a space (blank and comment lines aside), and its keys are the lines at
+    the indentation of its first key, plain or quoted, with a colon followed by a space, a comment or the end of the
+    line. A `jobs` mapping written in flow style names no job."""
+    key = re.compile(rf"""(?:{re.escape(job)}|"{re.escape(job)}"|'{re.escape(job)}')[ \t]*:(?:[ \t]|$)""")
+    lines = iter(text.splitlines())
+    for line in lines:
+        if JOBS_KEY.fullmatch(line):
+            break
+    else:
+        return False
+    indent = None
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            return False
+        width = len(line) - len(line.lstrip(" "))
+        indent = width if indent is None else indent
+        if width == indent and key.match(line, width):
+            return True
+    return False
 
 
 def facts_of(node, keys=()):
@@ -1402,6 +1431,16 @@ def same_file(path, other):
         return False
 
 
+def same_place(path, other):
+    """Whether two paths name one file: one existing file, or one place once resolved, also where no file is yet."""
+    if same_file(path, other):
+        return True
+    try:
+        return path.resolve() == other.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def evidence_workflows(document):
     """The workflow files a real profile's evidence sources name, which check_evidence_sources reads.
 
@@ -1498,8 +1537,8 @@ def main(argv=None):
         lines.append(f"| {markdown_cell(path.name)} | {markdown_cell(kind)} | {verdict} | {len(errors)} | {len(warnings)} |")
 
     if args.summary:
-        # Nor may it be a workflow file a real profile's evidence sources were read from.
-        if any(same_file(args.summary, workflow) for workflow in workflows):
+        # Nor may it be a workflow file a real profile's evidence sources were read from, or name one that is missing.
+        if any(same_place(args.summary, workflow) for workflow in workflows):
             print(plain(f"error: the summary {args.summary} is a workflow file a profile of this run names as its evidence source"), file=sys.stderr)
             return 2
         shown = details[:200]

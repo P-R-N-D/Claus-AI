@@ -16,6 +16,8 @@ import io
 import json
 import os
 import pathlib
+import signal
+import subprocess
 import sys
 import sysconfig
 import tempfile
@@ -254,6 +256,13 @@ class OutcomeTests(unittest.TestCase):
         reenabled = item("installed", "passed", "passed")
         reenabled["probe"]["gil_reenabled"] = True
         self.assertEqual(probe.overall([reenabled])[0::2], ("passed", "failed"))
+        # So does one whose process printed a passing result and then did not exit with status 0.
+        crashed = item("installed", "passed", "passed")
+        crashed["probe"]["exit"] = {"status": "failed", "returncode": -11, "signal": "SIGSEGV"}
+        self.assertEqual(probe.overall([crashed])[0::2], ("passed", "failed"))
+        clean = item("installed", "passed", "passed")
+        clean["probe"]["exit"] = {"status": "passed", "returncode": 0}
+        self.assertEqual(probe.overall([clean])[0::2], ("passed", "passed"))
 
     def test_the_install_stage(self):
         wheels = {"uncovered": ["cryptography", "psycopg-binary"], "published_not_in_lock": ["psycopg-binary"]}
@@ -455,7 +464,13 @@ class PackageProbeTests(unittest.TestCase):
         status, report, outputs = self.packages({**self.PASSED, "gil_before": False, "gil_after_import": True, "gil_after_call": True, "gil_reenabled": True})
         self.assertEqual(status, 1)
         self.assertEqual(outputs[-1], "execute=failed")
-        self.assertIn("| cffi 2.0.0 | installed | " + self.CFFI + " | - | False / True | passed | passed |", "\n".join(probe.summary_lines(report)))
+        self.assertIn("| cffi 2.0.0 | installed | " + self.CFFI + " | - | False / True | passed | passed | - |", "\n".join(probe.summary_lines(report)))
+        # A package whose probe process printed a passing result and was then killed by a signal fails the command too.
+        self.installed.clear()
+        status, report, outputs = self.packages({**self.PASSED, "exit": {"status": "failed", "returncode": -11, "signal": "SIGSEGV"}})
+        self.assertEqual((status, outputs[-1]), (1, "execute=failed"))
+        self.assertEqual(report["packages"]["packages"][0]["probe"]["exit"], {"status": "failed", "returncode": -11, "signal": "SIGSEGV"})
+        self.assertIn("| True / True | passed | passed | SIGSEGV |", "\n".join(probe.summary_lines(report)))
 
 
 class ImportProbeTests(unittest.TestCase):
@@ -466,6 +481,7 @@ class ImportProbeTests(unittest.TestCase):
     def test_an_import_and_a_call_in_a_new_process(self):
         out = self.run_target("import json", "assert json.loads('[1]') == [1]")
         self.assertEqual((out["import"], out["call"]), ("passed", "passed"))
+        self.assertEqual(out["exit"], {"status": "passed", "returncode": 0})
         expected = sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else None
         if sysconfig.get_config_var("Py_GIL_DISABLED") != 1:
             self.assertEqual((out["gil_before"], out["gil_after_call"]), (expected, expected))
@@ -478,6 +494,45 @@ class ImportProbeTests(unittest.TestCase):
         self.assertEqual((out["import"], out["call"], out["call_error"]), ("passed", "failed", "JSONDecodeError"))
         out = self.run_target("import warnings; warnings.warn('careful')", "pass")
         self.assertEqual(out["warnings"], ["UserWarning: careful"])
+
+    def test_the_exit_status_is_checked_after_the_result(self):
+        # The process prints a passing import and call; how it then exits decides whether the run passed.
+        printed = json.dumps({"gil_before": True, "import": "passed", "gil_after_import": True, "call": "passed", "gil_after_call": True, "warnings": []})
+
+        def ended(returncode):
+            done = subprocess.CompletedProcess([], returncode, stdout=f"{printed}\n".encode(), stderr=b"")
+            with mock.patch.object(probe.subprocess, "run", return_value=done):
+                out = self.run_target("pass", "pass")
+            # The printed result is kept as evidence, whatever the exit.
+            self.assertEqual((out["import"], out["call"]), ("passed", "passed"))
+            return out["exit"]
+
+        self.assertEqual(ended(0), {"status": "passed", "returncode": 0})
+        self.assertEqual(ended(3), {"status": "failed", "returncode": 3})
+        # POSIX reports a signal as a negative status; Windows reports a crash such as 0xC0000005 as a large positive one.
+        self.assertEqual(ended(-11), {"status": "failed", "returncode": -11, "signal": "SIGSEGV"})
+        self.assertEqual(ended(-200), {"status": "failed", "returncode": -200, "signal": "200"})
+        self.assertEqual(ended(0xC0000005), {"status": "failed", "returncode": 3221225477})
+
+    def test_a_nonzero_exit_after_the_result_fails(self):
+        # The call passes, the result is printed and flushed, and the process then exits with status 3 at shutdown.
+        out = self.run_target("import atexit, os, sys", "atexit.register(lambda: (sys.stdout.flush(), os._exit(3)))")
+        self.assertEqual((out["import"], out["call"], out["exit"]), ("passed", "passed", {"status": "failed", "returncode": 3}))
+        item = {"name": "x-test", "install": {"status": "installed"}, "probe": out}
+        self.assertEqual(probe.overall([item])[0::2], ("passed", "failed"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX signals")
+    def test_a_signal_after_the_result_fails(self):
+        out = self.run_target("import atexit, os, signal, sys", "atexit.register(lambda: (sys.stdout.flush(), os.kill(os.getpid(), signal.SIGKILL)))")
+        self.assertEqual((out["import"], out["call"]), ("passed", "passed"))
+        self.assertEqual(out["exit"], {"status": "failed", "returncode": -signal.SIGKILL, "signal": "SIGKILL"})
+        item = {"name": "x-test", "install": {"status": "installed"}, "probe": out}
+        self.assertEqual(probe.overall([item])[0::2], ("passed", "failed"))
+
+    def test_a_process_that_prints_no_result_fails(self):
+        out = self.run_target("import os", "os._exit(4)")
+        self.assertEqual((out["import"], out["import_error"], out["call"]), ("failed", "no result", "not-run"))
+        self.assertEqual(out["exit"], {"status": "failed", "returncode": 4})
 
 
 class InterpreterTests(unittest.TestCase):

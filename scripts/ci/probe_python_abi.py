@@ -19,7 +19,9 @@ packages: for each package in TARGETS, the wheel tags published for this
   interpreter's platform, which of them it accepts, then an install with uv from
   the lock's hashes, binary only, the selected wheel's file name and SHA-256, the
   extension modules it installed, and, in a new process, the GIL state before and
-  after the import, the import, and one call. It does not test thread safety.
+  after the import, the import, one call, and how the process exited (a nonzero
+  status or a signal fails the package, whatever it printed). It does not test
+  thread safety.
 install-stage: the status of a lane's install stage, from the exit statuses of
   uv pip sync and uv pip check, the installer's log, and the wheels and
   requirements reports: blocked when the lock lacks a wheel the installer names
@@ -54,6 +56,7 @@ import os
 import pathlib
 import platform
 import re
+import signal
 import subprocess
 import sys
 import sysconfig
@@ -340,13 +343,15 @@ INSTALL_FAILED = ("error", "contradiction", "dependency-failed")
 def overall(packages):
     """(install status, reason, execute status) for the packages report.
 
-    The import and call fail when either raised, or when a package enabled the GIL that a free-threaded build
-    started without (docs/DEPENDENCY-STRATEGY.md: GIL re-enablement is a failed qualification).
+    The import and call fail when either raised, when their process did not exit with status 0 (a crash at
+    shutdown, or a signal, after the result was printed), or when a package enabled the GIL that a free-threaded
+    build started without (docs/DEPENDENCY-STRATEGY.md: GIL re-enablement is a failed qualification).
     """
     blocked = [item["name"] for item in packages if item["install"]["status"] in INSTALL_BLOCKED]
     failed = [item["name"] for item in packages if item["install"]["status"] in INSTALL_FAILED]
     broken = [item["name"] for item in packages
-              if item["probe"]["import"] == "failed" or item["probe"]["call"] == "failed" or item["probe"].get("gil_reenabled") is True]
+              if item["probe"]["import"] == "failed" or item["probe"]["call"] == "failed" or item["probe"].get("gil_reenabled") is True
+              or item["probe"].get("exit", {}).get("status") == "failed"]
     ran = [item["name"] for item in packages if item["probe"]["call"] == "passed"]
     if failed:
         install = ("failed", f"unexpected install failures: {', '.join(failed)}")
@@ -554,17 +559,37 @@ def run_uv(uv, lock, names):
         return process.returncode
 
 
+def exit_status(returncode):
+    """How a probe process ended: passed only with status 0. A negative status is the POSIX signal that ended it;
+    a Windows crash is a large positive status, such as 3221225477 (0xC0000005)."""
+    if returncode == 0:
+        return {"status": "passed", "returncode": 0}
+    out = {"status": "failed", "returncode": returncode}
+    if returncode is not None and returncode < 0:
+        try:
+            out["signal"] = signal.Signals(-returncode).name
+        except ValueError:
+            out["signal"] = str(-returncode)
+    return out
+
+
 def import_probe(target):
     code_import, code_call = TARGETS[target]
     command = [sys.executable, "-I", "-c", IMPORT_PROBE, json.dumps({"import": code_import, "call": code_call})]
     try:
         process = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, timeout=PROBE_TIMEOUT, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"import": "failed", "call": "not-run", "import_error": type(exc).__name__, "warnings": []}
+        return {"import": "failed", "call": "not-run", "import_error": type(exc).__name__, "warnings": [], "exit": exit_status(None)}
+    # The result the process printed is kept as it is, and the exit is recorded beside it: a process that printed a
+    # passing import and call and then crashed, exited nonzero or was killed by a signal still fails (overall).
+    ended = exit_status(process.returncode)
     try:
         out = json.loads(process.stdout.decode("utf-8").strip().splitlines()[-1])
+        if not isinstance(out, dict):
+            raise ValueError("the last line is not a result")
     except (UnicodeDecodeError, ValueError, IndexError):
-        return {"import": "failed", "call": "not-run", "import_error": f"exit status {process.returncode}", "warnings": []}
+        return {"import": "failed", "call": "not-run", "import_error": "no result", "warnings": [], "exit": ended}
+    out["exit"] = ended
     out["warnings"] = [scrub(text) for text in out.get("warnings", [])]
     before, after = out.get("gil_before"), out.get("gil_after_call")
     out["gil_reenabled"] = before is False and after is True
@@ -646,12 +671,14 @@ def summary_lines(report):
         missing = report["requirements"]["missing"]
         lines += [f"Unmet requirements of installed packages: {', '.join(sorted({item['requirement'] for item in missing})) or 'none'}", ""]
     if "packages" in report:
-        lines += ["| Package | Install | Selected wheel | Extension suffixes | GIL before / after | Import | Call |", "|---|---|---|---|---|---|---|"]
+        lines += ["| Package | Install | Selected wheel | Extension suffixes | GIL before / after | Import | Call | Exit |", "|---|---|---|---|---|---|---|---|"]
         for item in report["packages"]["packages"]:
             selected = item.get("selected", {}).get("filename") or "none"
             probe = item["probe"]
             gil = f"{probe.get('gil_before')} / {probe.get('gil_after_call')}" if probe["import"] != "not-run" else "-"
-            lines.append(f"| {item['name']} {item['version']} | {item['install']['status']} | {selected} | {' '.join(item.get('extension_suffixes', [])) or '-'} | {gil} | {probe['import']} | {probe['call']} |")
+            ended = probe.get("exit")
+            exit_text = "-" if ended is None else ended.get("signal") or ("none" if ended["returncode"] is None else str(ended["returncode"]))
+            lines.append(f"| {item['name']} {item['version']} | {item['install']['status']} | {selected} | {' '.join(item.get('extension_suffixes', [])) or '-'} | {gil} | {probe['import']} | {probe['call']} | {exit_text} |")
         outcome = report["packages"]["outcome"]
         lines += ["", f"Install: {outcome['install']} ({outcome['install_reason']}); import and call: {outcome['execute']}. Thread safety was not tested.", ""]
     return lines

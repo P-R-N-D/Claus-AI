@@ -7,6 +7,13 @@ The collector reads the following, and nothing else:
   /run/systemd/system exist.
 - The first 20 bytes of the interpreter's executable (its ELF header), when the
   build architecture is not otherwise known.
+- On macOS, these sysctl values: kern.hv_vmm_present, hw.model,
+  kern.osproductversion, kern.osrelease, hw.optional.arm64, hw.optional.x86_64
+  and sysctl.proc_translated.
+- On Windows, platform.version(), the native machine IsWow64Process2 names,
+  the SystemManufacturer and SystemProductName values under
+  HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS, and whether this process's token
+  is elevated, holds the Administrators group enabled, or is LocalSystem.
 - The environment variables in ENV_ALLOWLIST.
 - The pull request head and base in the GitHub Actions event file.
 - The checkout's .git/HEAD, and the loose ref or packed-refs line it points to.
@@ -15,6 +22,8 @@ The collector reads the following, and nothing else:
   the PATH directories only, so on Windows not in the current directory unless
   PATH names it, also when PATH is unset, and there only as node.exe, whatever
   PATHEXT lists.
+- The JSON object files that --extension names, which go into the record's
+  extensions unchanged.
 
 Files are read only when they are regular files, and are opened so that a FIFO
 cannot block the probe.
@@ -24,11 +33,14 @@ and the optional summary. It records no host name, account name, home
 directory, network address or other environment variable. It refuses --stage
 values, and does not write a record, that look like a token or a private key.
 
-On Linux it fills in the layers, identity and isolation facts. On other systems
-it records the OS family, the user and group IDs on FreeBSD (os.getresuid)
-and macOS (os.geteuid, os.getuid), the Python and Node runtimes and the run,
-and leaves the layer kind and the isolation facts unknown, so the
-least-privilege policy fails there until a probe measures them.
+On Linux it fills in the layers, identity and isolation facts. On macOS and
+Windows it records the OS, the machine's architecture, whether the system runs
+in a VM, whether each runtime is emulated, and who the workload runs as (on
+Windows, whether its token is an administrator's); the Linux isolation
+interfaces are not-applicable there. On other systems it records the OS
+family, the user and group IDs on FreeBSD (os.getresuid), the Python and Node
+runtimes and the run, and leaves the layer kind and the isolation facts
+unknown, so the least-privilege policy fails there until a probe measures them.
 
 Each value it records is marked in one of these ways:
 
@@ -44,11 +56,22 @@ unexpected exception in one probe is recorded in probe_errors and fails the
 detect stage. The other probes' values stay in place, so a record can show
 which part of detection failed.
 
+Inside a container the engine's own facts (rootless or not, privileged,
+devices) are not visible. On the host, --amend-container RECORD
+--podman-container NAME runs `podman info` and `podman container inspect NAME`,
+found in the PATH directories and run with this process's environment, which
+rootless Podman needs to find its storage, and puts those three facts into the
+innermost layer of a record that was taken inside that running container. It
+changes nothing else in the record, and writes nothing if podman fails.
+
 Standard library only. Usage, from the repository root:
     python -I scripts/ci/collect_environment.py --output result.json
         [--profile-id ID] [--summary FILE] [--no-node]
         [--stage NAME=STATUS] [--stage-reason NAME=TEXT]
         [--stage-evidence NAME=REF] [--stage-escalation NAME=VALUE]
+        [--extension x-NAME=PATH]
+    python -I scripts/ci/collect_environment.py --amend-container RECORD
+        --podman-container NAME
 
 The --stage options record what other steps of the job did in the stages after
 detect. Every stage they do not name is not-run.
@@ -58,7 +81,8 @@ Exit status:
 - 1: the record was written but a probe failed.
 - 2: a usage error, or the record or the summary could not be written. The
   record is written first, and the message says which one failed. A record
-  that looks like it holds a secret is not written.
+  that looks like it holds a secret is not written. With --amend-container,
+  any failure, and the record is left as it was.
 """
 
 import argparse
@@ -175,6 +199,19 @@ CONTAINER_TECHNOLOGIES = {"docker": "docker", "podman": "podman", "lxc": "lxc", 
 NODE_EXPRESSION = "JSON.stringify({v:process.versions.node,m:process.versions.modules,n:process.versions.napi||null,a:process.arch,p:process.platform,e:require('os').endianness()})"
 NODE_OUTPUT_LIMIT = 4096
 NODE_TIMEOUT = 30
+# The image file machine types IsWow64Process2 reports for the machine that runs Windows.
+WINDOWS_MACHINES = {0x014C: "x86", 0x01C4: "armv7", 0x8664: "x86_64", 0xAA64: "aarch64"}
+WINDOWS_BIOS_KEY = "HARDWARE\\DESCRIPTION\\System\\BIOS"
+WINDOWS_BIOS_EVIDENCE = "python:winreg:HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS"
+# hw.model prefixes of macOS virtual machines.
+MACOS_MODELS = (("VirtualMac", "apple-virtualization"), ("VMware", "vmware"), ("Parallels", "parallels"))
+# How a record names a device an engine passes in: the path under /dev, with "/" as "-" and in lower case.
+DEVICE = re.compile(r"/dev/([A-Za-z0-9][A-Za-z0-9._+/-]{0,62})")
+EXTENSION_NAME = re.compile(r"x-[a-z0-9][a-z0-9-]{0,62}")
+EXTENSION_LIMIT = 1024 * 1024
+RECORD_LIMIT = 8 * 1024 * 1024
+PODMAN_TIMEOUT = 120
+PODMAN_OUTPUT_LIMIT = 8 * 1024 * 1024
 
 
 def observed(value, *evidence):
@@ -287,15 +324,132 @@ def read_regular(path, limit):
         return handle.read(limit)
 
 
-class Probe:
-    """Reads one system. `root`, `env` and `git_dir` exist so tests can point it at a made-up one."""
+class NativeQueries:
+    """Reads that need an operating system's own interface, through ctypes and winreg.
 
-    def __init__(self, root="/", env=None, git_dir=None, system=None, probe_node=True):
+    On macOS, sysctlbyname(3); on Windows, the process token, IsWow64Process2 and two
+    BIOS values in the registry. Each method returns None when the interface is
+    missing or the call fails, so the fact it feeds stays unknown. Nothing here
+    writes, starts a process or changes privileges. Tests replace this class.
+    """
+
+    def sysctl(self, name, integer):
+        """A sysctl value: an int when `integer`, else a string of at most 255 bytes."""
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        function = libc.sysctlbyname
+        function.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+        function.restype = ctypes.c_int
+        size = ctypes.c_size_t(0)
+        if function(name.encode("ascii"), None, ctypes.byref(size), None, 0) != 0 or not 0 < size.value <= 256:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        if function(name.encode("ascii"), buffer, ctypes.byref(size), None, 0) != 0:
+            return None
+        raw = buffer.raw[:size.value]
+        if integer:
+            return int.from_bytes(raw, sys.byteorder) if len(raw) in (4, 8) else None
+        text = raw.split(b"\0", 1)[0]
+        return text.decode("ascii") if text.isascii() else None
+
+    def windows_native_machine(self):
+        """The image file machine type of the machine that runs Windows, from IsWow64Process2 (Windows 10 1709 and later)."""
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        function = getattr(kernel32, "IsWow64Process2", None)
+        if function is None:
+            return None
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        function.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.USHORT), ctypes.POINTER(wintypes.USHORT)]
+        function.restype = wintypes.BOOL
+        process, native = wintypes.USHORT(), wintypes.USHORT()
+        if not function(kernel32.GetCurrentProcess(), ctypes.byref(process), ctypes.byref(native)):
+            return None
+        return native.value
+
+    def windows_token(self):
+        """Whether this process's token is elevated, holds the Administrators group enabled, or is LocalSystem.
+
+        Each value is True, False, or None when it could not be read. CheckTokenMembership counts an
+        enabled group only, so the deny-only Administrators group of a UAC-filtered token is not a membership.
+        """
+        import ctypes
+        from ctypes import wintypes
+
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        advapi32.GetTokenInformation.restype = wintypes.BOOL
+        advapi32.CreateWellKnownSid.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        advapi32.CreateWellKnownSid.restype = wintypes.BOOL
+        advapi32.CheckTokenMembership.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)]
+        advapi32.CheckTokenMembership.restype = wintypes.BOOL
+        advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        advapi32.EqualSid.restype = wintypes.BOOL
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+            return None
+
+        def well_known(kind):
+            size = wintypes.DWORD(68)  # SECURITY_MAX_SID_SIZE
+            sid = ctypes.create_string_buffer(68)
+            return sid if advapi32.CreateWellKnownSid(kind, None, sid, ctypes.byref(size)) else None
+
+        try:
+            elevation, size = wintypes.DWORD(), wintypes.DWORD()
+            # TokenElevation (20) gives TOKEN_ELEVATION, whose only member is TokenIsElevated.
+            elevated = bool(elevation.value) if advapi32.GetTokenInformation(token, 20, ctypes.byref(elevation), ctypes.sizeof(elevation), ctypes.byref(size)) else None
+            administrators, member = well_known(26), wintypes.BOOL()  # WinBuiltinAdministratorsSid
+            # A NULL token checks this thread's effective token, which is the process token here.
+            in_administrators = bool(member.value) if administrators is not None and advapi32.CheckTokenMembership(None, administrators, ctypes.byref(member)) else None
+            local_system, system_sid = None, well_known(22)  # WinLocalSystemSid
+            advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))  # TokenUser (1): asks for the size
+            if system_sid is not None and 0 < size.value <= 1024:
+                buffer = ctypes.create_string_buffer(size.value)
+                if advapi32.GetTokenInformation(token, 1, buffer, size, ctypes.byref(size)):
+                    # TOKEN_USER starts with SID_AND_ATTRIBUTES, which starts with the pointer to the user's SID.
+                    local_system = bool(advapi32.EqualSid(ctypes.c_void_p.from_buffer(buffer).value, system_sid))
+        finally:
+            kernel32.CloseHandle(token)
+        return {"elevated": elevated, "administrators": in_administrators, "local_system": local_system}
+
+    def windows_bios(self):
+        """SystemManufacturer and SystemProductName under HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS, which Windows fills from SMBIOS."""
+        import winreg
+
+        values = {}
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, WINDOWS_BIOS_KEY) as key:
+                for name in ("SystemManufacturer", "SystemProductName"):
+                    try:
+                        value, kind = winreg.QueryValueEx(key, name)
+                    except OSError:
+                        continue
+                    if kind == winreg.REG_SZ and isinstance(value, str):
+                        values[name] = value[:256]
+        except OSError:
+            return None
+        return values
+
+
+class Probe:
+    """Reads one system. `root`, `env`, `git_dir` and `native` exist so tests can point it at a made-up one."""
+
+    def __init__(self, root="/", env=None, git_dir=None, system=None, probe_node=True, native=None):
         self.root = pathlib.Path(root)
         self._env = os.environ if env is None else env
         self.git_dir = pathlib.Path(git_dir) if git_dir else ROOT / ".git"
         self.system = system or platform.system()
         self.probe_node = probe_node
+        self.native = native or NativeQueries()
+        self._hardware = None
         self.errors = []
 
     # -- inputs ------------------------------------------------------------
@@ -496,6 +650,10 @@ class Probe:
     # -- sections ----------------------------------------------------------
 
     def layers(self):
+        if self.system == "Darwin":
+            return self.with_host(self.macos_layer())
+        if self.system == "Windows":
+            return self.with_host(self.windows_layer())
         if self.system != "Linux":
             family = OS_FAMILIES.get(self.system)
             reason = f"this probe reads Linux interfaces only; this system is {self.system or 'unidentified'}"
@@ -634,6 +792,148 @@ class Probe:
             layers.append(order_layer(container))
         return layers
 
+    # -- macOS and Windows -------------------------------------------------
+
+    def hardware_arch(self):
+        """(architecture of the machine, evidence) on macOS and Windows, or (None, None).
+
+        Both are read from the system, not from this process, so an emulated process
+        still names the machine: on macOS hw.optional.arm64 is 1 on Apple silicon,
+        also to a process that Rosetta 2 translates; on Windows IsWow64Process2
+        names the native machine, also to an x64 process emulated on Arm.
+        """
+        if self._hardware is None:
+            arch, evidence = None, None
+            if self.system == "Darwin":
+                if self.native.sysctl("hw.optional.arm64", True) == 1:
+                    arch, evidence = "aarch64", "python:sysctlbyname(hw.optional.arm64)"
+                elif self.native.sysctl("hw.optional.x86_64", True) == 1:
+                    arch, evidence = "x86_64", "python:sysctlbyname(hw.optional.x86_64)"
+            elif self.system == "Windows":
+                arch = WINDOWS_MACHINES.get(self.native.windows_native_machine())
+                evidence = "python:IsWow64Process2#nativeMachine" if arch else None
+            self._hardware = (arch, evidence)
+        return self._hardware
+
+    def hardware_execution(self, arch, arch_evidence):
+        """native or emulated, comparing a program's architecture with the machine's (macOS and Windows)."""
+        hardware, evidence = self.hardware_arch()
+        if arch is None:
+            return unknown("the architecture is not known")
+        if hardware is None:
+            return unknown("the machine's architecture could not be read")
+        arch_evidence = [arch_evidence] if isinstance(arch_evidence, str) else list(arch_evidence)
+        if arch == hardware or (arch, hardware) in COMPATIBLE:
+            return inferred("native", *arch_evidence, evidence)
+        if {arch, hardware} <= KNOWN_ARCHES:
+            # Neither system runs another architecture's code except through an emulator (Rosetta 2, or Windows on Arm's x64 emulation).
+            return inferred("emulated", *arch_evidence, evidence)
+        return unknown(f"{arch} on a {hardware} machine is outside the documented architectures")
+
+    def with_host(self, layer):
+        """The layer, after an inferred physical host when the layer is a VM, as on Linux."""
+        layer = order_layer(layer)
+        if known_kind(layer) != "vm":
+            return [layer]
+        host_reason = "a guest cannot see the physical host"
+        return [order_layer({
+            "kind": inferred("host", *layer["kind"]["evidence"]),
+            "technology": not_applicable("the outermost host runs on hardware"),
+            "os": {"family": unknown(host_reason), "name": unknown(host_reason), "version": unknown(host_reason), "kernel": unknown(host_reason)},
+            "cpu": {"arch": unknown(host_reason), "execution": unknown(host_reason)},
+            "service_manager": {"name": unknown(host_reason), "scope": unknown(host_reason)},
+        }), layer]
+
+    def machine_cpu(self):
+        arch, evidence = self.hardware_arch()
+        return {
+            "arch": observed(arch, evidence) if arch else unknown("the machine's architecture could not be read"),
+            "execution": unknown("whether the layer below emulates this CPU is not visible from inside it"),
+        }
+
+    def macos_layer(self):
+        vmm = self.native.sysctl("kern.hv_vmm_present", True)
+        model = self.native.sysctl("hw.model", False)
+        layer = {}
+        if vmm == 1:
+            layer["kind"] = inferred("vm", "python:sysctlbyname(kern.hv_vmm_present)")
+            named = [technology for prefix, technology in MACOS_MODELS if isinstance(model, str) and model.startswith(prefix)]
+            layer["technology"] = inferred(named[0], "python:sysctlbyname(hw.model)") if named else unknown("hw.model names no known hypervisor")
+        else:
+            reason = "kern.hv_vmm_present is 0: no hypervisor signal; that does not show bare metal" if vmm == 0 else "kern.hv_vmm_present cannot be read"
+            layer["kind"] = unknown(reason)
+            layer["technology"] = unknown(reason)
+        version = self.native.sysctl("kern.osproductversion", False)
+        release = self.native.sysctl("kern.osrelease", False)
+        layer["os"] = {
+            "family": observed("macos", "python:platform.system"),
+            "name": observed("macos", "python:platform.system"),
+            "version": observed(version, "python:sysctlbyname(kern.osproductversion)") if isinstance(version, str) and re.fullmatch(r"[0-9]{1,4}(\.[0-9]{1,4}){0,2}", version) else unknown("kern.osproductversion gives no usable version"),
+            "kernel": observed(release, "python:sysctlbyname(kern.osrelease)") if isinstance(release, str) and PRINTABLE.fullmatch(release) else unknown("kern.osrelease gives no usable release"),
+        }
+        layer["cpu"] = self.machine_cpu()
+        reason = "the service manager is probed on Linux only"
+        layer["service_manager"] = {"name": unknown(reason), "scope": unknown(reason)}
+        return layer
+
+    def windows_layer(self):
+        bios = self.native.windows_bios()
+        layer = {}
+        vendor, product = (bios or {}).get("SystemManufacturer", ""), (bios or {}).get("SystemProductName", "")
+        named = None
+        for name, text in (("SystemManufacturer", vendor), ("SystemProductName", product)):
+            for prefix, technology in DMI_VENDORS:
+                if named is None and text.startswith(prefix):
+                    named = technology, f"{WINDOWS_BIOS_EVIDENCE}#{name}"
+        if named is None and (vendor, product) == ("Microsoft Corporation", "Virtual Machine"):
+            # Hyper-V, Azure among it, as systemd-detect-virt reads the same SMBIOS values.
+            named = "hyper-v", f"{WINDOWS_BIOS_EVIDENCE}#SystemProductName"
+        if named:
+            layer["kind"] = inferred("vm", named[1])
+            layer["technology"] = inferred(named[0], named[1])
+        else:
+            reason = "the BIOS values cannot be read" if bios is None else "the BIOS values name no known hypervisor; that does not show bare metal"
+            layer["kind"] = unknown(reason)
+            layer["technology"] = unknown(reason)
+        version = platform.version()
+        version_fact = observed(version, "python:platform.version") if re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,6}", version or "") else unknown("platform.version() gives no usable version")
+        layer["os"] = {
+            "family": observed("windows", "python:platform.system"),
+            "name": observed("windows", "python:platform.system"),
+            "version": version_fact,
+            # The NT kernel carries the build of the system it ships with.
+            "kernel": json.loads(json.dumps(version_fact)),
+        }
+        layer["cpu"] = self.machine_cpu()
+        reason = "the service manager is probed on Linux only"
+        layer["service_manager"] = {"name": unknown(reason), "scope": unknown(reason)}
+        return layer
+
+    def windows_superuser(self):
+        """Whether the process holds an elevated token, the enabled Administrators group, or runs as LocalSystem."""
+        token = self.native.windows_token()
+        if token is None:
+            return unknown("the process token could not be opened")
+        evidence = {
+            "elevated": "python:GetTokenInformation(TokenElevation)",
+            "administrators": "python:CheckTokenMembership(BUILTIN\\Administrators)",
+            "local_system": "python:GetTokenInformation(TokenUser)",
+        }
+        held = [evidence[name] for name in evidence if token.get(name) is True]
+        if held:
+            return observed(True, *held)
+        if all(token.get(name) is False for name in evidence):
+            return observed(False, *evidence.values())
+        return unknown("part of the process token could not be read, and what was read shows no administrator")
+
+    def macos_execution(self, arch, arch_evidence):
+        """sysctl.proc_translated is 1 in a process Rosetta 2 translates and 0 in a native one; Intel Macs, which have no Rosetta, lack it."""
+        translated = self.native.sysctl("sysctl.proc_translated", True)
+        arch_evidence = [arch_evidence] if isinstance(arch_evidence, str) else list(arch_evidence)
+        if translated in (0, 1) and arch is not None:
+            return inferred("emulated" if translated else "native", *arch_evidence, "python:sysctlbyname(sysctl.proc_translated)")
+        return self.hardware_execution(arch, arch_evidence)
+
     def kernel_release(self):
         """The release the kernel reports in /proc; uname, which personality changes and qemu-user can rewrite, only as a fallback."""
         text, _ = self.read("/proc/sys/kernel/osrelease", 256)
@@ -679,11 +979,14 @@ class Probe:
             ids = {"uid": observed(uid, source), "real_uid": observed(real_uid, source), "saved_uid": observed(saved_uid, source)}
             gid_fact = observed(gid, "file:/proc/self/status#Gid")
         elif self.system == "Windows":
-            # Whether a Windows process holds an elevated token is not probed, so superuser stays unknown.
-            identity = identity_fallback("this probe reads POSIX user IDs only")
-            identity["real_uid"] = not_applicable("Windows has no POSIX user IDs")
-            identity["saved_uid"] = not_applicable("Windows has no POSIX user IDs")
-            return identity
+            # The superuser on Windows holds an elevated token, the Administrators group, or is LocalSystem (docs/CI-MATRIX.md).
+            reason = "Windows has no POSIX user or group IDs"
+            namespace = "user namespaces are a Linux interface"
+            return {
+                "superuser": self.windows_superuser(),
+                "uid": not_applicable(reason), "real_uid": not_applicable(reason), "saved_uid": not_applicable(reason), "gid": not_applicable(reason),
+                "user_namespace": {"initial": not_applicable(namespace), "uid_map": not_applicable(namespace)},
+            }
         elif self.system == "FreeBSD" and hasattr(os, "getresuid"):
             real_uid, uid, saved_uid = os.getresuid()
             source = "python:os.getresuid"
@@ -720,6 +1023,8 @@ class Probe:
         return identity
 
     def isolation(self):
+        if self.system in ("Darwin", "Windows"):
+            return isolation_not_applicable(f"a Linux interface; not applicable on {'macOS' if self.system == 'Darwin' else 'Windows'}")
         if self.system != "Linux":
             return isolation_fallback("this probe reads Linux interfaces only")
         fields, reason = self.status_fields()
@@ -902,8 +1207,18 @@ class Probe:
             "free_threaded_build": free_threaded,
             "gil_enabled": gil,
             "libc": observed(libc, "python:os.confstr") if isinstance(libc, str) and re.fullmatch(r"glibc [0-9]{1,4}\.[0-9]{1,4}(\.[0-9]{1,4})?", libc) else unknown("the C library reports no version through os.confstr; only glibc does"),
-            "execution": execution_fact(arch, arch_evidence, reference) if self.system == "Linux" else unknown("compared on Linux only"),
+            "execution": self.execution(arch, arch_evidence, reference, python=True),
         }
+
+    def execution(self, arch, arch_evidence, reference, python=False):
+        if self.system == "Linux":
+            return execution_fact(arch, arch_evidence, reference)
+        if self.system == "Darwin":
+            # Rosetta 2 tells a process whether it translates that process; node runs in another one.
+            return self.macos_execution(arch, arch_evidence) if python else self.hardware_execution(arch, arch_evidence)
+        if self.system == "Windows":
+            return self.hardware_execution(arch, arch_evidence)
+        return unknown("compared on Linux, macOS and Windows only")
 
     def node(self, reference):
         def all_unknown(reason):
@@ -1003,7 +1318,7 @@ class Probe:
             "napi_version": checked("n", r"[0-9]{1,5}"),
             "platform": observed(platform_name, evidence) if isinstance(platform_name, str) and SLUG.fullmatch(platform_name) else unknown("node reported no usable platform"),
             "arch": arch_fact,
-            "execution": execution_fact(arch, arch_evidence, reference) if self.system == "Linux" else unknown("compared on Linux only"),
+            "execution": self.execution(arch, arch_evidence, reference),
         }
 
     def run(self):
@@ -1227,6 +1542,18 @@ def isolation_fallback(reason):
     }
 
 
+def isolation_not_applicable(reason):
+    return {
+        "no_new_privs": not_applicable(reason),
+        "capabilities": {"effective": not_applicable(reason), "permitted": not_applicable(reason), "bounding": not_applicable(reason)},
+        "seccomp": not_applicable(reason),
+        "apparmor": {"enabled": not_applicable(reason), "profile": not_applicable(reason)},
+        "selinux": {"mode": not_applicable(reason), "context": not_applicable(reason)},
+        "cgroup": {"version": not_applicable(reason), "delegated": not_applicable(reason)},
+        "pid_namespace": {"initial": not_applicable(reason)},
+    }
+
+
 def python_fallback(reason):
     names = ("implementation", "version", "cache_tag", "soabi", "platform", "arch", "pointer_bits", "free_threaded_build", "gil_enabled", "libc", "execution")
     return {name: unknown(reason) for name in names}
@@ -1284,6 +1611,98 @@ def build_result(probe, profile_id=None, stage_args=None, now=None):
         "probe_errors": probe.errors,
     }
     return result
+
+
+def read_extensions(values):
+    """{x-name: JSON object} from --extension x-NAME=PATH options; raise ValueError on bad input."""
+    extensions = {}
+    for value in values or []:
+        name, sep, path = value.partition("=")
+        if not sep or not EXTENSION_NAME.fullmatch(name) or not path:
+            raise ValueError("--extension takes x-NAME=PATH, with NAME in lower case")
+        if name in extensions:
+            raise ValueError(f"--extension {name} is given twice")
+        try:
+            data = read_regular(path, EXTENSION_LIMIT + 1)
+        except OSError as exc:
+            raise ValueError(f"--extension {name}: cannot read the file ({type(exc).__name__})") from None
+        if len(data) > EXTENSION_LIMIT:
+            raise ValueError(f"--extension {name}: the file is larger than {EXTENSION_LIMIT} bytes")
+        try:
+            document = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise ValueError(f"--extension {name}: not a UTF-8 JSON document") from None
+        if not isinstance(document, dict):
+            raise ValueError(f"--extension {name}: not a JSON object")
+        extensions[name] = document
+    return extensions
+
+
+def run_podman(executable, args):
+    """The JSON a podman command prints; raise ProbeError when it fails, times out, or prints too much."""
+    try:
+        process = subprocess.run([executable, *args], stdin=subprocess.DEVNULL, capture_output=True, timeout=PODMAN_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProbeError(f"podman {args[0]} could not be run ({type(exc).__name__})") from None
+    if process.returncode != 0:
+        raise ProbeError(f"podman {' '.join(args[:2])} exited with status {process.returncode}")
+    if len(process.stdout) > PODMAN_OUTPUT_LIMIT:
+        raise ProbeError(f"podman {args[0]} printed more than {PODMAN_OUTPUT_LIMIT} bytes")
+    try:
+        return json.loads(process.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ProbeError(f"podman {args[0]} did not print JSON") from None
+
+
+def device_names(devices):
+    """Record names for HostConfig.Devices entries, or None when one cannot be named."""
+    names = []
+    for device in devices:
+        path = device.get("PathInContainer") if isinstance(device, dict) else None
+        match = DEVICE.fullmatch(path) if isinstance(path, str) else None
+        name = match.group(1).replace("/", "-").lower() if match else None
+        if name is None or not SLUG.fullmatch(name):
+            return None
+        names.append(name)
+    return sorted(set(names))
+
+
+def engine_facts(info, inspect, container):
+    """The engine-side container facts from `podman info` and `podman container inspect` output; raise ProbeError."""
+    rootless = info.get("host", {}).get("security", {}).get("rootless") if isinstance(info, dict) else None
+    if not isinstance(rootless, bool):
+        raise ProbeError("podman info has no boolean host.security.rootless")
+    if not isinstance(inspect, list) or len(inspect) != 1 or not isinstance(inspect[0], dict):
+        raise ProbeError(f"podman container inspect does not describe exactly one container named {container}")
+    entry = inspect[0]
+    if entry.get("Name") != container:
+        raise ProbeError(f"podman container inspect names another container than {container}")
+    if not isinstance(entry.get("State"), dict) or entry["State"].get("Running") is not True:
+        raise ProbeError(f"container {container} is not running, so it may not be the one the record was taken in")
+    host = entry.get("HostConfig")
+    if not isinstance(host, dict) or not isinstance(host.get("Privileged"), bool):
+        raise ProbeError("podman container inspect has no boolean HostConfig.Privileged")
+    devices = host.get("Devices")
+    if devices is not None and not isinstance(devices, list):
+        raise ProbeError("podman container inspect has a HostConfig.Devices that is not a list")
+    names = device_names(devices or [])
+    inspect_ref = "cmd:podman container inspect"
+    return {
+        "engine_mode": observed("rootless" if rootless else "rootful", "cmd:podman info#host.security.rootless"),
+        "privileged": observed(host["Privileged"], f"{inspect_ref}#HostConfig.Privileged"),
+        "devices": observed(names, f"{inspect_ref}#HostConfig.Devices") if names is not None else unknown("a device path does not have the expected form", f"{inspect_ref}#HostConfig.Devices"),
+    }
+
+
+def amend_container(record, info, inspect, container):
+    """Put the engine-side facts into the innermost layer of a record taken inside that container."""
+    if not isinstance(record, dict) or record.get("kind") != "result" or record.get("collector") != COLLECTOR:
+        raise ProbeError("the file is not a result this collector wrote")
+    layers = record.get("environment", {}).get("layers")
+    if not isinstance(layers, list) or not layers or not isinstance(layers[-1], dict) or known_kind(layers[-1]) != "container" or not isinstance(layers[-1].get("container"), dict):
+        raise ProbeError("the record's innermost layer is not a container")
+    layers[-1]["container"].update(engine_facts(info, inspect, container))
+    return record
 
 
 def secret_shape(text):
@@ -1401,7 +1820,10 @@ def same_file(path, other):
 
 def main(argv=None):
     parser = ArgumentParser(description=__doc__.split("\n\n", 1)[0])
-    parser.add_argument("--output", required=True, type=pathlib.Path, help="where to write the result JSON")
+    parser.add_argument("--output", type=pathlib.Path, help="where to write the result JSON")
+    parser.add_argument("--extension", action="append", metavar="x-NAME=PATH", help="add a JSON object file to the record's extensions")
+    parser.add_argument("--amend-container", type=pathlib.Path, metavar="RECORD", help="on the host, add Podman's facts about --podman-container to a record taken inside it, and rewrite it")
+    parser.add_argument("--podman-container", metavar="NAME", help="the running container that --amend-container describes")
     parser.add_argument("--profile-id", help="id of the profile this lane declares")
     parser.add_argument("--summary", type=pathlib.Path, help="append a Markdown summary to this file")
     parser.add_argument("--no-node", action="store_true", help="do not run node")
@@ -1410,14 +1832,23 @@ def main(argv=None):
     parser.add_argument("--stage-evidence", action="append", metavar="NAME=REF")
     parser.add_argument("--stage-escalation", action="append", metavar="NAME=VALUE")
     args = parser.parse_args(argv)
+    if args.amend_container is not None:
+        return amend_main(parser, args)
+    if args.output is None:
+        parser.error("--output is required")
+    if args.podman_container is not None:
+        parser.error("--podman-container goes with --amend-container")
     if args.profile_id is not None and not SLUG.fullmatch(args.profile_id):
         parser.error("--profile-id must be a lower-case identifier")
     try:
         stage_args = parse_stage_args(args)
+        extensions = read_extensions(args.extension)
     except ValueError as exc:
         parser.error(str(exc))
 
     result = build_result(Probe(probe_node=not args.no_node), args.profile_id, stage_args)
+    if extensions:
+        result["extensions"] = extensions
     text = json.dumps(result, indent=2, ensure_ascii=True) + "\n"
     if secret_shape(text):
         print(f"error: the record holds a value that looks like a {secret_shape(text)}; it was not written", file=sys.stderr)
@@ -1443,6 +1874,40 @@ def main(argv=None):
     for error in result["probe_errors"]:
         print(plain(f"  probe error: {error['probe']}: {error['error']}"))
     return 0 if detect == "passed" else 1
+
+
+def amend_main(parser, args):
+    others = [name for name in ("output", "profile_id", "summary", "stage", "stage_reason", "stage_evidence", "stage_escalation", "extension") if getattr(args, name)]
+    if others or args.no_node:
+        parser.error("--amend-container takes --podman-container only")
+    if args.podman_container is None or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", args.podman_container):
+        parser.error("--amend-container needs --podman-container NAME, a container name")
+    # podman is found as node is, in the PATH directories only, and PATH is read through Probe.env as node's is.
+    search_path = Probe(probe_node=False).env("PATH") or os.pathsep.join(entry for entry in os.defpath.split(os.pathsep) if entry != os.curdir)
+    executable = find_on_path("podman", search_path)
+    try:
+        if executable is None:
+            raise ProbeError("podman is not on PATH")
+        record = json.loads(read_regular(args.amend_container, RECORD_LIMIT).decode("utf-8"))
+        info = run_podman(executable, ["info", "--format", "json"])
+        inspect = run_podman(executable, ["container", "inspect", "--format", "json", args.podman_container])
+        record = amend_container(record, info, inspect, args.podman_container)
+    except (OSError, UnicodeDecodeError, ValueError, ProbeError) as exc:
+        message = str(exc) if isinstance(exc, ProbeError) else f"cannot read the record ({type(exc).__name__})"
+        print(plain(f"error: {message}; the record was not changed"), file=sys.stderr)
+        return 2
+    text = json.dumps(record, indent=2, ensure_ascii=True) + "\n"
+    if secret_shape(text):
+        print(f"error: the record would hold a value that looks like a {secret_shape(text)}; it was not changed", file=sys.stderr)
+        return 2
+    try:
+        args.amend_container.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot write the record: {type(exc).__name__}", file=sys.stderr)
+        return 2
+    container = record["environment"]["layers"][-1]["container"]
+    print(plain(f"{args.amend_container.name}: engine {describe(container['engine_mode'])}, privileged {describe(container['privileged'])}, devices {describe(container['devices'])}"))
+    return 0
 
 
 if __name__ == "__main__":

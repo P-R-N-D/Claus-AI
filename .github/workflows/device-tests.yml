@@ -1,0 +1,107 @@
+name: Device Compute
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/device-tests.yml'
+      - 'scripts/ci/**'
+      - 'tests/compatibility/**'
+      - 'frontend/scripts/probe-browser-compute*'
+      - 'frontend/package.json'
+      - 'frontend/package-lock.json'
+      - '.nvmrc'
+      - 'docs/CI-MATRIX.md'
+      - 'docs/TESTING.md'
+      - 'docs/DEPENDENCY-STRATEGY.md'
+      - 'docs/SECURITY-*.md'
+      - 'docs/CODE-REVIEW.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cpu:
+    name: CPU reference and optional browser probe / Linux x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      UV_NO_CONFIG: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.12.24'
+          enable-cache: false
+          python-version: '3.12.15'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: Prepare the standard-library Python runtime
+        run: |
+          mkdir -p "$RUNNER_TEMP/device-compute"
+          echo "RECORDS=$RUNNER_TEMP/device-compute" >> "$GITHUB_ENV"
+          uv venv --managed-python --python 3.12.15
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Collect the real environment
+        id: collect
+        run: |
+          python -I scripts/ci/collect_environment.py --profile-id gha-linux-x64-device \
+            --output "$RECORDS/environment.json"
+      - name: Prepare the existing locked browser tool
+        working-directory: frontend
+        run: |
+          npm install --global npm@11.21.0
+          test "$(npm --version)" = 11.21.0
+          npm ci --ignore-scripts
+          # Download the paired browser as the job user. No system package installation.
+          node node_modules/@playwright/test/cli.js install chromium --no-shell
+      - name: Probe browser capabilities
+        timeout-minutes: 3
+        id: browser
+        run: |
+          node frontend/scripts/probe-browser-compute.mjs --environment "$RECORDS/environment.json" \
+            --output "$RECORDS/browser.json" --require-browser
+      - name: Run CPU reference and attach compute evidence
+        if: ${{ !cancelled() && steps.collect.outcome == 'success' }}
+        run: |
+          args=()
+          if [ -f "$RECORDS/browser.json" ]; then args+=(--browser-report "$RECORDS/browser.json"); fi
+          python -I scripts/ci/probe_compute.py --environment "$RECORDS/environment.json" \
+            --output "$RECORDS/result.json" --report "$RECORDS/compute-probe.json" \
+            --log "$RECORDS/cpu-reference.log" --summary "$GITHUB_STEP_SUMMARY" "${args[@]}"
+      - name: Validate the common Result and profile
+        if: ${{ !cancelled() && steps.collect.outcome == 'success' }}
+        run: |
+          python -I scripts/ci/validate_compatibility.py --require-real \
+            --dependency-strategy docs/DEPENDENCY-STRATEGY.md \
+            --profile tests/compatibility/profiles/gha-linux-x64-device.json \
+            --summary "$GITHUB_STEP_SUMMARY" "$RECORDS/result.json"
+      - name: Run device contract and negative regressions
+        if: ${{ !cancelled() }}
+        run: |
+          python -I scripts/ci/tests/test_device_contract.py --verbose 2>&1 | tee "$RECORDS/contract-tests.log"
+          python -I scripts/ci/tests/test_compute_probe.py --verbose 2>&1 | tee "$RECORDS/probe-tests.log"
+          python -I scripts/ci/tests/test_device_environments.py --verbose 2>&1 | tee "$RECORDS/environment-tests.log"
+          node --test frontend/scripts/probe-browser-compute.test.mjs 2>&1 | tee "$RECORDS/browser-tests.log"
+          # This bundle remains separate from the measured Result and is always synthetic.
+          python -I tests/compatibility/fixtures/device-environments/scenarios.py > "$RECORDS/synthetic-environments.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: device-compute-linux-x64-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/device-compute/
+          if-no-files-found: error
+          retention-days: 90

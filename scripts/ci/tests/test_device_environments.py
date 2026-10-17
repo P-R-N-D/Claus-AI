@@ -41,6 +41,36 @@ class DeviceEnvironmentTests(unittest.TestCase):
                 self.assertEqual(validate(result, profile, evaluate_policy=False).errors, [])
                 self.assertEqual(codes(validate(result, profile)), expected_errors)
 
+    def test_policy_denials_have_the_measured_facts_they_describe(self):
+        # Assert fixture contents independently of their expected-error metadata:
+        # unknown facts can trigger the same policy code as an actual violation.
+        cases = {
+            "kubernetes": ("engine_mode", "rootful", "policy-engine-rootless"),
+            "k3s": ("engine_mode", "rootful", "policy-engine-rootless"),
+            "openshift": ("engine_mode", "rootful", "policy-engine-rootless"),
+            "gpu-passthrough": ("devices", ["nvidia-gpu"], "policy-minimal-devices"),
+            "npu-passthrough": ("devices", ["qualcomm-npu"], "policy-minimal-devices"),
+        }
+        for name, (field, value, code) in cases.items():
+            with self.subTest(name=name):
+                profile, result, _ = self.examples[name]
+                layers = result["environment"]["layers"]
+                fact = layers[-1]["container"][field]
+                self.assertEqual(fact["value"], value)
+                self.assertEqual(fact["provenance"], "observed")
+                self.assertTrue(fact["evidence"])
+                self.assertTrue(all(ref.startswith("synthetic:") for ref in fact["evidence"]))
+                self.assertEqual(profile["policy"]["exceptions"], [])
+                self.assertEqual(profile["policy"]["rules"]["engine-rootless"], "required")
+                path = f"/environment/layers/{len(layers) - 1}/container/{field}"
+                self.assertEqual([(item[1], item[2]) for item in validate(result, profile).errors],
+                                 [(code, path)])
+                if field == "engine_mode":
+                    default = validate(result)
+                    self.assertEqual(default.errors, [])
+                    self.assertIn((code, path), [(item[1], item[2]) for item in default.items
+                                                if item[0] == "warning"])
+
     def test_no_static_case_is_presented_as_an_executed_run(self):
         for name, (profile, result, _) in self.examples.items():
             with self.subTest(name=name):

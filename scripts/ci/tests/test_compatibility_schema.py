@@ -1062,9 +1062,10 @@ class StageRuleTests(Case):
                 findings = check(changed(result, change), profile)
                 self.assertFinding(findings, "required-stage", "/stages/execute/compute")
                 self.assertFinding(findings, "required-stage", "/stages/correctness/compute")
-        # The CPU was asked for, so this is no fallback, but the stage still did not request the accelerator.
+        # An effective accelerator also requires the requested backend to match.
         cpu_requested = changed(result, lambda d: d["stages"]["execute"]["compute"].update(requested="cpu"))
-        self.assertCodes(check(cpu_requested, profile), "required-stage")
+        self.assertCodes(check(cpu_requested, profile), "accelerator-fallback", "required-stage")
+        self.assertFinding(check(cpu_requested, profile), "accelerator-fallback", "/stages/execute/compute")
         self.assertFinding(check(cpu_requested, profile), "required-stage", "/stages/execute/compute")
 
         def performance_on_cpu(d):

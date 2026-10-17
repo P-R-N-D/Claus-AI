@@ -33,6 +33,7 @@ def sibling(name):
 collector = sibling("collect_environment")
 validator = sibling("validate_compatibility")
 observed, unknown, not_applicable = collector.observed, collector.unknown, collector.not_applicable
+inferred = collector.inferred
 TOOL = "tool:probe-compute"
 # API catalog, not implemented hardware adapters. Presence tools are not run.
 CATALOG = (
@@ -130,7 +131,7 @@ def cpu_reference(run, evidence, case="success"):
     execution = {
         "status": "failed", "executed": False, "effective": None,
         "correct": unknown("the operation has not completed"),
-        "software_fallback": observed(False, evidence),
+        "software_fallback": unknown("the operation has not completed"),
         "runtime": observed(f"{sys.implementation.name} {platform.python_version()}", "python:sys.implementation", evidence),
         "process_id": observed(os.getpid(), "python:os.getpid", evidence),
         "evidence": [evidence], "run": copy.deepcopy(run),
@@ -147,18 +148,18 @@ def cpu_reference(run, evidence, case="success"):
     else:
         correct = actual == EXPECTED
         execution.update(status="passed" if correct else "failed", executed=True, effective="cpu",
-                         correct=observed(correct, evidence))
+                         correct=observed(correct, evidence), software_fallback=observed(False, evidence))
         if not correct:
             execution["reason"] = "CPU reference output differs from the fixed expected matrix"
         log.append({"event": "cpu-reference-completed", "effective": "cpu", "actual": actual,
                     "expected": EXPECTED, "correct": correct})
     backend = {
-        "id": "cpu", "kind": "cpu", "api": "cpu", "available": observed(True, TOOL),
-        "device": observed("process CPU", TOOL), "version": not_applicable("native CPU has no runtime version"),
-        "features": observed(["fixed-integer-matrix-reference"], evidence),
-        "probe": {"tool": "python-standard-library", "runtime_installed": observed(True, TOOL),
-                  "api_enumerated": observed(True, TOOL), "device_enumerated": observed(True, TOOL),
-                  "device_accessible": observed(True, TOOL), "execution": execution},
+        "id": "cpu", "kind": "cpu", "api": "cpu", "available": inferred(True, TOOL),
+        "device": inferred("process CPU", TOOL), "version": not_applicable("native CPU has no runtime version"),
+        "features": inferred(["fixed-integer-matrix-reference"], TOOL),
+        "probe": {"tool": "python-standard-library", "runtime_installed": inferred(True, TOOL),
+                  "api_enumerated": inferred(True, TOOL), "device_enumerated": inferred(True, TOOL),
+                  "device_accessible": inferred(True, TOOL), "execution": execution},
     }
     return backend, log
 
@@ -174,6 +175,8 @@ def stage(status, evidence, effective="cpu", reason=None):
 
 def build_result(environment, case="success", log_ref="log:cpu-reference.log"):
     result = copy.deepcopy(environment)
+    # These observations belong to this producer, never to collector extensions.
+    result.setdefault("extensions", {}).pop("x-browser-probe", None)
     cpu, log = cpu_reference(result["run"], log_ref, case)
     result["compute"] = {"probe_contract": "device-v1", "backends": [cpu, *discover_backends()],
                          "accelerator_inventory": unknown("tool and device-node hints are not a complete hardware inventory")}
@@ -230,6 +233,8 @@ def import_browser(result, report, environment_sha256, artifact_ref):
         raise ValueError("browser report does not match this environment")
     if report.get("status") not in ("passed", "failed", "not-run"):
         raise ValueError("invalid browser probe status")
+    if "binary_source" in report and report["binary_source"] not in ("paired", "override"):
+        raise ValueError("invalid browser binary source")
     probes = report.get("probes")
     if not isinstance(probes, list) or len(probes) != len(BROWSER_APIS):
         raise ValueError("browser report must contain exactly the four API observations")
@@ -303,7 +308,7 @@ def import_browser(result, report, environment_sha256, artifact_ref):
             converted["run"] = copy.deepcopy(result["run"])
         probe["execution"] = converted
         if api == "wasm" and execution["executed"]:
-            if raw.get("expected") != 42 or type(raw.get("actual")) is not int or execution["correct"] is not (raw["actual"] == 42):
+            if type(raw.get("expected")) is not int or raw["expected"] != 42 or type(raw.get("actual")) is not int or execution["correct"] is not (raw["actual"] == 42):
                 raise ValueError("WASM correctness does not match its fixed arithmetic result")
             if execution["effective"] != raw["id"]:
                 raise ValueError("WASM operation must record its actual WASM backend")
@@ -319,6 +324,8 @@ def import_browser(result, report, environment_sha256, artifact_ref):
     result.setdefault("extensions", {})["x-browser-probe"] = {
         "status": report["status"], "reason": report["reason"], "environment_sha256": environment_sha256,
     }
+    if "binary_source" in report:
+        result["extensions"]["x-browser-probe"]["binary_source"] = report["binary_source"]
 
 
 def main(argv=None):
@@ -335,12 +342,14 @@ def main(argv=None):
     if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,100}", path.name) for path in (args.log, args.report, args.browser_report) if path):
         parser.error("artifact filenames must use short ASCII letters, digits, dots, underscores or hyphens")
     try:
-        environment = validator.load_json(args.environment)
+        with args.environment.open("rb") as stream:
+            environment_bytes = stream.read(validator.MAX_DOCUMENT_BYTES + 1)
+        environment = validator.load_json_bytes(environment_bytes)
         check_environment(environment)
         result, log = build_result(environment, args.cpu_case, f"log:{args.log.name}")
         if args.browser_report:
             import_browser(result, validator.load_json(args.browser_report),
-                           hashlib.sha256(args.environment.read_bytes()).hexdigest(), f"artifact:{args.browser_report.name}")
+                           hashlib.sha256(environment_bytes).hexdigest(), f"artifact:{args.browser_report.name}")
         findings = validator.validate_document(result, validator.load_schema(), evaluate_policy=False, require_real=True)
         if findings.errors:
             raise ValueError("generated compute Result violates the shared contract")
@@ -354,14 +363,18 @@ def main(argv=None):
         lines = ["### Device and compute probe", "", f"CPU execution: {result['stages']['execute']['status']}; correctness: {result['stages']['correctness']['status']}.",
                  "", "| API | Execution |", "|---|---|"]
         lines += [f"| {backend['api']} | {backend['probe']['execution']['status']} |" for backend in result["compute"]["backends"]]
+        browser = result["extensions"].get("x-browser-probe")
+        browser_summary = f"Browser probe: {browser['status']}; reason={browser['reason']}" if browser else "Browser probe: not-run; reason=browser-report-not-supplied"
+        lines += ["", browser_summary + "."]
         lines += ["", "Native CPU fixed-matrix verification is pipeline evidence, not LLM inference or accelerator qualification.", ""]
         if args.summary:
             with args.summary.open("a", encoding="utf-8") as stream:
                 stream.write("\n".join(lines))
         print(f"CPU reference: {cpu['status']}; requested=cpu; effective={cpu['effective']}; correctness={cpu['correct']['value']}")
+        print(browser_summary)
         browser_failed = result["extensions"].get("x-browser-probe", {}).get("status") == "failed"
         return int(browser_failed or any(backend["probe"]["execution"]["status"] == "failed" for backend in result["compute"]["backends"]))
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
         print(f"compute probe could not produce a valid result ({type(exc).__name__})", file=sys.stderr)
         return 2
 

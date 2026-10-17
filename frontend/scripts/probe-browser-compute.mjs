@@ -8,11 +8,12 @@ import { pathToFileURL } from "node:url";
 const ORIGIN = "https://compute-probe.invalid/";
 const APIS = ["wasm", "webgl", "webgpu", "webnn"];
 
-export function emptyReport(reason, environmentSha256 = null) {
+export function emptyReport(reason, environmentSha256 = null, binarySource = "paired") {
   return {
     schema_version: 1,
     kind: "browser-compute-probe",
     tool: "playwright-chromium",
+    binary_source: binarySource,
     environment_sha256: environmentSha256,
     status: "not-run",
     reason,
@@ -147,13 +148,15 @@ export function applyObservations(report, observations, browserVersion) {
   return report;
 }
 
-async function bounded(promise, milliseconds) {
+class ProbeTimeout extends Error {}
+
+async function bounded(operation, milliseconds) {
   let timer;
   try {
     return await Promise.race([
-      promise,
+      Promise.resolve().then(operation),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("probe-timeout")), milliseconds);
+        timer = setTimeout(() => reject(new ProbeTimeout()), Math.max(0, milliseconds));
       }),
     ]);
   } finally {
@@ -161,92 +164,136 @@ async function bounded(promise, milliseconds) {
   }
 }
 
-export async function probeBrowser(environmentSha256) {
-  const report = emptyReport("browser-not-started", environmentSha256);
+function failed(report, reason) {
+  report.status = "failed";
+  report.reason = reason;
+  for (const probe of report.probes) probe.execution.reason = reason;
+  return report;
+}
+
+// Dependencies and short deadlines are injectable for lifecycle tests. Production
+// uses only the existing locked package, filesystem access and bounded defaults.
+export async function probeBrowser(environmentSha256, {
+  loadPlaywright = () => import("@playwright/test"),
+  accessBinary = access,
+  sourceEnvironment = process.env,
+  requireBrowser = false,
+  observationTimeout = 15_000,
+  cleanupTimeout = 5_000,
+} = {}) {
+  const binarySource = sourceEnvironment.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ? "override" : "paired";
+  const report = emptyReport("browser-not-started", environmentSha256, binarySource);
+  const unavailable = (reason) => requireBrowser ? failed(report, reason)
+    : emptyReport(reason, environmentSha256, binarySource);
   let chromium;
   try {
-    ({ chromium } = await import("@playwright/test"));
+    ({ chromium } = await loadPlaywright());
   } catch {
-    return emptyReport("playwright-package-unavailable", environmentSha256);
+    return unavailable("playwright-package-unavailable");
   }
-  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath();
+  const executablePath = sourceEnvironment.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath();
   try {
-    await access(executablePath);
+    await accessBinary(executablePath);
   } catch {
-    return emptyReport("chromium-binary-unavailable", environmentSha256);
+    return unavailable("chromium-binary-unavailable");
   }
-  let browser;
+  let server;
   try {
-    browser = await chromium.launch({
+    server = await chromium.launchServer({
+      host: "127.0.0.1",
       headless: true,
       executablePath,
       chromiumSandbox: true,
       args: ["--disable-setuid-sandbox"],
-      env: { PATH: process.env.PATH || "", LANG: "C.UTF-8" },
+      env: { PATH: sourceEnvironment.PATH || "", LANG: "C.UTF-8" },
       timeout: 15_000,
     });
   } catch (error) {
-    // Do not print Chromium stderr: it can include user paths or identifiers.
-    if (/No usable sandbox|Failed to move to new namespace|Operation not permitted/.test(error.message)) {
-      return emptyReport("chromium-sandbox-unavailable", environmentSha256);
+    // Only sandbox-specific diagnostics establish this optional limitation.
+    // Generic EPERM noise or root-without-sandbox errors remain launch failures.
+    // Never expose Chromium stderr, user paths, or identifiers.
+    if (/No usable sandbox|Failed to move to new namespace/.test(error?.message ?? "")) {
+      return emptyReport("chromium-sandbox-unavailable", environmentSha256, binarySource);
     }
-    report.status = "failed";
-    report.reason = "chromium-launch-failed";
-    for (const probe of report.probes) probe.execution.reason = report.reason;
-    return report;
+    return failed(report, "chromium-launch-failed");
   }
+  let timedOut = false;
   try {
+    // One wall-clock budget covers connection and every observation operation,
+    // including newContext/route/newPage, rather than just evaluate().
+    const deadline = performance.now() + observationTimeout;
+    const withinDeadline = (operation) => bounded(operation, deadline - performance.now());
+    const browser = await withinDeadline(() => chromium.connect(server.wsEndpoint(), { timeout: observationTimeout }));
     const version = browser.version();
     if (!/^\d+(?:\.\d+){1,3}$/.test(version)) throw new Error("invalid-browser-version");
-    const context = await browser.newContext({ serviceWorkers: "block" });
-    await context.route("**/*", (route) => route.request().url() === ORIGIN
+    const context = await withinDeadline(() => browser.newContext({ serviceWorkers: "block" }));
+    await withinDeadline(() => context.route("**/*", (route) => route.request().url() === ORIGIN
       ? route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Compute probe</title>" })
-      : route.abort());
-    const page = await context.newPage();
-    await page.goto(ORIGIN, { waitUntil: "domcontentloaded", timeout: 10_000 });
-    applyObservations(report, await bounded(page.evaluate(observeBrowser), 15_000), version);
-  } catch {
-    report.status = "failed";
-    report.reason = "browser-observation-failed";
-    for (const probe of report.probes) probe.execution.reason = report.reason;
+      : route.abort()));
+    const page = await withinDeadline(() => context.newPage());
+    await withinDeadline(() => page.goto(ORIGIN, { waitUntil: "domcontentloaded", timeout: 10_000 }));
+    applyObservations(report, await withinDeadline(() => page.evaluate(observeBrowser)), version);
+  } catch (error) {
+    timedOut = error instanceof ProbeTimeout;
+    failed(report, "browser-observation-failed");
   } finally {
-    try {
-      await bounded(browser.close(), 5_000);
-    } catch {
-      report.status = "failed";
-      report.reason = "browser-cleanup-failed";
+    // A timed-out Chromium may be stopped and cannot answer a graceful close.
+    // BrowserServer.kill() force-kills only Playwright's own process tree and
+    // waits for exit, also closing its loopback transport and Node handles.
+    if (timedOut) {
+      await bounded(() => server.kill(), cleanupTimeout).catch(() => {
+        failed(report, "browser-cleanup-failed");
+      });
+    } else {
+      try {
+        await bounded(() => server.close(), cleanupTimeout);
+      } catch {
+        failed(report, "browser-cleanup-failed");
+        await bounded(() => server.kill(), cleanupTimeout).catch(() => {});
+      }
     }
   }
   return report;
 }
 
-async function main(args) {
-  const options = {};
-  for (let index = 0; index < args.length; index += 2) {
-    const name = args[index];
-    if (!["--environment", "--output"].includes(name) || !args[index + 1] || options[name]) {
-      throw new Error("invalid-options");
+export async function main(args, {
+  probe = probeBrowser,
+  log = (message) => console.log(message),
+  error = (message) => console.error(message),
+} = {}) {
+  try {
+    const options = {};
+    for (let index = 0; index < args.length;) {
+      const name = args[index++];
+      if (name === "--require-browser" && !options[name]) {
+        options[name] = true;
+      } else if (["--environment", "--output"].includes(name) && args[index] && !options[name]) {
+        options[name] = args[index++];
+      } else {
+        throw new Error("invalid-options");
+      }
     }
-    options[name] = args[index + 1];
+    if (!options["--environment"] || !options["--output"]) throw new Error("missing-options");
+    const metadata = await stat(options["--environment"]);
+    if (!metadata.isFile() || metadata.size > 1024 * 1024) throw new Error("invalid-environment-file");
+    const environment = await readFile(options["--environment"]);
+    const record = JSON.parse(environment.toString("utf8"));
+    if (record.schema_version !== 1 || record.kind !== "result" || record.synthetic !== false) {
+      throw new Error("expected-measured-environment");
+    }
+    const report = await probe(createHash("sha256").update(environment).digest("hex"), {
+      requireBrowser: options["--require-browser"] === true,
+    });
+    await writeFile(options["--output"], `${JSON.stringify(report, null, 2)}\n`, { flag: "wx" });
+    log(`browser compute: ${report.status} (${report.reason})`);
+    return report.status === "failed" ? 1 : 0;
+  } catch {
+    // Never echo caller-supplied arguments, paths, JSON, or error messages.
+    error("browser compute: invalid input or output unavailable");
+    return 2;
   }
-  if (!options["--environment"] || !options["--output"]) throw new Error("missing-options");
-  const metadata = await stat(options["--environment"]);
-  if (!metadata.isFile() || metadata.size > 1024 * 1024) throw new Error("invalid-environment-file");
-  const environment = await readFile(options["--environment"]);
-  const record = JSON.parse(environment.toString("utf8"));
-  if (record.schema_version !== 1 || record.kind !== "result" || record.synthetic !== false) {
-    throw new Error("expected-measured-environment");
-  }
-  const report = await probeBrowser(createHash("sha256").update(environment).digest("hex"));
-  await writeFile(options["--output"], `${JSON.stringify(report, null, 2)}\n`, { flag: "wx" });
-  console.log(`browser compute: ${report.status} (${report.reason})`);
-  process.exitCode = report.status === "failed" ? 1 : 0;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2)).catch(() => {
-    // Never echo caller-supplied arguments, paths, JSON, or error messages.
-    console.error("browser compute: invalid input or output unavailable");
-    process.exitCode = 2;
-  });
+  process.exitCode = await main(process.argv.slice(2));
 }

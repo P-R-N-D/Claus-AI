@@ -77,10 +77,194 @@ class DeviceContractTests(unittest.TestCase):
     def check(self):
         return helpers.check(self.result, self.profile)
 
-    def assertRejected(self, code):
+    def assertRejected(self, code, path):
         findings = self.check()
-        self.assertIn(code, findings.codes(), findings.items)
+        self.assertIn((code, path), [(code, path) for _, code, path, _ in findings.errors], findings.items)
         self.assertNotIn("schema", findings.codes(), findings.items)
+
+    def extra_backends(self):
+        """Keep stages on the valid CPU so only the extra backend's guard can reject it."""
+        for add in (add_browser_wasm, add_gpu):
+            self.setUp()
+            backend = add(self.result)
+            self.assertEqual(self.check().errors, [])
+            yield backend, backend["probe"]["execution"]
+
+    def test_extra_operation_requires_log_or_artifact(self):
+        for backend, execution in self.extra_backends():
+            with self.subTest(backend=backend["id"]):
+                execution["evidence"] = ["tool:discovery"]
+                self.assertRejected("compute-evidence", "/compute/backends/1/probe/execution/evidence")
+                execution["evidence"] = ["artifact:operation.json"]
+                self.assertEqual(self.check().errors, [])
+
+    def test_extra_completed_failed_operation_requires_effective_backend(self):
+        for backend, execution in self.extra_backends():
+            with self.subTest(backend=backend["id"]):
+                execution.update(status="failed", correct=fact(False, LOG), effective=None, reason="operation failed")
+                self.assertRejected("compute-execution", "/compute/backends/1/probe/execution")
+
+    def test_extra_pass_requires_measured_correctness(self):
+        for backend, execution in self.extra_backends():
+            with self.subTest(backend=backend["id"]):
+                execution["correct"] = fact(True, provenance="declared")
+                self.assertRejected("compute-execution", "/compute/backends/1/probe/execution")
+
+    def test_extra_pass_must_execute_its_own_backend(self):
+        for backend, execution in self.extra_backends():
+            with self.subTest(backend=backend["id"]):
+                execution["effective"] = "cpu"
+                code = "accelerator-fallback" if backend["kind"] == "gpu" else "compute-execution"
+                self.assertRejected(code, "/compute/backends/1/probe/execution")
+
+    def test_extra_available_backend_requires_each_measured_device_fact(self):
+        for field in ("api_enumerated", "device_enumerated", "device_accessible"):
+            for value in (fact(False, LOG), unknown(), fact(True, provenance="declared")):
+                for backend, _ in self.extra_backends():
+                    with self.subTest(backend=backend["id"], field=field, value=value):
+                        backend["probe"][field] = value
+                        self.assertRejected("compute-availability", f"/compute/backends/1/probe/{field}")
+
+    def test_extra_effective_backend_requires_measured_availability(self):
+        for backend, _ in self.extra_backends():
+            with self.subTest(backend=backend["id"]):
+                backend["available"] = unknown("not inspected")
+                self.assertRejected("compute-availability", "/compute/backends/1/probe/execution/effective")
+
+    def test_extra_backend_requires_probe(self):
+        for backend, _ in self.extra_backends():
+            with self.subTest(backend=backend["id"]):
+                backend.pop("probe")
+                self.assertRejected("compute-probe", "/compute/backends/1/probe")
+
+    def test_extra_probe_requires_contract_marker(self):
+        for backend, _ in self.extra_backends():
+            with self.subTest(backend=backend["id"]):
+                for document in (self.result, self.profile):
+                    document["compute"].pop("probe_contract")
+                self.cpu.pop("probe")
+                self.assertRejected("compute-probe", "/compute/backends/1/probe")
+
+    def test_extra_unexecuted_status_rejects_completed_operation(self):
+        for status in ("not-run", "blocked"):
+            for backend, execution in self.extra_backends():
+                with self.subTest(backend=backend["id"], status=status):
+                    execution.update(status=status, effective=None, correct=unknown(), evidence=[], reason="not attempted")
+                    self.assertRejected("compute-execution", "/compute/backends/1/probe/execution")
+
+    def test_extra_completed_operation_requires_runtime_and_positive_pid(self):
+        changes = (("runtime", unknown()), ("runtime", fact("chromium", provenance="declared")),
+                   ("process_id", unknown()), ("process_id", fact(0, LOG)),
+                   ("process_id", fact(123, provenance="declared")))
+        for field, value in changes:
+            for backend, execution in self.extra_backends():
+                with self.subTest(backend=backend["id"], field=field, value=value):
+                    execution[field] = value
+                    self.assertRejected("compute-evidence", "/compute/backends/1/probe/execution")
+
+    def test_extra_uncompleted_operation_carries_no_effective_or_correct_result(self):
+        for field, value in (("effective", "cpu"), ("correct", fact(False, LOG))):
+            for backend, execution in self.extra_backends():
+                with self.subTest(backend=backend["id"], field=field):
+                    execution.update(status="failed", executed=False, effective=None, correct=unknown(), reason="execution error")
+                    execution[field] = value
+                    self.assertRejected("compute-execution", "/compute/backends/1/probe/execution")
+
+    def test_software_fallback_cannot_pass_cpu_probe(self):
+        self.execution["software_fallback"] = fact(True, LOG)
+        self.assertRejected("compute-execution", "/compute/backends/0/probe/execution")
+
+    def test_software_fallback_cannot_pass_cpu_or_wasm_stage_when_probe_failed_correctness(self):
+        for browser in (False, True):
+            with self.subTest(browser=browser):
+                self.setUp()
+                backend = add_browser_wasm(self.result) if browser else self.cpu
+                execution = backend["probe"]["execution"]
+                execution.update(status="failed", correct=fact(False, LOG), reason="wrong result")
+                self.profile["required_stages"] = ["detect", "install", "initialize"]
+                for name in ("execute", "correctness"):
+                    self.result["stages"][name]["compute"] = {
+                        "requested": backend["id"], "effective": backend["id"]}
+                self.result["stages"]["correctness"].update(status="failed", reason="wrong result")
+                self.result["overall"] = "failed"
+                # An operation can execute successfully and still compute an incorrect result.
+                for fallback in (fact(False, LOG), unknown("fallback not inspected")):
+                    execution["software_fallback"] = fallback
+                    self.assertEqual(self.check().errors, [])
+                execution["software_fallback"] = fact(True, LOG)
+                self.assertRejected("compute-execution", "/stages/execute/compute")
+
+    def test_wasm_pass_cannot_report_unexecuted_cuda_as_effective(self):
+        browser = add_browser_wasm(self.result)
+        gpu = add_gpu(self.result)
+        gpu["probe"]["execution"].update(status="not-run", executed=False, effective=None,
+            correct=unknown(), evidence=[], reason="discovery only")
+        browser["probe"]["execution"]["effective"] = "cuda"
+        self.assertRejected("accelerator-fallback", "/compute/backends/1/probe/execution")
+        self.result["stages"]["performance"] = copy.deepcopy(self.result["stages"]["correctness"])
+        self.result["stages"]["performance"]["compute"] = {"requested": "browser-wasm", "effective": "cuda"}
+        self.assertRejected("accelerator-fallback", "/stages/performance/compute")
+
+    def test_legacy_cpu_to_cuda_discovery_requires_execution_evidence(self):
+        gpu = add_gpu(self.result)
+        for document in (self.result, self.profile):
+            document["compute"].pop("probe_contract")
+        self.cpu.pop("probe")
+        gpu.pop("probe")
+        self.result["stages"]["execute"]["compute"] = {"requested": "cpu", "effective": "cuda"}
+        self.assertRejected("compute-execution", "/stages/execute/compute")
+        self.assertRejected("accelerator-fallback", "/stages/execute/compute")
+
+    def test_known_accelerator_apis_cannot_hide_in_cpu_or_other_kind(self):
+        for api in validator.KNOWN_BACKEND_APIS - {"cpu", "wasm"}:
+            for kind in ("cpu", "other"):
+                with self.subTest(api=api, kind=kind):
+                    self.setUp()
+                    gpu = add_gpu(self.result)
+                    gpu.update(api=api, kind=kind)
+                    self.assertRejected("backend-reference", "/compute/backends/1")
+
+    def test_flexible_accelerator_apis_allow_gpu_and_npu(self):
+        for api in ("qnn", "webnn", "coreml", "opencl", "oneapi"):
+            for kind in ("gpu", "npu"):
+                with self.subTest(api=api, kind=kind):
+                    self.setUp()
+                    add_gpu(self.result).update(api=api, kind=kind)
+                    self.assertEqual(self.check().errors, [])
+
+    def test_real_stage_and_probe_must_share_an_execution_log_or_artifact(self):
+        for common in ("tool:compute", "env:CI"):
+            with self.subTest(common=common):
+                self.result["stages"]["execute"]["evidence"] = ["log:stage.log", common]
+                self.execution["evidence"] = ["artifact:operation.json", common]
+                self.assertRejected("compute-evidence", "/stages/execute/evidence")
+        for common in (LOG, "artifact:operation.json"):
+            with self.subTest(common=common):
+                self.result["stages"]["execute"]["evidence"] = ["log:stage.log", common]
+                self.result["stages"]["correctness"]["evidence"] = [common]
+                self.execution["evidence"] = [common]
+                self.assertEqual(self.check().errors, [])
+
+    def test_legacy_cpu_and_synthetic_accelerator_records_remain_valid(self):
+        for document in (self.result, self.profile):
+            document["compute"].pop("probe_contract")
+        self.cpu.pop("probe")
+        self.assertEqual(self.check().errors, [])
+        result, profile = helpers.pair("kubernetes-arm64-cuda")
+        self.assertEqual(helpers.check(result, profile).errors, [])
+
+    def test_device_profile_required_workload_without_binding_fails_closed(self):
+        add_gpu(self.result)
+        declared = copy.deepcopy(self.profile["compute"]["backends"][0])
+        declared.update(id="cuda", kind="gpu", api="cuda")
+        self.profile["compute"]["backends"] = [declared]
+        self.assertRejected("required-stage", "/stages/execute/compute")
+        findings = helpers.check(self.profile)
+        self.assertIn(("backend-reference", "/compute/backends"),
+                      [(code, path) for _, code, path, _ in findings.errors], findings.items)
+        self.profile["required_stages"] = ["detect"]
+        # Capability-only profiles need no workload binding.
+        self.assertEqual(helpers.check(self.profile).errors, [])
 
     def test_completed_cpu_reference_contract_is_valid(self):
         self.assertEqual(self.check().errors, [])
@@ -90,7 +274,7 @@ class DeviceContractTests(unittest.TestCase):
                         fact(True, provenance="declared")):
             with self.subTest(runtime=runtime):
                 self.cpu["probe"]["runtime_installed"] = runtime
-                self.assertRejected("compute-availability")
+                self.assertRejected("compute-availability", "/compute/backends/0/probe/runtime_installed")
 
     def test_completed_failed_operation_requires_installed_runtime(self):
         self.execution.update(status="failed", correct=fact(False, LOG), reason="reference mismatch")
@@ -107,14 +291,14 @@ class DeviceContractTests(unittest.TestCase):
         browser["probe"]["execution"].update(
             status="not-run", executed=False, effective=None, correct=unknown(),
             runtime=unknown(), process_id=unknown(), evidence=[], reason="operation not attempted")
-        self.assertRejected("compute-availability")
+        self.assertRejected("compute-availability", "/compute/backends/1/probe/runtime_installed")
 
     def test_completed_operation_requires_runtime_even_when_request_unavailable(self):
         browser = add_browser_wasm(self.result)
         browser["available"] = unknown("requested runtime unavailable")
         browser["probe"]["runtime_installed"] = fact(False, LOG)
         browser["probe"]["execution"].update(effective="cpu", software_fallback=fact(True, LOG))
-        self.assertRejected("compute-availability")
+        self.assertRejected("compute-availability", "/compute/backends/1/probe/runtime_installed")
 
     def test_inferred_runtime_installation_can_support_completed_operation(self):
         self.cpu["probe"]["runtime_installed"] = fact(True, LOG, provenance="inferred")
@@ -139,7 +323,7 @@ class DeviceContractTests(unittest.TestCase):
         self.result["stages"]["performance"] = copy.deepcopy(self.result["stages"]["correctness"])
         self.result["stages"]["performance"]["compute"] = {
             "requested": "browser-wasm", "effective": "browser-wasm"}
-        self.assertRejected("required-stage")
+        self.assertRejected("required-stage", "/stages/performance/compute")
 
     def test_extra_completed_browser_operation_does_not_replace_cpu(self):
         add_browser_wasm(self.result)
@@ -181,98 +365,101 @@ class DeviceContractTests(unittest.TestCase):
     def test_device_contract_cannot_be_stripped_from_profile_result(self):
         self.result["compute"].pop("probe_contract")
         self.cpu.pop("probe")
-        self.assertRejected("profile-mismatch")
+        self.assertRejected("profile-mismatch", "/compute/probe_contract")
 
     def test_device_contract_requires_every_backend_probe(self):
         self.cpu.pop("probe")
-        self.assertRejected("compute-probe")
+        self.assertRejected("compute-probe", "/compute/backends/0/probe")
 
     def test_driver_presence_does_not_establish_device_availability(self):
         gpu = add_gpu(self.result)
         gpu["probe"]["api_enumerated"] = unknown("driver installed, API never called")
         gpu["probe"]["device_accessible"] = unknown("no device opened")
-        self.assertRejected("compute-availability")
+        self.assertRejected("compute-availability", "/compute/backends/1/probe/api_enumerated")
 
     def test_absent_device_cannot_be_reported_available_or_passed(self):
         gpu = add_gpu(self.result)
         gpu["available"] = fact(False, LOG)
         gpu["probe"]["device_enumerated"] = fact(False, LOG)
-        self.assertRejected("compute-availability")
+        self.assertRejected("compute-availability", "/compute/backends/1/probe/execution/effective")
 
     def test_gpu_detection_is_not_operation_execution(self):
         gpu = add_gpu(self.result)
         gpu["probe"]["execution"].update(executed=False, effective=None, correct=unknown())
-        self.assertRejected("compute-execution")
+        self.assertRejected("compute-execution", "/compute/backends/1/probe/execution")
 
     def test_legacy_real_gpu_pass_still_requires_probe(self):
         gpu = add_gpu(self.result)
+        for document in (self.result, self.profile):
+            document["compute"].pop("probe_contract")
+        self.cpu.pop("probe")
         gpu.pop("probe")
         self.result["stages"]["execute"]["compute"] = {"requested": "cuda", "effective": "cuda"}
-        self.assertRejected("compute-execution")
+        self.assertRejected("compute-execution", "/stages/execute/compute")
 
     def test_gpu_request_cpu_execution_uses_existing_fallback_rule(self):
         gpu = add_gpu(self.result)
         gpu["probe"]["execution"].update(effective="cpu", software_fallback=fact(True, LOG))
         self.result["stages"]["execute"]["compute"] = {"requested": "cuda", "effective": "cpu"}
-        self.assertRejected("accelerator-fallback")
+        self.assertRejected("accelerator-fallback", "/stages/execute/compute")
 
     def test_software_gpu_with_same_backend_id_is_not_hardware_pass(self):
         gpu = add_gpu(self.result)
         gpu["probe"]["execution"]["software_fallback"] = fact(True, LOG)
-        self.assertRejected("accelerator-fallback")
+        self.assertRejected("accelerator-fallback", "/compute/backends/1/probe/execution")
 
     def test_unknown_fallback_cannot_establish_hardware_execution(self):
         gpu = add_gpu(self.result)
         gpu["probe"]["execution"]["software_fallback"] = unknown("adapter type not observed")
-        self.assertRejected("accelerator-fallback")
+        self.assertRejected("accelerator-fallback", "/compute/backends/1/probe/execution")
 
     def test_failed_software_probe_cannot_support_hardware_execute_pass(self):
         gpu = add_gpu(self.result)
         gpu["probe"]["execution"].update(
             status="failed", software_fallback=fact(True, LOG), reason="software adapter used")
         self.result["stages"]["execute"]["compute"] = {"requested": "cuda", "effective": "cuda"}
-        self.assertRejected("accelerator-fallback")
+        self.assertRejected("accelerator-fallback", "/stages/execute/compute")
 
     def test_backend_id_must_match_profile(self):
         self.cpu["id"] = "other-cpu"
         self.execution["effective"] = "other-cpu"
         for name in ("execute", "correctness"):
             self.result["stages"][name]["compute"] = {"requested": "other-cpu", "effective": "other-cpu"}
-        self.assertRejected("profile-mismatch")
+        self.assertRejected("profile-mismatch", "/compute/backends")
 
     def test_actual_backend_cannot_be_omitted(self):
         self.execution["effective"] = None
-        self.assertRejected("compute-execution")
+        self.assertRejected("compute-execution", "/compute/backends/0/probe/execution")
 
     def test_stage_cannot_omit_compute_record(self):
         self.result["stages"]["execute"].pop("compute")
-        self.assertRejected("compute-execution")
+        self.assertRejected("compute-execution", "/stages/execute/compute")
 
     def test_actual_stage_backend_must_match_probe(self):
         add_gpu(self.result)
         self.result["stages"]["execute"]["compute"]["effective"] = "cuda"
-        self.assertRejected("compute-execution")
+        self.assertRejected("compute-execution", "/stages/execute/compute")
 
     def test_not_run_probe_cannot_be_promoted_to_passed_stage(self):
         self.execution.update(status="not-run", executed=False, effective=None,
                               correct=unknown(), evidence=[], reason="no operation attempted")
-        self.assertRejected("compute-execution")
+        self.assertRejected("compute-execution", "/stages/execute/compute")
 
     def test_completed_operation_requires_observed_runtime_and_process(self):
         for field in ("runtime", "process_id"):
             with self.subTest(field=field):
                 original = self.execution[field]
                 self.execution[field] = unknown("process not observed")
-                self.assertRejected("compute-evidence")
+                self.assertRejected("compute-evidence", "/compute/backends/0/probe/execution")
                 self.execution[field] = original
 
     def test_declared_correctness_is_not_a_measured_pass(self):
         self.execution["correct"] = fact(True, provenance="declared")
-        self.assertRejected("compute-execution")
+        self.assertRejected("compute-execution", "/compute/backends/0/probe/execution")
 
     def test_mismatched_cpu_result_cannot_pass_correctness(self):
         self.execution.update(status="failed", correct=fact(False, LOG), reason="reference mismatch")
-        self.assertRejected("compute-execution")
+        self.assertRejected("compute-execution", "/stages/correctness/status")
         self.result["stages"]["correctness"].update(status="failed", reason="reference mismatch")
         self.result["overall"] = "failed"
         findings = self.check()
@@ -280,11 +467,11 @@ class DeviceContractTests(unittest.TestCase):
 
     def test_stage_evidence_cannot_cite_a_different_operation(self):
         self.result["stages"]["execute"]["evidence"] = ["log:unrelated.log"]
-        self.assertRejected("compute-evidence")
+        self.assertRejected("compute-evidence", "/stages/execute/evidence")
 
     def test_discovery_tool_is_not_execution_evidence(self):
         self.execution["evidence"] = ["tool:nvidia-smi"]
-        self.assertRejected("compute-evidence")
+        self.assertRejected("compute-evidence", "/compute/backends/0/probe/execution/evidence")
 
     def test_execution_must_link_same_github_sha_workflow_job_and_attempt(self):
         changes = (
@@ -301,11 +488,11 @@ class DeviceContractTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.execution["run"] = copy.deepcopy(self.result["run"])
                 self.execution["run"][group][field]["value"] = value
-                self.assertRejected("compute-evidence")
+                self.assertRejected("compute-evidence", "/compute/backends/0/probe/execution/run")
 
     def test_missing_execution_run_is_rejected(self):
         self.execution.pop("run")
-        self.assertRejected("compute-evidence")
+        self.assertRejected("compute-evidence", "/compute/backends/0/probe/execution/run")
 
     def test_synthetic_fixture_is_not_measured_evidence(self):
         result, profile = helpers.pair("kubernetes-arm64-cuda")

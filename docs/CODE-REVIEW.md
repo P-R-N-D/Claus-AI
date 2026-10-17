@@ -164,7 +164,7 @@ A change that touches any of the following also goes through [SECURITY-REVIEW.md
 - External content handling: web pages, uploaded files, retrieved text, or tool output that reaches a model or a user.
 - Logging and audit: what is written to logs, Task records, or tool run summaries.
 - i18n locale input handling: cookies, `Accept-Language`, preference values, `<html lang>` ([I18N.md](I18N.md)).
-- CI workflows: any file under `.github/workflows/`, including its trigger events, `permissions`, secrets, `runs-on` labels, and action references, and the scripts and data a workflow runs and publishes the output of: `scripts/ci/` and `tests/compatibility/`. (Updated 2026-10-11.)
+- CI workflows: any file under `.github/workflows/`, including its trigger events, `permissions`, secrets, `runs-on` labels, and action references, and the scripts and data a workflow runs and publishes the output of: `scripts/ci/`, `tests/compatibility/`, and `frontend/scripts/probe-browser-compute*`. (Updated 2026-10-17.)
 
 The code review report states which triggers matched and whether the security review was done or is pending. Security findings use the finding format below plus the `SEC-*` IDs they map to, as [SECURITY-REVIEW.md](SECURITY-REVIEW.md) specifies.
 

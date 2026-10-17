@@ -31,7 +31,7 @@ defaults:
 
 jobs:
   cpu:
-    name: CPU reference and browser capabilities / Linux x64
+    name: CPU reference and optional browser probe / Linux x64
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -67,12 +67,13 @@ jobs:
           test "$(npm --version)" = 11.21.0
           npm ci --ignore-scripts
           # Download the paired browser as the job user. No system package installation.
-          node node_modules/@playwright/test/cli.js install chromium
+          node node_modules/@playwright/test/cli.js install chromium --no-shell
       - name: Probe browser capabilities
+        timeout-minutes: 3
         id: browser
         run: |
           node frontend/scripts/probe-browser-compute.mjs --environment "$RECORDS/environment.json" \
-            --output "$RECORDS/browser.json"
+            --output "$RECORDS/browser.json" --require-browser
       - name: Run CPU reference and attach compute evidence
         if: ${{ !cancelled() && steps.collect.outcome == 'success' }}
         run: |
